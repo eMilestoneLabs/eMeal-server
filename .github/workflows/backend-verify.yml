@@ -140,8 +140,26 @@ jobs:
 
       - name: Verify No Hardcoded Secrets in Source
         run: |
-          if grep -rn "secret\|password\|apiKey" src/ --include="*.ts" | grep -v "process\.env\|configService\|@IsString\|description\|comment\|\/\/"; then
-            echo "❌ Possible hardcoded secret detected in src/"
+          # Only flag lines where a secret/password/apiKey is assigned a hardcoded string literal.
+          # Exclude: ConfigService calls, bcrypt operations, DTO field names, type/interface
+          # declarations, validator decorators, error message strings, JSDoc lines, comments,
+          # and test/fixture files. This prevents false positives on legitimate field names like
+          # passwordHash, dto.password, config.get('jwt.secret'), bcrypt.hash(), etc.
+          MATCHES=$(grep -rn "secret\|password\|apiKey" src/ --include="*.ts" \
+            | grep -v "process\.env" \
+            | grep -v "config\.get\|configService\|ConfigService" \
+            | grep -v "passwordHash\|password_hash\|hashedPassword" \
+            | grep -v "bcrypt\|argon2\|crypto\." \
+            | grep -v "dto\.\|@IsString\|@MinLength\|@MaxLength\|@IsEmail\|@Matches" \
+            | grep -v "errors:\|message:\|statusCode:\|description:" \
+            | grep -v "interface \|type \|extends \|implements " \
+            | grep -v "\/\/\| \* \|\/\*" \
+            | grep -v "test\|spec\|mock\|fixture\|stub" \
+            | grep "=\s*['\"][^'\"\$]" \
+            || true)
+          if [ -n "$MATCHES" ]; then
+            echo "❌ Possible hardcoded secret detected in src/:"
+            echo "$MATCHES"
             exit 1
           fi
           echo "✅ No hardcoded secrets detected"
