@@ -186,6 +186,7 @@ export class DashboardRepository {
           attendanceDate: { gte: todayUtc, lt: tomorrowUtc },
         },
         _count: { status: true },
+        orderBy: { status: 'asc' },
       }),
 
       // Today's active meals (for participation tracking)

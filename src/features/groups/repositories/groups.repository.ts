@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { MemberStatus } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { GroupEntity } from '../entities/group.entity';
 
@@ -101,7 +102,7 @@ export class GroupsRepository {
       organizationId,
       isActive: true,
       members: {
-        some: { userId, status: 'active' },
+        some: { userId, status: MemberStatus.active },
       },
     };
     const skip = (opts.page - 1) * opts.limit;

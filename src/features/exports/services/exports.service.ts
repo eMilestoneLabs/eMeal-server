@@ -326,6 +326,7 @@ interface ExportHeader {
 }
 
 interface AttendanceExportRow {
+  [key: string]: string;
   date: string;
   memberName: string;
   memberEmail: string;
@@ -338,6 +339,7 @@ interface AttendanceExportRow {
 }
 
 interface EventGuestExportRow {
+  [key: string]: string;
   partyPrimaryName: string;
   guestName: string;
   type: string;

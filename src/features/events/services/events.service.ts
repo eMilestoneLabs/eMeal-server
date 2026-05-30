@@ -510,6 +510,15 @@ export class EventsService {
 
   // ── PRIVATE HELPERS ────────────────────────────────────────────────────────
 
+  private assertEventAdmin(role: string): void {
+    if (!EVENT_ADMIN_ROLES.includes(role)) {
+      throw new ForbiddenException({
+        message: 'Insufficient permissions',
+        errors: { role: 'Only event admins and org admins can perform this action' },
+      });
+    }
+  }
+
   private async assertEventOwnership(
     eventId: string,
     organizationId: string,

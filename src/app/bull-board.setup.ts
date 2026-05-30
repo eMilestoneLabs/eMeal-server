@@ -62,7 +62,7 @@ export function setupBullBoard(app: INestApplication): void {
   serverAdapter.setBasePath('/queues');
 
   createBullBoard({
-    queues,
+    queues: queues as any,
     serverAdapter,
   });
 

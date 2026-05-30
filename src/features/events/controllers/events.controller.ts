@@ -313,7 +313,7 @@ export class EventsController {
       id,
       personId,
       user.organizationId!,
-      body,
+      body.isPresent,
     );
   }
 }

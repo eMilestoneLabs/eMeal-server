@@ -10,7 +10,7 @@ import { Request, Response } from 'express';
 
 interface ErrorResponse {
   message: string;
-  errors: Record<string, string> | Record<string, string[]>;
+  errors: Record<string, string | string[]>;
   statusCode: number;
 }
 
