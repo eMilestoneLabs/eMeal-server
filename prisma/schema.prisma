@@ -1,0 +1,549 @@
+// prisma/schema.prisma
+// Smart Meal & Attendance Management SaaS — eMeal Backend
+// Contract: Frontend-locked. Do NOT rename fields without full DTO audit.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENUMS — values match Flutter enum serialization exactly
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  student
+  member
+  guest
+  messManager
+  hostelManager
+  hostelAdmin
+  organizationManager
+  eventAdmin
+  eventGuest
+}
+
+// CRITICAL: 10 exact values — verified from lib/shared/models/group_model.dart
+// DO NOT add "organization" or "eventSystem" — they do not exist in Flutter
+enum GroupType {
+  hostel
+  mess
+  cafeteria
+  pg
+  coachingInstitute
+  office
+  factory       // Note: Dart uses factory_ (reserved word) → JSON = "factory"
+  community
+  event         // Note: Flutter uses "event", old plan wrongly had "eventSystem"
+  other
+}
+
+enum AttendanceStatus {
+  pending
+  present
+  absent
+  skipped
+  onVacation
+}
+
+// NO MealType enum — meal slots are free-form slotKey VARCHAR
+// This is intentional: dynamic rendering architecture
+
+enum EventType {
+  wedding
+  corporate
+  birthday
+  festival
+  conference
+  other
+}
+
+enum AuditAction {
+  create
+  update
+  delete
+  login
+  logout
+  join
+  leave
+  block
+  unblock
+  export
+}
+
+// Phase B2 — Group membership role + status
+enum MemberRole {
+  member
+  moderator
+  groupManager
+}
+
+enum MemberStatus {
+  active
+  pending
+  blocked
+  removed
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ORGANIZATION — Multi-tenant root. Every other entity belongs to one.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  logoUrl   String?
+  planTier  String   @default("free")
+  timezone  String   @default("Asia/Kolkata") // IANA timezone, MVP default IST
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users             User[]
+  groups            Group[]
+  meals             Meal[]
+  mealSchedules     MealSchedule[]
+  attendanceRecords AttendanceRecord[]
+  events            Event[]
+  auditLogs         AuditLog[]
+
+  @@index([slug])
+  @@map("organizations")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// USER — All operational fields required by Flutter UserModel.fromJson
+// ─────────────────────────────────────────────────────────────────────────────
+
+model User {
+  id             String   @id @default(cuid())
+  organizationId String?  // null for event-only guests before org assignment
+
+  // Identity
+  name           String
+  email          String?
+  phone          String?
+  passwordHash   String?
+  role           UserRole @default(student)
+  gender         String?
+  age            Int?
+  avatarUrl      String?
+
+  // Operational fields — required by Flutter UserModel (M-08, M-09 fixes)
+  isVacationMode      Boolean @default(false)
+  isDefaultAttendance Boolean @default(false)
+  remindersEnabled    Boolean @default(true)
+  loginPreference     String? @default("email") // "email" | "mobile"
+  fcmToken            String? // Phase B7: Firebase FCM push token
+
+  isActive    Boolean   @default(true)
+  lastLoginAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  organization      Organization?      @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  groupMembers      GroupMember[]
+  refreshTokens     RefreshToken[]
+  otpRequests       OtpRequest[]
+  attendanceRecords AttendanceRecord[]
+  actedAuditLogs    AuditLog[]         @relation("ActorAuditLogs")
+
+  @@unique([organizationId, email])
+  @@unique([organizationId, phone])
+  @@index([organizationId])
+  @@index([email])
+  @@index([phone])
+  @@index([role])
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REFRESH TOKEN — Family-based rotation. Reuse = theft detection.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique  // SHA-256 hash of the token (deterministic for DB lookup)
+  family    String            // rotation family UUID — reuse in same family = theft
+  expiresAt DateTime
+  isRevoked Boolean  @default(false)
+  userAgent String?
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([family])
+  @@index([tokenHash])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OTP REQUEST — For Firebase Auth OTP flow (Phase B1 placeholder, full Phase B7)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model OtpRequest {
+  id         String   @id @default(cuid())
+  userId     String?
+  identifier String            // email or phone
+  otpHash    String            // bcrypt-hashed OTP code
+  purpose    String            // "login" | "signup" | "reset"
+  expiresAt  DateTime
+  isUsed     Boolean  @default(false)
+  attempts   Int      @default(0)
+  createdAt  DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([identifier])
+  @@index([expiresAt])
+  @@map("otp_requests")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GROUP — Represents hostel/mess/cafeteria/org/factory/etc.
+// mealConfig stored as embedded JSONB columns for direct Flutter contract mapping
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Group {
+  id             String    @id @default(cuid())
+  organizationId String
+  name           String
+  type           GroupType @default(hostel)
+  description    String?
+  adminId        String?   // The admin user who created/owns the group
+
+  // QR join — DB stores as joinToken, API serializes as "joinCode" (M-06 fix)
+  joinToken          String    @unique @default(cuid())
+  joinTokenExpiresAt DateTime?
+
+  // GroupMealConfig — exact field names as expected by Flutter GroupMealConfig.fromJson
+  // (M-07 fix: NOT mealPrefsEnabled, NOT missing vacationModeEnabled)
+  mealsEnabled         Boolean  @default(true)
+  weeklyMenuEnabled    Boolean  @default(false)
+  preferencesEnabled   Boolean  @default(false)   // serialized as "preferencesEnabled"
+  enabledPreferences   String[] @default([])       // lowercase: "veg","chicken","fish","mutton","egg","jain"
+  vacationModeEnabled  Boolean  @default(true)
+
+  maxMembers Int?
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  organization      Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  members           GroupMember[]
+  meals             Meal[]
+  attendanceRecords AttendanceRecord[]
+  mealSchedules     MealSchedule[]
+
+  @@index([organizationId])
+  @@index([joinToken])
+  @@map("groups")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GROUP MEMBER — Join table with block/unblock support
+// ─────────────────────────────────────────────────────────────────────────────
+
+model GroupMember {
+  id        String       @id @default(cuid())
+  groupId   String
+  userId    String
+  role      MemberRole   @default(member)
+  status    MemberStatus @default(active)
+  joinedAt  DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  // Audit trail — who performed the status change and when
+  blockedAt DateTime?
+  blockedBy String?   // userId of admin who blocked
+  removedAt DateTime?
+  removedBy String?   // userId of admin who removed
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, userId])
+  @@index([groupId])
+  @@index([userId])
+  @@index([status])
+  @@map("group_members")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MEAL — NO MealType enum. slotKey is free-form VARCHAR (dynamic rendering)
+// attendanceWindowOpen/Close stored flat, serialized as nested attendanceWindow
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Meal {
+  id             String  @id @default(cuid())
+  organizationId String
+  groupId        String
+
+  // slotKey is free-form: "breakfast","lunch","dinner","iftar","sehri","high-tea","midnightMeal"
+  // NEVER enum — dynamic rendering architecture requires free-form strings
+  slotKey  String
+  name     String  // internal admin-facing name (used as fallback for displayName)
+  displayName String? // student-facing label; null = fall back to name in serializer
+
+  order Int @default(0) // display ordering controlled by admin
+
+  description String?
+  menuItems   String[] @default([]) // TEXT[] of menu item names
+  imageUrl    String?               // singular imageUrl (not imageUrls[])
+
+  // Visibility flags — two separate flags (B3 contract requirement)
+  isActive          Boolean @default(true)  // serialized as "isActive" in API response — Flutter reads isActive (NOT isEnabled)
+  attendanceEnabled Boolean @default(true)  // attendance can remain when meal is hidden
+
+  // Preference system — two-level (group-level + per-meal override)
+  preferencesEnabled Boolean  @default(false)
+  enabledPreferences String[] @default([]) // empty = inherit from group mealConfig
+
+  // Attendance window — stored flat, serialized as nested { openTime, closeTime }
+  // (M-04 fix: attendanceWindow MUST always be nested in API response)
+  attendanceWindowOpen  String? // "HH:mm" local time in org timezone
+  attendanceWindowClose String? // "HH:mm" local time in org timezone
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization      Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  group             Group              @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  scheduleEntries   ScheduleEntry[]
+  attendanceRecords AttendanceRecord[]
+
+  @@index([organizationId])
+  @@index([groupId])
+  @@index([isActive])
+  @@index([order])
+  @@map("meals")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MEAL SCHEDULE — Weekly schedule (isPublished controls student visibility)
+// organizationId stored directly for efficient org-scoped queries (no join needed)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model MealSchedule {
+  id             String   @id @default(cuid())
+  organizationId String   // direct org column for isolation — avoids extra join
+  groupId        String
+  weekStart      DateTime // Monday of the week (UTC midnight). Serialized as YYYY-MM-DD date string.
+  isPublished    Boolean  @default(false)
+  publishedAt    DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  group        Group           @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  entries      ScheduleEntry[]
+
+  @@unique([groupId, weekStart])
+  @@index([organizationId])
+  @@index([groupId])
+  @@index([weekStart])
+  @@map("meal_schedules")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SCHEDULE ENTRY — Per-day meal assignment with optional timing overrides
+// day/slotKey in API response derived from dayOfWeek Int + joined Meal.slotKey
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ScheduleEntry {
+  id         String   @id @default(cuid())
+  scheduleId String
+  mealId     String
+  dayOfWeek  Int      // 0=Monday ... 6=Sunday (serialized to "monday"..."sunday")
+  date       DateTime // specific date (UTC midnight)
+  openTime   String?  // per-day override (null = use meal template attendanceWindowOpen)
+  closeTime  String?  // per-day override (null = use meal template attendanceWindowClose)
+  mealName   String?  // what's being served on this day (e.g. "Poha", "Dal Rice")
+  notes      String?  // optional notes shown to students (e.g. "Extra fruits today")
+
+  schedule MealSchedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  meal     Meal         @relation(fields: [mealId], references: [id], onDelete: Cascade)
+
+  @@unique([scheduleId, mealId, date])
+  @@index([scheduleId])
+  @@index([date])
+  @@map("schedule_entries")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ATTENDANCE RECORD — Idempotent via unique(userId, mealId, attendanceDate)
+// CRITICAL: @@unique([userId, mealId, attendanceDate]) is NON-NEGOTIABLE
+// status default = present (students only mark when changing from default)
+// markedBy replaces markedByAdmin + adminId (cleaner nullable userId)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model AttendanceRecord {
+  id             String           @id @default(cuid())
+  organizationId String
+  groupId        String
+  userId         String
+  mealId         String
+
+  attendanceDate DateTime         // UTC midnight of the meal date (renamed from "date")
+  status         AttendanceStatus @default(present) // default=present (was pending — B4 fix)
+
+  preference String?   // "veg"|"chicken"|"fish"|"mutton"|"egg"|"jain" (exact lowercase)
+  note       String?   // optional note from student or admin
+
+  markedAt DateTime?
+  markedBy String?    // userId of admin who performed manual override (nullable)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  group        Group        @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  meal         Meal         @relation(fields: [mealId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, mealId, attendanceDate])    // idempotency — upsert key (NON-NEGOTIABLE)
+  @@index([organizationId])
+  @@index([groupId])
+  @@index([mealId])
+  @@index([attendanceDate])
+  @@index([status])
+  @@index([groupId, attendanceDate])
+  @@index([userId, attendanceDate])
+  @@map("attendance_records")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EVENT — Simplified event-focused system
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Event {
+  id             String    @id @default(cuid())
+  organizationId String
+  adminId        String    // user who created the event
+  name           String
+  type           EventType @default(other)
+  eventDate      DateTime
+  expectedGuestCount Int   @default(0)
+
+  // QR join — serialized as "joinCode" in API (same as groups pattern)
+  joinToken    String    @unique @default(cuid())
+  autoDeleteAfter7Days Boolean @default(false)
+  autoDeleteAt DateTime? // eventDate + 7 days if autoDeleteAfter7Days=true
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  mealTypes    EventMealType[]
+  guestParties EventGuestParty[]
+
+  @@index([organizationId])
+  @@index([joinToken])
+  @@index([autoDeleteAt])
+  @@map("events")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EVENT MEAL TYPE — M-14 fix: "title" not "name", emoji, colorValue INTEGER
+// ─────────────────────────────────────────────────────────────────────────────
+
+model EventMealType {
+  id         String  @id @default(cuid())
+  eventId    String
+  title      String  // M-14 fix: "title" NOT "name"
+  emoji      String? // M-14 fix: emoji string
+  colorValue Int?    // M-14 fix: ARGB32 integer (Flutter Color.toARGB32())
+  isVeg      Boolean @default(true)
+  createdAt  DateTime @default(now()) // B5: required for ordering and entity contract
+
+  event   Event         @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  persons EventPerson[]
+
+  @@index([eventId])
+  @@map("event_meal_types")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EVENT GUEST PARTY — M-16 fix: primaryName, adultsCount, childrenCount, joinedAt
+// ─────────────────────────────────────────────────────────────────────────────
+
+model EventGuestParty {
+  id           String   @id @default(cuid())
+  eventId      String
+  primaryName  String   // M-16 fix: persons[0].displayName
+  adultsCount  Int      @default(1)  // M-16 fix: "adultsCount" NOT "adultCount"
+  childrenCount Int     @default(0)  // M-16 fix: "childrenCount" NOT "childCount"
+  joinedAt     DateTime @default(now()) // M-16 fix: was missing
+
+  event   Event         @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  persons EventPerson[]
+
+  @@index([eventId])
+  @@map("event_guest_parties")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EVENT PERSON — M-17 fix: "displayName" not "name", isPresent, selectedMealTypeId
+// ─────────────────────────────────────────────────────────────────────────────
+
+model EventPerson {
+  id      String @id @default(cuid())
+  partyId String
+  mealTypeId String?
+
+  displayName  String  // M-17 fix: "displayName" NOT "name"
+  isAdult      Boolean @default(true)
+  isPrimary    Boolean @default(false)
+  isNameEdited Boolean @default(false)
+  isPresent    Boolean @default(false) // M-17 fix: was missing
+
+  selectedMealTypeId String? // M-17 fix: "selectedMealTypeId" NOT "mealTypeId"
+  mealPreference     String? // M-17 fix: "mealPreference" NOT "preference"
+
+  createdAt DateTime @default(now()) // B5: required for ordering and entity contract
+
+  party    EventGuestParty @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  mealType EventMealType?  @relation(fields: [mealTypeId], references: [id], onDelete: SetNull)
+
+  @@index([partyId])
+  @@map("event_persons")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AUDIT LOG — Tracks all critical state changes across the platform
+// ─────────────────────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id             String      @id @default(cuid())
+  organizationId String?
+  actorId        String?     // User who performed the action
+  targetId       String?     // Affected entity ID — can be User/Group/Meal/Event/etc.
+  targetType     String      // "User" | "Group" | "Meal" | "Attendance" | "Event"
+  action         AuditAction
+  metadata       Json?       // Additional context (before/after snapshot)
+  requestId      String?
+  ipAddress      String?
+  createdAt      DateTime    @default(now())
+
+  // NOTE: targetId is intentionally NOT a FK — it can reference any entity type
+  // (User, Group, Meal, Attendance, Event). A FK to users.id would cause violations
+  // whenever targetType is not "User".
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  actor        User?         @relation("ActorAuditLogs", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([actorId])
+  @@index([targetId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}

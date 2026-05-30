@@ -1,0 +1,158 @@
+/**
+ * AttendanceSerializer — Frontend contract serializer for B4.
+ *
+ * CONTRACT (from Flutter AttendanceModel.fromJson — LOCKED):
+ *   - date: YYYY-MM-DD string (NOT full ISO DateTime) — Flutter reads json['date']
+ *   - mealName: JOIN from meal.name — always flat field at root (M-10)
+ *   - organizationId: included in full response
+ *   - status: raw string ("present" | "absent" | "skipped" | "onVacation")
+ *   - markedAt: full ISO string or null
+ *   - note: null allowed (M-10)
+ *   - preference: null allowed
+ *
+ * AttendanceSummary CONTRACT:
+ *   - presentDays, absentDays, skippedDays (NOT presentCount/absentCount)
+ *   - Flutter computes rate — backend never returns rate/percentage
+ */
+
+import {
+  AttendanceEntity,
+  AttendanceSummaryEntity,
+  MealAttendanceSummaryEntity,
+} from '../entities/attendance.entity';
+
+// ─── Helpers ───────────────────────────────────────────────────────────────
+
+/** Converts a Date to YYYY-MM-DD using UTC components. No library needed. */
+function toDateString(date: Date): string {
+  const y = date.getUTCFullYear();
+  const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(date.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+// ─── AttendanceSerializer ──────────────────────────────────────────────────
+
+export class AttendanceSerializer {
+  /**
+   * Serialize a single AttendanceEntity to Flutter-safe JSON.
+   * Shape mirrors Flutter AttendanceModel.fromJson exactly.
+   */
+  static toResponse(record: AttendanceEntity): Record<string, unknown> {
+    // mealName: flat field — JOIN from meal (M-10 fix)
+    const mealName = record.meal
+      ? (record.meal.displayName ?? record.meal.name ?? '')
+      : '';
+
+    return {
+      id: record.id,
+      groupId: record.groupId,
+      userId: record.userId,
+      mealId: record.mealId,
+      organizationId: record.organizationId,
+
+      // M-10 fix: Flutter reads json['date'] — YYYY-MM-DD string
+      date: toDateString(record.attendanceDate),
+
+      status: record.status,
+      preference: record.preference ?? null,
+      note: record.note ?? null,
+      markedAt: record.markedAt ? record.markedAt.toISOString() : null,
+      markedBy: record.markedBy ?? null,
+
+      // M-10 fix: mealName always present as flat field
+      mealName,
+
+      createdAt: record.createdAt.toISOString(),
+      updatedAt: record.updatedAt.toISOString(),
+    };
+  }
+
+  /**
+   * Serialize array of records.
+   */
+  static toList(records: AttendanceEntity[]): Record<string, unknown>[] {
+    return records.map((r) => AttendanceSerializer.toResponse(r));
+  }
+
+  /**
+   * Serialize the minimal response returned when marking attendance.
+   * Keeps payload small for Flutter's POST /attendance response.
+   */
+  static toMarkResponse(record: AttendanceEntity): Record<string, unknown> {
+    return {
+      id: record.id,
+      mealId: record.mealId,
+      // Flutter reads json['date']
+      date: toDateString(record.attendanceDate),
+      status: record.status,
+      preference: record.preference ?? null,
+      markedAt: record.markedAt ? record.markedAt.toISOString() : null,
+    };
+  }
+}
+
+// ─── AttendanceSummarySerializer ───────────────────────────────────────────
+
+export class AttendanceSummarySerializer {
+  /**
+   * Serialize a user's attendance summary.
+   *
+   * CRITICAL: Flutter reads:
+   *   json['presentDays'] (NOT presentCount)
+   *   json['absentDays']  (NOT absentCount)
+   *   json['skippedDays'] (NOT skippedCount)
+   * No rates/percentages — Flutter computes those from raw counts.
+   */
+  static toResponse(summary: AttendanceSummaryEntity): Record<string, unknown> {
+    const base: Record<string, unknown> = {
+      userId: summary.userId,
+      groupId: summary.groupId,
+      fromDate: summary.fromDate,
+      toDate: summary.toDate,
+      totalDays: summary.totalDays,
+      // Flutter reads presentDays / absentDays / skippedDays
+      presentDays: summary.presentCount,
+      absentDays: summary.absentCount,
+      skippedDays: summary.skippedCount,
+    };
+
+    // Include meal breakdown only when requested (admin reports)
+    if (summary.mealBreakdown) {
+      base.mealBreakdown = Object.values(summary.mealBreakdown);
+    }
+
+    return base;
+  }
+}
+
+// ─── MealAttendanceSummarySerializer ───────────────────────────────────────
+
+export class MealAttendanceSummarySerializer {
+  /**
+   * Serialize a meal's attendance summary for admin dashboard.
+   */
+  static toResponse(
+    summary: MealAttendanceSummaryEntity,
+  ): Record<string, unknown> {
+    return {
+      mealId: summary.mealId,
+      slotKey: summary.slotKey,
+      mealName: summary.displayName,
+      date: summary.attendanceDate,
+      totalMembers: summary.totalMembers,
+      presentDays: summary.presentCount,
+      absentDays: summary.absentCount,
+      skippedDays: summary.skippedCount,
+      preferenceBreakdown: summary.preferenceBreakdown ?? {},
+    };
+  }
+
+  static toList(
+    summaries: MealAttendanceSummaryEntity[],
+  ): Record<string, unknown>[] {
+    return summaries.map((s) =>
+      MealAttendanceSummarySerializer.toResponse(s),
+    );
+  }
+}

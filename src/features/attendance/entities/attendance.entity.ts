@@ -1,0 +1,107 @@
+/**
+ * AttendanceEntity — Domain entity. Decoupled from Prisma model.
+ *
+ * Key B4 invariants:
+ *   - attendanceDate: DateTime stored as UTC midnight
+ *   - status: present | absent | skipped | onVacation (default = present)
+ *   - markedBy: nullable userId (replaces markedByAdmin + adminId)
+ *   - meal: optional joined relation (for serialization only)
+ */
+export class AttendanceEntity {
+  id: string;
+  organizationId: string;
+  groupId: string;
+  userId: string;
+  mealId: string;
+
+  attendanceDate: Date;
+  status: string; // AttendanceStatus enum value as string
+
+  preference: string | null;
+  note: string | null;
+  markedAt: Date | null;
+  markedBy: string | null; // userId of admin who performed manual override
+
+  createdAt: Date;
+  updatedAt: Date;
+
+  // Optional joined relation — loaded by serializer when present
+  meal?: {
+    slotKey: string;
+    displayName: string | null;
+    name: string;
+    attendanceWindowOpen: string | null;
+    attendanceWindowClose: string | null;
+  } | null;
+
+  // Optional joined user — for admin-facing responses
+  user?: {
+    id: string;
+    name: string;
+    email: string | null;
+    phone: string | null;
+    avatarUrl: string | null;
+  } | null;
+
+  constructor(data: Partial<AttendanceEntity>) {
+    Object.assign(this, data);
+  }
+}
+
+/**
+ * AttendanceSummaryEntity — Aggregated counts for a user/group/meal.
+ * CRITICAL: No rates or percentages — Flutter computes those from raw counts.
+ */
+export class AttendanceSummaryEntity {
+  userId: string;
+  groupId: string;
+  organizationId: string;
+
+  // Date range
+  fromDate: string; // YYYY-MM-DD
+  toDate: string;   // YYYY-MM-DD
+
+  // Raw counts only — Flutter computes percentages
+  totalDays: number;
+  presentCount: number;
+  absentCount: number;
+  skippedCount: number;
+  onVacationCount: number;
+
+  // Optional per-meal breakdown (key = mealId)
+  mealBreakdown?: Record<string, {
+    mealId: string;
+    slotKey: string;
+    displayName: string;
+    presentCount: number;
+    absentCount: number;
+    skippedCount: number;
+  }>;
+
+  constructor(data: Partial<AttendanceSummaryEntity>) {
+    Object.assign(this, data);
+  }
+}
+
+/**
+ * MealAttendanceSummaryEntity — Per-meal aggregate for admin dashboard.
+ * Shows how many students chose each status/preference for a meal on a date.
+ */
+export class MealAttendanceSummaryEntity {
+  mealId: string;
+  slotKey: string;
+  displayName: string;
+  attendanceDate: string; // YYYY-MM-DD
+
+  totalMembers: number;
+  presentCount: number;
+  absentCount: number;
+  skippedCount: number;
+
+  // Preference breakdown (only populated when meal has preferencesEnabled)
+  preferenceBreakdown: Record<string, number>; // { "veg": 5, "chicken": 3, ... }
+
+  constructor(data: Partial<MealAttendanceSummaryEntity>) {
+    Object.assign(this, data);
+  }
+}

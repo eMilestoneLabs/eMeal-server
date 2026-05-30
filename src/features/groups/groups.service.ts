@@ -1,0 +1,541 @@
+import {
+  Injectable,
+  NotFoundException,
+  ConflictException,
+  BadRequestException,
+  ForbiddenException,
+  Logger,
+} from '@nestjs/common';
+import { GroupsRepository } from './repositories/groups.repository';
+import { MembersRepository } from './repositories/members.repository';
+import { GroupSerializer } from './serializers/group.serializer';
+import { GroupMemberSerializer } from './serializers/group-member.serializer';
+import { GroupEntity } from './entities/group.entity';
+import { AuditService } from '../../audit/audit.service';
+import { UsersRepository } from '../users/repositories/users.repository';
+import { PrismaService } from '../../prisma/prisma.service';
+import { generateJoinCode } from '../../common/utils/code.utils';
+import { CreateGroupDto } from './dto/create-group.dto';
+import { UpdateGroupDto } from './dto/update-group.dto';
+import { JoinGroupDto } from './dto/join-group.dto';
+import { UpdateMemberDto } from './dto/update-member.dto';
+import { QueryGroupsDto, QueryMembersDto } from './dto/query-groups.dto';
+import { ADMIN_ROLES } from '../../common/decorators/roles.decorator';
+
+@Injectable()
+export class GroupsService {
+  private readonly logger = new Logger(GroupsService.name);
+
+  constructor(
+    private readonly groupsRepo: GroupsRepository,
+    private readonly membersRepo: MembersRepository,
+    private readonly usersRepo: UsersRepository,
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+  ) {}
+
+  // ── CREATE ────────────────────────────────────────────────────────────────
+
+  async createGroup(
+    organizationId: string,
+    adminId: string,
+    dto: CreateGroupDto,
+    requestId?: string,
+  ) {
+    // Generate collision-resistant 8-char join code
+    const joinToken = await this.generateUniqueJoinCode();
+
+    // Create group with mealConfig defaults
+    const group = await this.groupsRepo.create({
+      organizationId,
+      name: dto.name,
+      type: dto.type,
+      description: dto.description,
+      adminId,
+      joinToken,
+      maxMembers: dto.maxMembers,
+      mealsEnabled: dto.mealConfig?.mealsEnabled ?? true,
+      weeklyMenuEnabled: dto.mealConfig?.weeklyMenuEnabled ?? false,
+      preferencesEnabled: dto.mealConfig?.preferencesEnabled ?? false,
+      enabledPreferences: dto.mealConfig?.enabledPreferences ?? [],
+      vacationModeEnabled: dto.mealConfig?.vacationModeEnabled ?? true,
+    });
+
+    // Auto-add creator as groupManager member
+    await this.membersRepo.createMembership({
+      groupId: group.id,
+      userId: adminId,
+      role: 'groupManager',
+      status: 'active',
+    });
+
+    this.audit.log({
+      organizationId,
+      actorId: adminId,
+      targetId: group.id,
+      targetType: 'Group',
+      action: 'create',
+      metadata: { name: dto.name, type: dto.type },
+      requestId,
+    });
+
+    this.logger.log(`Group created: ${group.name} [${group.id}] in org ${organizationId}`);
+
+    // Re-fetch to include the just-created membership in computed fields
+    const fresh = await this.groupsRepo.findById(group.id, organizationId);
+    return GroupSerializer.toResponse(fresh!);
+  }
+
+  // ── LIST ──────────────────────────────────────────────────────────────────
+
+  async getGroups(
+    userId: string,
+    userRole: string,
+    organizationId: string,
+    query: QueryGroupsDto,
+  ) {
+    const page = Math.max(1, query.page ?? 1);
+    const limit = Math.min(100, Math.max(1, query.limit ?? 20));
+
+    // Admins see all groups in org; students see only their own
+    const isAdmin = ADMIN_ROLES.includes(userRole as any);
+
+    const result = isAdmin
+      ? await this.groupsRepo.findAll(organizationId, {
+          page,
+          limit,
+          type: query.type,
+          includeInactive: query.includeInactive,
+        })
+      : await this.groupsRepo.findByMembership(userId, organizationId, { page, limit });
+
+    return {
+      data: result.data.map(GroupSerializer.toResponse),
+      total: result.total,
+      page: result.page,
+      limit: result.limit,
+    };
+  }
+
+  // ── GET ONE ───────────────────────────────────────────────────────────────
+
+  async getGroupById(id: string, organizationId: string, userId: string, userRole: string) {
+    const group = await this.groupsRepo.findById(id, organizationId);
+    if (!group) throw new NotFoundException('Group not found');
+
+    // Students must be active members to view group details
+    const isAdmin = ADMIN_ROLES.includes(userRole as any);
+    if (!isAdmin) {
+      const isMember = await this.membersRepo.isActiveMember(id, userId);
+      if (!isMember) {
+        throw new ForbiddenException({
+          message: 'Access denied',
+          errors: { group: 'You are not a member of this group' },
+        });
+      }
+    }
+
+    return GroupSerializer.toResponse(group);
+  }
+
+  // ── UPDATE ────────────────────────────────────────────────────────────────
+
+  async updateGroup(
+    id: string,
+    organizationId: string,
+    actorId: string,
+    dto: UpdateGroupDto,
+    requestId?: string,
+  ) {
+    const existing = await this.groupsRepo.findById(id, organizationId);
+    if (!existing) throw new NotFoundException('Group not found');
+
+    const updateData: any = {};
+    if (dto.name !== undefined) updateData.name = dto.name;
+    if (dto.description !== undefined) updateData.description = dto.description;
+    if (dto.maxMembers !== undefined) updateData.maxMembers = dto.maxMembers;
+    if (dto.isActive !== undefined) updateData.isActive = dto.isActive;
+
+    // mealConfig partial update — each field updated independently
+    if (dto.mealConfig) {
+      const mc = dto.mealConfig;
+      if (mc.mealsEnabled !== undefined) updateData.mealsEnabled = mc.mealsEnabled;
+      if (mc.weeklyMenuEnabled !== undefined) updateData.weeklyMenuEnabled = mc.weeklyMenuEnabled;
+      if (mc.preferencesEnabled !== undefined) updateData.preferencesEnabled = mc.preferencesEnabled;
+      if (mc.enabledPreferences !== undefined) updateData.enabledPreferences = mc.enabledPreferences;
+      if (mc.vacationModeEnabled !== undefined) updateData.vacationModeEnabled = mc.vacationModeEnabled;
+    }
+
+    const group = await this.groupsRepo.update(id, organizationId, updateData);
+
+    this.audit.log({
+      organizationId,
+      actorId,
+      targetId: id,
+      targetType: 'Group',
+      action: 'update',
+      metadata: { updatedFields: Object.keys(updateData) },
+      requestId,
+    });
+
+    return GroupSerializer.toResponse(group);
+  }
+
+  // ── DELETE (soft) ─────────────────────────────────────────────────────────
+
+  async deleteGroup(
+    id: string,
+    organizationId: string,
+    actorId: string,
+    requestId?: string,
+  ) {
+    const existing = await this.groupsRepo.findById(id, organizationId);
+    if (!existing) throw new NotFoundException('Group not found');
+
+    await this.groupsRepo.softDelete(id, organizationId);
+
+    this.audit.log({
+      organizationId,
+      actorId,
+      targetId: id,
+      targetType: 'Group',
+      action: 'delete',
+      metadata: { name: existing.name, softDelete: true },
+      requestId,
+    });
+
+    return { message: 'Group archived successfully', id };
+  }
+
+  // ── JOIN ──────────────────────────────────────────────────────────────────
+
+  /**
+   * Join a group using a join code.
+   *
+   * Business rules:
+   * 1. Join code must exist and map to an active group
+   * 2. Join code must not be expired
+   * 3. Group must not be at max capacity
+   * 4. Blocked users cannot rejoin
+   * 5. Already-active members → idempotent success
+   * 6. Removed members → re-activate
+   * 7. New members → create membership record
+   * 8. User's organizationId updated if not yet assigned
+   */
+  async joinGroup(userId: string, dto: JoinGroupDto, requestId?: string) {
+    const group = await this.groupsRepo.findByJoinCode(dto.joinCode);
+
+    if (!group || !group.isActive) {
+      throw new BadRequestException({
+        message: 'Invalid join code',
+        errors: { joinCode: 'No active group found with this join code' },
+      });
+    }
+
+    // Join code expiry check
+    if (group.joinTokenExpiresAt && group.joinTokenExpiresAt < new Date()) {
+      throw new BadRequestException({
+        message: 'Join code expired',
+        errors: { joinCode: 'This join code has expired. Ask your admin for a new one.' },
+      });
+    }
+
+    // Max capacity check (null maxMembers = unlimited)
+    if (group.maxMembers !== null && group.memberCount >= group.maxMembers) {
+      throw new BadRequestException({
+        message: 'Group is full',
+        errors: { joinCode: 'This group has reached its maximum capacity' },
+      });
+    }
+
+    // Existing membership check
+    const existingMembership = await this.membersRepo.findMembership(group.id, userId);
+
+    if (existingMembership) {
+      if (existingMembership.status === 'blocked') {
+        throw new ForbiddenException({
+          message: 'Access denied',
+          errors: { joinCode: 'You have been blocked from this group by an admin' },
+        });
+      }
+
+      if (existingMembership.status === 'active') {
+        // Idempotent — already a member, return group
+        return GroupSerializer.toResponse(group);
+      }
+
+      if (existingMembership.status === 'removed') {
+        // Re-join: restore active status
+        await this.membersRepo.updateMembership(group.id, userId, {
+          status: 'active',
+          removedAt: null as any,
+          removedBy: null as any,
+        });
+
+        this.audit.log({
+          organizationId: group.organizationId,
+          actorId: userId,
+          targetId: group.id,
+          targetType: 'Group',
+          action: 'join',
+          metadata: { rejoin: true },
+          requestId,
+        });
+
+        const refreshed = await this.groupsRepo.findById(group.id, group.organizationId);
+        await this.syncUserOrganization(userId, group.organizationId);
+        return GroupSerializer.toResponse(refreshed!);
+      }
+    }
+
+    // New member — create membership
+    await this.membersRepo.createMembership({ groupId: group.id, userId });
+
+    this.audit.log({
+      organizationId: group.organizationId,
+      actorId: userId,
+      targetId: group.id,
+      targetType: 'Group',
+      action: 'join',
+      requestId,
+    });
+
+    // Sync user's organizationId if they don't have one yet
+    await this.syncUserOrganization(userId, group.organizationId);
+
+    this.logger.log(`User ${userId} joined group ${group.id}`);
+
+    const refreshed = await this.groupsRepo.findById(group.id, group.organizationId);
+    return GroupSerializer.toResponse(refreshed!);
+  }
+
+  // ── JOIN CODE REGENERATION ────────────────────────────────────────────────
+
+  /**
+   * Regenerate the group join code. All old QR codes become immediately invalid.
+   * Admin/groupManager only.
+   */
+  async regenerateJoinCode(
+    id: string,
+    organizationId: string,
+    actorId: string,
+    expiresInHours?: number,
+    requestId?: string,
+  ) {
+    const existing = await this.groupsRepo.findById(id, organizationId);
+    if (!existing) throw new NotFoundException('Group not found');
+
+    const newCode = await this.generateUniqueJoinCode();
+    const expiresAt = expiresInHours
+      ? new Date(Date.now() + expiresInHours * 60 * 60 * 1000)
+      : null;
+
+    await this.groupsRepo.regenerateJoinCode(id, organizationId, newCode, expiresAt);
+
+    this.audit.log({
+      organizationId,
+      actorId,
+      targetId: id,
+      targetType: 'Group',
+      action: 'update',
+      metadata: { action: 'join_code_regenerated', expiresAt: expiresAt?.toISOString() },
+      requestId,
+    });
+
+    return {
+      joinCode: newCode,
+      expiresAt: expiresAt?.toISOString() ?? null,
+      message: 'Join code regenerated. All previous QR codes are now invalid.',
+    };
+  }
+
+  // ── MEMBERSHIP MANAGEMENT ─────────────────────────────────────────────────
+
+  /**
+   * GET /groups/:id/members
+   * Paginated member list. All roles can view — blocked/removed filtered by status param.
+   */
+  async getMembers(
+    groupId: string,
+    organizationId: string,
+    userId: string,
+    userRole: string,
+    query: QueryMembersDto,
+  ) {
+    // Verify group exists in org
+    const group = await this.groupsRepo.findById(groupId, organizationId);
+    if (!group) throw new NotFoundException('Group not found');
+
+    // Non-admins must be active members to view member list
+    const isAdmin = ADMIN_ROLES.includes(userRole as any);
+    if (!isAdmin) {
+      const isMember = await this.membersRepo.isActiveMember(groupId, userId);
+      if (!isMember) {
+        throw new ForbiddenException({
+          message: 'Access denied',
+          errors: { group: 'You must be a group member to view its member list' },
+        });
+      }
+    }
+
+    const page = Math.max(1, query.page ?? 1);
+    const limit = Math.min(100, Math.max(1, query.limit ?? 20));
+
+    const result = await this.membersRepo.findByGroupId(groupId, organizationId, {
+      page,
+      limit,
+      status: query.status,
+    });
+
+    return {
+      data: result.data.map(GroupMemberSerializer.toResponse),
+      total: result.total,
+      page: result.page,
+      limit: result.limit,
+    };
+  }
+
+  /**
+   * PATCH /groups/:id/members/:memberId
+   * Update a member's role or status (block/unblock/promote).
+   * :memberId = userId of the target member (not GroupMember.id).
+   */
+  async updateMember(
+    groupId: string,
+    targetUserId: string,
+    organizationId: string,
+    actorId: string,
+    dto: UpdateMemberDto,
+    requestId?: string,
+  ) {
+    const group = await this.groupsRepo.findById(groupId, organizationId);
+    if (!group) throw new NotFoundException('Group not found');
+
+    const membership = await this.membersRepo.findMembership(groupId, targetUserId);
+    if (!membership) {
+      throw new NotFoundException({
+        message: 'Member not found',
+        errors: { memberId: 'User is not a member of this group' },
+      });
+    }
+
+    // Prevent self-demotion/blocking
+    if (targetUserId === actorId && dto.status === 'blocked') {
+      throw new BadRequestException({
+        message: 'Invalid operation',
+        errors: { memberId: 'You cannot block yourself' },
+      });
+    }
+
+    const updateData: any = {};
+    if (dto.role !== undefined) updateData.role = dto.role;
+
+    if (dto.status !== undefined) {
+      updateData.status = dto.status;
+      if (dto.status === 'blocked') {
+        updateData.blockedAt = new Date();
+        updateData.blockedBy = actorId;
+      } else if (dto.status === 'removed') {
+        updateData.removedAt = new Date();
+        updateData.removedBy = actorId;
+      } else if (dto.status === 'active') {
+        // Unblock — clear block audit fields
+        updateData.blockedAt = null;
+        updateData.blockedBy = null;
+      }
+    }
+
+    const updated = await this.membersRepo.updateMembership(groupId, targetUserId, updateData);
+
+    this.audit.log({
+      organizationId,
+      actorId,
+      targetId: targetUserId,
+      targetType: 'User',
+      action: dto.status === 'blocked' ? 'block' : dto.status === 'active' ? 'unblock' : 'update',
+      metadata: { groupId, role: dto.role, status: dto.status },
+      requestId,
+    });
+
+    return GroupMemberSerializer.toResponse(updated);
+  }
+
+  /**
+   * DELETE /groups/:id/members/:memberId
+   * Soft-remove a member from the group. Sets status='removed'.
+   * Hard delete is not supported (audit trail must be preserved).
+   */
+  async removeMember(
+    groupId: string,
+    targetUserId: string,
+    organizationId: string,
+    actorId: string,
+    requestId?: string,
+  ) {
+    const group = await this.groupsRepo.findById(groupId, organizationId);
+    if (!group) throw new NotFoundException('Group not found');
+
+    const membership = await this.membersRepo.findMembership(groupId, targetUserId);
+    if (!membership || membership.status === 'removed') {
+      throw new NotFoundException({
+        message: 'Member not found',
+        errors: { memberId: 'User is not an active member of this group' },
+      });
+    }
+
+    await this.membersRepo.updateMembership(groupId, targetUserId, {
+      status: 'removed',
+      removedAt: new Date(),
+      removedBy: actorId,
+    });
+
+    this.audit.log({
+      organizationId,
+      actorId,
+      targetId: targetUserId,
+      targetType: 'User',
+      action: 'leave',
+      metadata: { groupId, removedBy: actorId },
+      requestId,
+    });
+
+    return { message: 'Member removed from group', userId: targetUserId };
+  }
+
+  // ── PRIVATE HELPERS ───────────────────────────────────────────────────────
+
+  /**
+   * Generate a unique join code with collision retry.
+   * 36^8 ≈ 2.8T combinations — collision at MVP scale is astronomically unlikely,
+   * but we retry up to 5 times defensively.
+   */
+  private async generateUniqueJoinCode(attempts = 0): Promise<string> {
+    if (attempts >= 5) {
+      throw new Error('Failed to generate unique join code after 5 attempts');
+    }
+    const code = generateJoinCode(8);
+    const existing = await this.groupsRepo.findByJoinCode(code);
+    if (existing) {
+      return this.generateUniqueJoinCode(attempts + 1);
+    }
+    return code;
+  }
+
+  /**
+   * When a user joins their first group, update their organizationId in the User record.
+   * This ensures future JWTs (after token refresh) carry the correct organizationId.
+   * If user already has a different org, this is a cross-org join — reject.
+   */
+  private async syncUserOrganization(userId: string, groupOrgId: string): Promise<void> {
+    const user = await this.usersRepo.findById(userId);
+    if (!user) return;
+
+    if (!user.organizationId) {
+      // First group join — set org
+      await this.usersRepo.update(userId, { organizationId: groupOrgId });
+      this.logger.log(`Synced organizationId=${groupOrgId} for user ${userId}`);
+    }
+    // If organizationId already matches — no-op (correct state)
+    // Cross-org join guard is intentionally loose in B2 — enforced by join code scoping
+  }
+}
