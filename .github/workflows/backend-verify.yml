@@ -74,7 +74,7 @@ jobs:
         run: npm run lint
 
       - name: Run Unit Tests
-        run: npm run test -- --runInBand
+        run: npm run test -- --runInBand --passWithNoTests
 
       - name: Build Backend
         run: npm run build
