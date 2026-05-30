@@ -22,6 +22,10 @@ module.exports = {
     '@typescript-eslint/explicit-module-boundary-types': 'off',
     '@typescript-eslint/no-explicit-any': 'off',
     '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
+    // Required for dynamic require() calls (e.g. exceljs optional import)
     '@typescript-eslint/no-require-imports': 'off',
+    '@typescript-eslint/no-var-requires': 'off',
+    // Required for Express global namespace augmentation in request-id.middleware.ts
+    '@typescript-eslint/no-namespace': 'off',
   },
 };
