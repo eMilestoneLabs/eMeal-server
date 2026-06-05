@@ -1,4 +1,5 @@
 {
+  "setupFiles": ["reflect-metadata"],
   "moduleFileExtensions": ["js", "json", "ts"],
   "rootDir": ".",
   "testEnvironment": "node",

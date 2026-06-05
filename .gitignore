@@ -28,3 +28,6 @@ B4_VERIFY.sh
 B5_VERIFY.sh
 B6_VERIFY.sh
 B7_VERIFY.sh
+
+# CI-generated (export artifacts, coverage reports)
+artifacts/

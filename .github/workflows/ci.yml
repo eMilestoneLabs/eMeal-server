@@ -1,18 +1,23 @@
 name: eMeal Server Workflow
 
-# Production-grade pipeline. On every push / PR it runs the full test pyramid:
+# ─────────────────────────────────────────────────────────────────────────────
+# Advanced, production-grade CI/CD. Every push / PR runs the full test pyramid
+# and uploads downloadable evidence (coverage, test results, export files) so any
+# future code change is verified feature-by-feature and nothing breaks silently.
 #
-#   1. Code Quality    integrity · lint · type check · security        (parallel)
-#   2. Sanity Checks   fast cross-feature contract invariants (no DB)
-#   3. Unit Tests      one parallel job per feature (Auth, Groups, ...)
-#   4. Build & Compile prisma generate · tsc · nest build · PM2 config
-#   5. Smoke Tests     boots the app on real Postgres+Redis, checks health/edges
-#   6. Integration     multi-module API journey on real Postgres+Redis
-#   7. Release Gate    one required status — green only if everything passed
+#   1. Code Quality         integrity · lint · type check · security      (parallel)
+#   2. Feature Tests        one job per FEATURE — unit tests + coverage artifact
+#   3. Export Verification  generates real XLSX/CSV, uploads as artifacts
+#   4. Build & Compile      prisma generate · tsc · nest build · PM2
+#   5. Sanity Testing       cross-feature invariants + report artifact
+#   6. Smoke Testing        boots the app on real Postgres+Redis, critical edges
+#   7. Integration Testing  multi-module API journey on real Postgres+Redis
+#   8. Release Gate         one required status — green only if everything passed
 #
-# Downstream stages declare `needs:`, so if an upstream stage fails the rest are
-# SKIPPED (fail-fast) and the Release Gate goes red. Tests are fully isolated
-# from production (ephemeral service containers, test-only env vars).
+# Downstream stages declare `needs:`; an upstream failure skips the rest
+# (fail-fast) and the Release Gate goes red. All tests are isolated from
+# production (ephemeral service containers, test-only env vars).
+# ─────────────────────────────────────────────────────────────────────────────
 
 on:
   push:
@@ -66,42 +71,28 @@ jobs:
             governance) bash scripts/ci/governance-scan.sh ;;
           esac
 
-  # ───────────────────────────── 2. SANITY CHECKS ────────────────────────────
-  sanity:
-    name: Sanity Checks
-    runs-on: ubuntu-latest
-    needs: quality
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: "${{ env.NODE_VERSION }}", cache: npm }
-      - name: Install dependencies
-        run: npm ci
-      - name: Generate Prisma client
-        run: npx prisma generate
-      - name: Cross-feature contract invariants (B1-B9, no DB)
-        run: npx jest --runInBand --testPathPattern "common/tests/phase-verification"
-
-  # ───────────────────────────── 3. UNIT TESTS ───────────────────────────────
-  unit-tests:
-    name: Unit Tests / ${{ matrix.feature }}
+  # ───────────────────────── 2. FEATURE TESTS (per feature) ──────────────────
+  # One parallel job per feature. Each runs that feature's unit tests with
+  # coverage and uploads coverage + test-result JSON as a downloadable artifact.
+  feature-tests:
+    name: Feature Tests / ${{ matrix.feature }}
     runs-on: ubuntu-latest
     needs: quality
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { feature: Auth,               path: "features/auth/" }
-          - { feature: Organizations,      path: "features/organizations/" }
-          - { feature: Groups,             path: "features/groups/" }
-          - { feature: Meals & Schedules,  path: "features/meals/" }
-          - { feature: Attendance,         path: "features/attendance/" }
-          - { feature: Events,             path: "features/events/" }
-          - { feature: Dashboard,          path: "features/dashboard/" }
-          - { feature: Exports,            path: "features/exports/" }
-          - { feature: Notifications,      path: "features/notifications/" }
-          - { feature: Workers,            path: "workers/tests/" }
-          - { feature: Platform Contracts, path: "common/tests/" }
+          - { feature: Authentication,     slug: authentication, path: "features/auth/" }
+          - { feature: Organizations,      slug: organizations,  path: "features/organizations/" }
+          - { feature: Groups,             slug: groups,         path: "features/groups/" }
+          - { feature: Meals & Schedules,  slug: meals,          path: "features/meals/" }
+          - { feature: Attendance,         slug: attendance,     path: "features/attendance/" }
+          - { feature: Events,             slug: events,         path: "features/events/" }
+          - { feature: Dashboard,          slug: dashboard,      path: "features/dashboard/" }
+          - { feature: Exports,            slug: exports,        path: "features/exports/" }
+          - { feature: Notifications,      slug: notifications,  path: "features/notifications/" }
+          - { feature: Realtime & Workers, slug: realtime,       path: "workers/tests/" }
+          - { feature: Platform Contracts, slug: platform,       path: "common/tests/" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -110,8 +101,43 @@ jobs:
         run: npm ci
       - name: Generate Prisma client
         run: npx prisma generate
-      - name: Run ${{ matrix.feature }} unit tests
-        run: npx jest --runInBand --passWithNoTests --testPathPattern "${{ matrix.path }}"
+      - name: Run ${{ matrix.feature }} unit tests + coverage
+        run: |
+          npx jest --runInBand --passWithNoTests \
+            --testPathPattern "${{ matrix.path }}" \
+            --coverage \
+            --coverageDirectory "coverage/${{ matrix.slug }}" \
+            --coverageReporters=text-summary --coverageReporters=lcov --coverageReporters=json-summary \
+            --collectCoverageFrom "${{ matrix.path }}**/*.ts" \
+            --json --outputFile "coverage/${{ matrix.slug }}/jest-results.json"
+      - name: Upload ${{ matrix.feature }} test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: feature-report-${{ matrix.slug }}
+          path: coverage/${{ matrix.slug }}
+          retention-days: 14
+
+  # ─────────────────────── 3. EXPORT VERIFICATION (artifacts) ─────────────────
+  export-verification:
+    name: Export Verification
+    runs-on: ubuntu-latest
+    needs: quality
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}", cache: npm }
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate + validate real XLSX / CSV exports
+        run: node scripts/ci/export-verify.js
+      - name: Upload export files (XLSX + CSV)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: export-files
+          path: artifacts/exports
+          retention-days: 14
 
   # ───────────────────────────── 4. BUILD & COMPILE ──────────────────────────
   build:
@@ -142,11 +168,38 @@ jobs:
             echo "::notice::No Dockerfile yet (B11) - skipping docker image build"
           fi
 
-  # ───────────────────────────── 5. SMOKE TESTS ──────────────────────────────
-  smoke:
-    name: Smoke Tests
+  # ───────────────────────────── 5. SANITY TESTING ───────────────────────────
+  sanity:
+    name: Sanity Testing
     runs-on: ubuntu-latest
-    needs: [quality, unit-tests]
+    needs: quality
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}", cache: npm }
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate Prisma client
+        run: npx prisma generate
+      - name: Cross-feature contract invariants (B1-B9) + report
+        run: |
+          mkdir -p artifacts/sanity
+          npx jest --runInBand \
+            --testPathPattern "common/tests/phase-verification" \
+            --json --outputFile artifacts/sanity/sanity-report.json
+      - name: Upload sanity report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanity-report
+          path: artifacts/sanity
+          retention-days: 14
+
+  # ───────────────────────────── 6. SMOKE TESTING ────────────────────────────
+  smoke:
+    name: Smoke Testing
+    runs-on: ubuntu-latest
+    needs: [quality, feature-tests]
     services:
       postgres:
         image: postgres:16
@@ -171,14 +224,14 @@ jobs:
         run: npx prisma generate
       - name: Sync schema to test database
         run: npx prisma db push --skip-generate
-      - name: Smoke test (app boot + health + auth/validation edges)
+      - name: Smoke test (app boot + health + critical edges)
         run: npm run test:e2e -- --testPathPattern "smoke"
 
-  # ───────────────────────────── 6. INTEGRATION TESTS ────────────────────────
+  # ───────────────────────────── 7. INTEGRATION TESTING ──────────────────────
   integration:
-    name: Integration Tests
+    name: Integration Testing
     runs-on: ubuntu-latest
-    needs: [quality, unit-tests]
+    needs: [quality, feature-tests]
     services:
       postgres:
         image: postgres:16
@@ -205,28 +258,30 @@ jobs:
       # migration is committed (prisma/migrations) in B11.
       - name: Sync schema to test database
         run: npx prisma db push --skip-generate
-      - name: Multi-module API journey (B1-B5 on real DB + Redis)
+      - name: Multi-module API journey (real DB + Redis)
         run: npm run test:e2e -- --testPathPattern "system"
 
-  # ───────────────────────────── 7. RELEASE GATE ─────────────────────────────
+  # ───────────────────────────── 8. RELEASE GATE ─────────────────────────────
   release-gate:
     name: Release Gate
     runs-on: ubuntu-latest
     if: always()
-    needs: [quality, sanity, unit-tests, build, smoke, integration]
+    needs: [quality, feature-tests, export-verification, build, sanity, smoke, integration]
     steps:
       - name: Aggregate stage results
         run: |
-          echo "Code Quality   : ${{ needs.quality.result }}"
-          echo "Sanity Checks  : ${{ needs.sanity.result }}"
-          echo "Unit Tests     : ${{ needs.unit-tests.result }}"
-          echo "Build & Compile: ${{ needs.build.result }}"
-          echo "Smoke Tests    : ${{ needs.smoke.result }}"
-          echo "Integration    : ${{ needs.integration.result }}"
+          echo "Code Quality        : ${{ needs.quality.result }}"
+          echo "Feature Tests       : ${{ needs.feature-tests.result }}"
+          echo "Export Verification : ${{ needs.export-verification.result }}"
+          echo "Build & Compile     : ${{ needs.build.result }}"
+          echo "Sanity Testing      : ${{ needs.sanity.result }}"
+          echo "Smoke Testing       : ${{ needs.smoke.result }}"
+          echo "Integration Testing : ${{ needs.integration.result }}"
           if [ "${{ needs.quality.result }}" != "success" ] || \
-             [ "${{ needs.sanity.result }}" != "success" ] || \
-             [ "${{ needs.unit-tests.result }}" != "success" ] || \
+             [ "${{ needs.feature-tests.result }}" != "success" ] || \
+             [ "${{ needs.export-verification.result }}" != "success" ] || \
              [ "${{ needs.build.result }}" != "success" ] || \
+             [ "${{ needs.sanity.result }}" != "success" ] || \
              [ "${{ needs.smoke.result }}" != "success" ] || \
              [ "${{ needs.integration.result }}" != "success" ]; then
             echo "::error::Release gate failed - one or more stages did not pass."
