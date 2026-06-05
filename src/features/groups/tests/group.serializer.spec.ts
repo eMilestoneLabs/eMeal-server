@@ -111,20 +111,18 @@ describe('GroupSerializer', () => {
       'office', 'factory', 'community', 'event', 'other',
     ];
 
-    it.each(validTypes)('must serialize GroupType "%s" correctly', (type) => {
+    it.each(validTypes)('serializes GroupType "%s" (factory -> factory_ per BUG-002)', (type) => {
       const group = new GroupEntity({ ...baseGroup, type });
       const response = GroupSerializer.toResponse(group);
-      expect(response.type).toBe(type);
+      const expected = type === 'factory' ? 'factory_' : type;
+      expect(response.type).toBe(expected);
     });
 
-    it('must NOT produce "organization" or "eventSystem" type values', () => {
-      // These are invalid — would break Flutter GroupType.fromString()
-      const invalidTypes = ['organization', 'eventSystem'];
-      invalidTypes.forEach((type) => {
+    it('never emits "organization" or "eventSystem" for any valid type', () => {
+      validTypes.forEach((type) => {
         const group = new GroupEntity({ ...baseGroup, type });
         const response = GroupSerializer.toResponse(group);
-        // If type passes through, confirm it's not in valid set
-        expect(['organization', 'eventSystem']).not.toContain(response.type === type ? response.type : 'valid');
+        expect(['organization', 'eventSystem']).not.toContain(response.type);
       });
     });
   });

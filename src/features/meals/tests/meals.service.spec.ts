@@ -148,7 +148,7 @@ describe('MealsService', () => {
       );
     });
 
-    it('serializes response with isEnabled (not isActive)', async () => {
+    it('serializes response with isActive (locked Meal contract)', async () => {
       groupsRepo.findById.mockResolvedValue(mockGroup);
       mealsRepo.create.mockResolvedValue(mockMeal);
 
@@ -158,8 +158,8 @@ describe('MealsService', () => {
         name: 'Test',
       });
 
-      expect(result).toHaveProperty('isEnabled', true);
-      expect(result).not.toHaveProperty('isActive');
+      expect(result).toHaveProperty('isActive', true);
+      expect(result).not.toHaveProperty('isEnabled');
     });
 
     it('serializes attendanceWindow as nested object', async () => {

@@ -169,7 +169,7 @@ describe('EventSerializer', () => {
     expect(result).toHaveProperty('id', 'ev-1');
     expect(result).toHaveProperty('name', 'Annual Dinner');
     expect(result).toHaveProperty('type', 'corporate');
-    expect(result).toHaveProperty('eventDate');
+    expect(result).toHaveProperty('date');
     expect(result).toHaveProperty('adminName', 'Sonali Mahanta'); // REQUIRED
     expect(result).toHaveProperty('joinCode', 'join-token-abc123');
     expect(result).toHaveProperty('autoDeleteAfter7Days', false);
@@ -182,8 +182,8 @@ describe('EventSerializer', () => {
     expect(result.adminName).toBeTruthy();
 
     // eventDate is full ISO string (not date-only)
-    expect(typeof result.eventDate).toBe('string');
-    expect(result.eventDate as string).toMatch(/T\d{2}:\d{2}:\d{2}/);
+    expect(typeof result.date).toBe('string');
+    expect(result.date as string).toMatch(/T\d{2}:\d{2}:\d{2}/);
   });
 
   it('mealTypes is always an array', () => {
@@ -201,7 +201,7 @@ describe('EventSerializer', () => {
     const result = EventSerializer.toResponse(mockEvent);
     expect(result).not.toHaveProperty('joinToken');        // internal DB field
     expect(result).not.toHaveProperty('organizationId');   // not needed by Flutter
-    expect(result).not.toHaveProperty('adminId');
+    expect(result).toHaveProperty('adminId'); // adminId IS part of the locked Event contract
   });
 });
 

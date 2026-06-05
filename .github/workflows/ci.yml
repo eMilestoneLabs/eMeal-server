@@ -1,16 +1,18 @@
 name: eMeal Server Workflow
 
-# Production-grade pipeline. Push or PR runs, in order:
+# Production-grade pipeline. On every push / PR it runs the full test pyramid:
 #
-#   1. Code Quality      integrity - lint - type check - security        (parallel)
-#   2. Feature Tests     one parallel job per feature (Auth, Groups, ...)
-#   3. Build & Compile   prisma generate - tsc - nest build - PM2 config
-#   4. Integration & E2E real Postgres + Redis, smoke + system journeys
-#   5. Release Gate      single required status - green only if all pass
+#   1. Code Quality    integrity · lint · type check · security        (parallel)
+#   2. Sanity Checks   fast cross-feature contract invariants (no DB)
+#   3. Unit Tests      one parallel job per feature (Auth, Groups, ...)
+#   4. Build & Compile prisma generate · tsc · nest build · PM2 config
+#   5. Smoke Tests     boots the app on real Postgres+Redis, checks health/edges
+#   6. Integration     multi-module API journey on real Postgres+Redis
+#   7. Release Gate    one required status — green only if everything passed
 #
-# Stages 1+2 must pass before 3+4 start (fail-fast). The gate aggregates
-# everything into one required check for branch protection. Tests are fully
-# isolated from production (ephemeral containers, test-only env).
+# Downstream stages declare `needs:`, so if an upstream stage fails the rest are
+# SKIPPED (fail-fast) and the Release Gate goes red. Tests are fully isolated
+# from production (ephemeral service containers, test-only env vars).
 
 on:
   push:
@@ -45,9 +47,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { check: Repo Integrity,   task: integrity }
-          - { check: Lint,             task: lint }
-          - { check: Type Check,       task: typecheck }
+          - { check: Repo Integrity,        task: integrity }
+          - { check: Lint,                  task: lint }
+          - { check: Type Check,            task: typecheck }
           - { check: Security & Governance, task: governance }
     steps:
       - uses: actions/checkout@v4
@@ -55,25 +57,34 @@ jobs:
         with: { node-version: "${{ env.NODE_VERSION }}", cache: npm }
       - name: Install dependencies
         run: npm ci
-      - name: Generate Prisma client
-        if: matrix.task == 'typecheck'
-        run: npx prisma generate
-      - name: Repo integrity scan
-        if: matrix.task == 'integrity'
-        run: node scripts/ci/integrity-check.js
-      - name: ESLint
-        if: matrix.task == 'lint'
-        run: npm run lint
-      - name: TypeScript type check
-        if: matrix.task == 'typecheck'
-        run: npx tsc --noEmit
-      - name: Security & governance scan
-        if: matrix.task == 'governance'
-        run: bash scripts/ci/governance-scan.sh
+      - name: Run ${{ matrix.check }}
+        run: |
+          case "${{ matrix.task }}" in
+            integrity)  node scripts/ci/integrity-check.js ;;
+            lint)       npm run lint ;;
+            typecheck)  npx prisma generate && npx tsc --noEmit ;;
+            governance) bash scripts/ci/governance-scan.sh ;;
+          esac
 
-  # ───────────────────────────── 2. FEATURE TESTS ────────────────────────────
-  feature-tests:
-    name: Feature Tests / ${{ matrix.feature }}
+  # ───────────────────────────── 2. SANITY CHECKS ────────────────────────────
+  sanity:
+    name: Sanity Checks
+    runs-on: ubuntu-latest
+    needs: quality
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}", cache: npm }
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate Prisma client
+        run: npx prisma generate
+      - name: Cross-feature contract invariants (B1-B9, no DB)
+        run: npx jest --runInBand --testPathPattern "common/tests/phase-verification"
+
+  # ───────────────────────────── 3. UNIT TESTS ───────────────────────────────
+  unit-tests:
+    name: Unit Tests / ${{ matrix.feature }}
     runs-on: ubuntu-latest
     needs: quality
     strategy:
@@ -99,10 +110,10 @@ jobs:
         run: npm ci
       - name: Generate Prisma client
         run: npx prisma generate
-      - name: Run ${{ matrix.feature }} tests
+      - name: Run ${{ matrix.feature }} unit tests
         run: npx jest --runInBand --passWithNoTests --testPathPattern "${{ matrix.path }}"
 
-  # ───────────────────────────── 3. BUILD & COMPILE ──────────────────────────
+  # ───────────────────────────── 4. BUILD & COMPILE ──────────────────────────
   build:
     name: Build & Compile
     runs-on: ubuntu-latest
@@ -131,32 +142,57 @@ jobs:
             echo "::notice::No Dockerfile yet (B11) - skipping docker image build"
           fi
 
-  # ───────────────────────────── 4. INTEGRATION & E2E ────────────────────────
-  integration:
-    name: Integration & E2E
+  # ───────────────────────────── 5. SMOKE TESTS ──────────────────────────────
+  smoke:
+    name: Smoke Tests
     runs-on: ubuntu-latest
-    needs: [quality, feature-tests]
+    needs: [quality, unit-tests]
     services:
       postgres:
         image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: emeal_test
+        env: { POSTGRES_USER: postgres, POSTGRES_PASSWORD: postgres, POSTGRES_DB: emeal_test }
         ports: ["5432:5432"]
         options: >-
           --health-cmd="pg_isready -U postgres"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=5
+          --health-interval=10s --health-timeout=5s --health-retries=5
       redis:
         image: redis:7
         ports: ["6379:6379"]
         options: >-
           --health-cmd="redis-cli ping"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=5
+          --health-interval=10s --health-timeout=5s --health-retries=5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}", cache: npm }
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate Prisma client
+        run: npx prisma generate
+      - name: Sync schema to test database
+        run: npx prisma db push --skip-generate
+      - name: Smoke test (app boot + health + auth/validation edges)
+        run: npm run test:e2e -- --testPathPattern "smoke"
+
+  # ───────────────────────────── 6. INTEGRATION TESTS ────────────────────────
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [quality, unit-tests]
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: postgres, POSTGRES_PASSWORD: postgres, POSTGRES_DB: emeal_test }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s --health-timeout=5s --health-retries=5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s --health-timeout=5s --health-retries=5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -169,27 +205,29 @@ jobs:
       # migration is committed (prisma/migrations) in B11.
       - name: Sync schema to test database
         run: npx prisma db push --skip-generate
-      - name: Full unit suite against live DB + Redis
-        run: npx jest --runInBand --passWithNoTests
-      - name: End-to-end suite (smoke + system journey)
-        run: npm run test:e2e
+      - name: Multi-module API journey (B1-B5 on real DB + Redis)
+        run: npm run test:e2e -- --testPathPattern "system"
 
-  # ───────────────────────────── 5. RELEASE GATE ─────────────────────────────
+  # ───────────────────────────── 7. RELEASE GATE ─────────────────────────────
   release-gate:
     name: Release Gate
     runs-on: ubuntu-latest
     if: always()
-    needs: [quality, feature-tests, build, integration]
+    needs: [quality, sanity, unit-tests, build, smoke, integration]
     steps:
       - name: Aggregate stage results
         run: |
-          echo "Code Quality : ${{ needs.quality.result }}"
-          echo "Feature Tests: ${{ needs.feature-tests.result }}"
-          echo "Build        : ${{ needs.build.result }}"
-          echo "Integration  : ${{ needs.integration.result }}"
+          echo "Code Quality   : ${{ needs.quality.result }}"
+          echo "Sanity Checks  : ${{ needs.sanity.result }}"
+          echo "Unit Tests     : ${{ needs.unit-tests.result }}"
+          echo "Build & Compile: ${{ needs.build.result }}"
+          echo "Smoke Tests    : ${{ needs.smoke.result }}"
+          echo "Integration    : ${{ needs.integration.result }}"
           if [ "${{ needs.quality.result }}" != "success" ] || \
-             [ "${{ needs.feature-tests.result }}" != "success" ] || \
+             [ "${{ needs.sanity.result }}" != "success" ] || \
+             [ "${{ needs.unit-tests.result }}" != "success" ] || \
              [ "${{ needs.build.result }}" != "success" ] || \
+             [ "${{ needs.smoke.result }}" != "success" ] || \
              [ "${{ needs.integration.result }}" != "success" ]; then
             echo "::error::Release gate failed - one or more stages did not pass."
             exit 1

@@ -321,7 +321,7 @@ describe('AttendanceService', () => {
         groupId: 'grp_01',
       });
 
-      expect(result).toHaveProperty('presentCount', 7);
+      expect(result).toHaveProperty('presentDays', 7);
       expect(result).toHaveProperty('totalDays', 10);
 
       // CRITICAL: Flutter computes rates — backend must NOT include them
