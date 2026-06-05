@@ -103,6 +103,7 @@ jobs:
         run: npx prisma generate
       - name: Run ${{ matrix.feature }} unit tests + coverage
         run: |
+          mkdir -p "coverage/${{ matrix.slug }}"
           npx jest --runInBand --passWithNoTests \
             --testPathPattern "${{ matrix.path }}" \
             --coverage \
