@@ -66,7 +66,7 @@ export class QueueMetricsController {
       queue.getCompletedCount(),
       queue.getFailedCount(),
       queue.getDelayedCount(),
-      queue.getPausedCount(),
+      queue.getJobCountByTypes('paused'),
     ]);
 
     return { name, waiting, active, completed, failed, delayed, paused };

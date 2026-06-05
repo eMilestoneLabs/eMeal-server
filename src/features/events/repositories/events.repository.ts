@@ -320,9 +320,14 @@ export class EventsRepository {
     const { primaryName, adultsCount, childrenCount } = data;
 
     const party = await this.prisma.$transaction(async (tx) => {
+      const ev = await tx.event.findUnique({
+        where: { id: eventId },
+        select: { organizationId: true },
+      });
       const p = await tx.eventGuestParty.create({
         data: {
           eventId,
+          organizationId: ev!.organizationId,
           primaryName,
           adultsCount,
           childrenCount,

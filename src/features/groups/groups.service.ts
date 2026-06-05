@@ -482,7 +482,7 @@ export class GroupsService {
       this.realtime?.emitGroupMemberUpdated(groupId, {
         groupId,
         userId: targetUserId,
-        action: dto.status === 'active' ? 'unblocked' : (dto.role ? 'roleChanged' : 'updated'),
+        action: dto.status === 'active' ? 'unblocked' : 'role_changed',
       });
     }
 

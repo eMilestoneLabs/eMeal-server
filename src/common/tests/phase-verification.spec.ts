@@ -12,9 +12,9 @@ import { VALID_GROUP_TYPES } from '../../features/groups/dto/create-group.dto';
 import { VALID_PREFERENCES } from '../../features/meals/dto/create-meal.dto';
 import { QUEUE_NAMES } from '../../queue/constants/queue.constants';
 
-describe('PHASE VERIFICATION B1 -> B9', () => {
+describe('Feature Contract Coverage', () => {
   // ── B1 — Auth & roles ─────────────────────────────────────────────────────
-  describe('B1 · Auth', () => {
+  describe('Auth', () => {
     it('admin and student role sets are defined and disjoint', () => {
       expect(ADMIN_ROLES.length).toBeGreaterThan(0);
       expect(STUDENT_ROLES).toEqual(expect.arrayContaining(['student', 'member', 'guest']));
@@ -27,7 +27,7 @@ describe('PHASE VERIFICATION B1 -> B9', () => {
   });
 
   // ── B2 — Groups ───────────────────────────────────────────────────────────
-  describe('B2 · Groups', () => {
+  describe('Groups', () => {
     it('group types match the locked Flutter enum (10 types, no organization/eventSystem)', () => {
       expect(VALID_GROUP_TYPES).toEqual([
         'hostel', 'mess', 'cafeteria', 'pg', 'coachingInstitute',
@@ -39,7 +39,7 @@ describe('PHASE VERIFICATION B1 -> B9', () => {
   });
 
   // ── B3 — Meals (dynamic) ──────────────────────────────────────────────────
-  describe('B3 · Meals', () => {
+  describe('Meals', () => {
     it('preference values are lowercase / camelCase, no MealType enum coupling', () => {
       expect(VALID_PREFERENCES).toEqual(
         expect.arrayContaining(['veg', 'nonVeg', 'chicken', 'fish', 'mutton', 'egg', 'jain']),
@@ -53,7 +53,7 @@ describe('PHASE VERIFICATION B1 -> B9', () => {
   });
 
   // ── B4 — Attendance ───────────────────────────────────────────────────────
-  describe('B4 · Attendance', () => {
+  describe('Attendance', () => {
     it('summary uses date/mealName flat + presentDays/absentDays/skippedDays', () => {
       const summary = { date: '2026-06-05', mealName: 'Lunch', presentDays: 1, absentDays: 0, skippedDays: 0 };
       ['date', 'mealName', 'presentDays', 'absentDays', 'skippedDays'].forEach((k) =>
@@ -68,7 +68,7 @@ describe('PHASE VERIFICATION B1 -> B9', () => {
   });
 
   // ── B5 — Events ───────────────────────────────────────────────────────────
-  describe('B5 · Events', () => {
+  describe('Events', () => {
     it('selectedMealTypeId (session) is distinct from mealPreference (veg/non-veg)', () => {
       const person = { displayName: 'Guest-2', selectedMealTypeId: 'mt_lunch', mealPreference: 'veg' };
       expect(person.selectedMealTypeId).not.toEqual(person.mealPreference);
@@ -80,7 +80,7 @@ describe('PHASE VERIFICATION B1 -> B9', () => {
   });
 
   // ── B6 — Queues / Workers ─────────────────────────────────────────────────
-  describe('B6 · Queues', () => {
+  describe('Queues', () => {
     it('all governed queues are registered', () => {
       const names = Object.values(QUEUE_NAMES);
       ['notification-queue', 'attendance-reminder-queue', 'analytics-queue',
@@ -91,7 +91,7 @@ describe('PHASE VERIFICATION B1 -> B9', () => {
   });
 
   // ── B7 — Realtime ─────────────────────────────────────────────────────────
-  describe('B7 · WebSocket', () => {
+  describe('Realtime', () => {
     it('event names are versioned with a .v1 suffix', () => {
       const events = ['attendance.marked.v1', 'meal.updated.v1', 'dashboard.summary.updated.v1'];
       events.forEach((e) => expect(e).toMatch(/\.v1$/));
@@ -103,7 +103,7 @@ describe('PHASE VERIFICATION B1 -> B9', () => {
   });
 
   // ── B8 — Pagination / contract stabilization ──────────────────────────────
-  describe('B8 · Pagination contract', () => {
+  describe('Pagination', () => {
     it('PaginatedResponseDto emits exactly { data, total, page, limit }', () => {
       const res: any = PaginatedResponseDto.of([], 0, 1, 20);
       expect(Object.keys(res).sort()).toEqual(['data', 'limit', 'page', 'total']);
@@ -112,7 +112,7 @@ describe('PHASE VERIFICATION B1 -> B9', () => {
   });
 
   // ── B9 — Analytics / export ───────────────────────────────────────────────
-  describe('B9 · Analytics & export', () => {
+  describe('Analytics & Exports', () => {
     it('analytics payload exposes veg/non-veg style aggregates', () => {
       const analytics = { totalGuests: 5, adults: 3, children: 2, veg: 2, nonVeg: 3 };
       expect(analytics.adults + analytics.children).toBe(analytics.totalGuests);

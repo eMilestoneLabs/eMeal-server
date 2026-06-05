@@ -14,7 +14,7 @@ export class UsersRepository {
    * where buildEntity() previously fired one GroupMember query per user.
    */
   private buildEntityFromInclude(user: any): UserEntity {
-    const groupIds = (user.members ?? [])
+    const groupIds = (user.groupMembers ?? [])
       .filter((m: any) => m.status === 'active')
       .map((m: any) => m.groupId);
     return new UserEntity({
@@ -27,7 +27,7 @@ export class UsersRepository {
   /** Include clause reused across all single-record finders. */
   private get memberInclude() {
     return {
-      members: {
+      groupMembers: {
         where: { status: 'active' as const },
         select: { groupId: true, status: true },
       },

@@ -225,13 +225,13 @@ export class AuthController {
         statusCode: 422,
       });
     }
-    const role = body.role ?? 'student';
+    const role = (body.role ?? 'student') as string;
     if (['messManager', 'hostelManager', 'hostelAdmin', 'organizationManager'].includes(role)) {
-      return this.authService.signupAdmin(body as AdminSignupDto, req.requestId);
+      return this.authService.signupAdmin(body as unknown as AdminSignupDto, req.requestId);
     }
     if (role === 'eventAdmin') {
-      return this.authService.signupEventAdmin(body as EventAdminSignupDto, req.requestId);
+      return this.authService.signupEventAdmin(body as unknown as EventAdminSignupDto, req.requestId);
     }
-    return this.authService.signupStudent(body as StudentSignupDto, req.requestId);
+    return this.authService.signupStudent(body as unknown as StudentSignupDto, req.requestId);
   }
 }

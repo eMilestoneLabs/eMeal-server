@@ -1,8 +1,8 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
-import { QUEUE_NAMES } from '../../queue/constants/queue.constants';
-import { PrismaService } from '../../prisma/prisma.service';
+import { QUEUE_NAMES } from '../queue/constants/queue.constants';
+import { PrismaService } from '../prisma/prisma.service';
 
 export interface SchedulePublishJobData {
   organizationId: string;

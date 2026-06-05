@@ -2,23 +2,22 @@ import { ScheduleSerializer } from '../serializers/schedule.serializer';
 import { MealScheduleEntity, ScheduleEntryEntity } from '../entities/meal-schedule.entity';
 
 /**
- * ScheduleSerializer contract tests — verifies exact Flutter JSON shape.
+ * ScheduleSerializer contract tests — verifies the exact Flutter JSON shape
+ * the app is locked to (M-12):
  *
- * Key invariants:
- *   - weekStart DateTime → weekStartDate "YYYY-MM-DD" (date-only)
- *   - dayOfWeek Int (0=Mon) → day string "monday"..."sunday"
- *   - slotKey comes from joined meal relation
- *   - mealName: entry.mealName ?? meal.displayName ?? meal.name
- *   - entries always present (empty array if no entries)
- *   - attendanceWindow null when no per-day override
+ *   - top-level: id, groupId, organizationId, isPublished, publishedAt, createdAt, days
+ *   - days[] ALWAYS has 7 entries (monday..sunday), empty meals[] if none
+ *   - meal item: mealId, name, slotKey, order, menuItems, imageUrl, openTime, closeTime
+ *   - name fallback: entry.mealName ?? meal.displayName ?? meal.name
+ *   - openTime/closeTime are FLAT per-day overrides (null when unset)
  */
 describe('ScheduleSerializer', () => {
-  const mockEntry = new ScheduleEntryEntity({
+  const breakfast = new ScheduleEntryEntity({
     id: 'ent_01',
     scheduleId: 'sch_01',
     mealId: 'meal_01',
     dayOfWeek: 0, // Monday
-    date: new Date('2026-01-05T00:00:00.000Z'), // Monday 2026-01-05
+    date: new Date('2026-01-05T00:00:00.000Z'),
     openTime: null,
     closeTime: null,
     mealName: 'Poha',
@@ -27,10 +26,13 @@ describe('ScheduleSerializer', () => {
       slotKey: 'breakfast',
       name: 'Morning Meal',
       displayName: 'Breakfast',
+      order: 1,
+      menuItems: ['Poha'],
+      imageUrl: null,
     },
   });
 
-  const mockLunchEntry = new ScheduleEntryEntity({
+  const lunch = new ScheduleEntryEntity({
     id: 'ent_02',
     scheduleId: 'sch_01',
     mealId: 'meal_02',
@@ -44,6 +46,9 @@ describe('ScheduleSerializer', () => {
       slotKey: 'lunch',
       name: 'Afternoon Meal',
       displayName: 'Lunch',
+      order: 2,
+      menuItems: [],
+      imageUrl: null,
     },
   });
 
@@ -51,184 +56,97 @@ describe('ScheduleSerializer', () => {
     id: 'sch_01',
     organizationId: 'org_01',
     groupId: 'grp_01',
-    weekStart: new Date('2026-01-05T00:00:00.000Z'), // Monday
+    weekStart: new Date('2026-01-05T00:00:00.000Z'),
     isPublished: true,
     publishedAt: new Date('2026-01-04T10:00:00.000Z'),
-    entries: [mockEntry, mockLunchEntry],
+    entries: [breakfast, lunch],
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
   });
 
-  // ── weekStartDate — date-only string ──────────────────────────────────
-
-  describe('weekStartDate contract', () => {
-    it('must serialize weekStart DateTime as YYYY-MM-DD date-only string', () => {
-      const response = ScheduleSerializer.toResponse(baseSchedule);
-      expect(response.weekStartDate).toBe('2026-01-05');
-      expect(typeof response.weekStartDate).toBe('string');
-      // Must NOT be a full ISO string with time
-      expect(response.weekStartDate as string).not.toContain('T');
+  describe('top-level contract', () => {
+    it('exposes the exact locked top-level keys', () => {
+      const res = ScheduleSerializer.toResponse(baseSchedule);
+      ['id', 'groupId', 'organizationId', 'isPublished', 'publishedAt', 'createdAt', 'days'].forEach(
+        (k) => expect(res).toHaveProperty(k),
+      );
     });
 
-    it('must NOT expose weekStart (internal field name)', () => {
-      const response = ScheduleSerializer.toResponse(baseSchedule);
-      expect(response).not.toHaveProperty('weekStart');
-    });
-  });
-
-  // ── entries — always present ───────────────────────────────────────────
-
-  describe('entries contract', () => {
-    it('must always include entries array', () => {
-      const response = ScheduleSerializer.toResponse(baseSchedule);
-      expect(Array.isArray(response.entries)).toBe(true);
+    it('uses days[] (NOT entries) and never exposes weekStart', () => {
+      const res = ScheduleSerializer.toResponse(baseSchedule) as any;
+      expect(Array.isArray(res.days)).toBe(true);
+      expect(res).not.toHaveProperty('entries');
+      expect(res).not.toHaveProperty('weekStart');
     });
 
-    it('must return empty array for schedule with no entries', () => {
-      const draftSchedule = new MealScheduleEntity({
-        ...baseSchedule,
-        entries: [],
-      });
-      const response = ScheduleSerializer.toResponse(draftSchedule);
-      expect(response.entries).toEqual([]);
+    it('always renders all 7 days, empty meals[] when none', () => {
+      const res = ScheduleSerializer.toResponse(baseSchedule) as any;
+      expect(res.days).toHaveLength(7);
+      expect(res.days.map((d: any) => d.day)).toEqual([
+        'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+      ]);
+      expect(res.days[1].meals).toEqual([]); // tuesday empty
     });
 
-    it('serializes both entries correctly', () => {
-      const response = ScheduleSerializer.toResponse(baseSchedule);
-      expect((response.entries as any[]).length).toBe(2);
-    });
-  });
-
-  // ── entry.day — string not integer ────────────────────────────────────
-
-  describe('entry.day — dayOfWeek Int → day string', () => {
-    it.each([
-      [0, 'monday'],
-      [1, 'tuesday'],
-      [2, 'wednesday'],
-      [3, 'thursday'],
-      [4, 'friday'],
-      [5, 'saturday'],
-      [6, 'sunday'],
-    ])('converts dayOfWeek %i to "%s"', (dayOfWeek, expectedDay) => {
-      const entry = new ScheduleEntryEntity({
-        ...mockEntry,
-        dayOfWeek,
-        meal: { slotKey: 'test', name: 'Test', displayName: null },
-      });
-      const result = ScheduleSerializer.entryToResponse(entry);
-      expect(result.day).toBe(expectedDay);
-    });
-
-    it('must NOT expose dayOfWeek integer', () => {
-      const result = ScheduleSerializer.entryToResponse(mockEntry);
-      expect(result).not.toHaveProperty('dayOfWeek');
-    });
-  });
-
-  // ── entry.slotKey — from meal relation ────────────────────────────────
-
-  describe('entry.slotKey — derived from meal join', () => {
-    it('uses slotKey from joined meal', () => {
-      const entry = ScheduleSerializer.entryToResponse(mockEntry) as any;
-      expect(entry.slotKey).toBe('breakfast');
-    });
-
-    it('handles missing meal gracefully', () => {
-      const entryWithoutMeal = new ScheduleEntryEntity({
-        ...mockEntry,
-        meal: undefined,
-      });
-      const result = ScheduleSerializer.entryToResponse(entryWithoutMeal) as any;
-      expect(result.slotKey).toBe('');
-    });
-  });
-
-  // ── mealName fallback chain ────────────────────────────────────────────
-
-  describe('mealName fallback', () => {
-    it('uses entry.mealName when set', () => {
-      const result = ScheduleSerializer.entryToResponse(mockEntry) as any;
-      expect(result.mealName).toBe('Poha');
-    });
-
-    it('falls back to meal.displayName when entry.mealName is null', () => {
-      const result = ScheduleSerializer.entryToResponse(mockLunchEntry) as any;
-      expect(result.mealName).toBe('Lunch'); // meal.displayName
-    });
-
-    it('falls back to meal.name when both mealName and displayName are null', () => {
-      const entry = new ScheduleEntryEntity({
-        ...mockEntry,
-        mealName: null,
-        meal: { slotKey: 'dinner', name: 'Evening Meal', displayName: null },
-      });
-      const result = ScheduleSerializer.entryToResponse(entry) as any;
-      expect(result.mealName).toBe('Evening Meal');
-    });
-  });
-
-  // ── attendanceWindow per-day override ─────────────────────────────────
-
-  describe('attendanceWindow per-day override', () => {
-    it('returns null when no per-day override', () => {
-      const result = ScheduleSerializer.entryToResponse(mockEntry) as any;
-      expect(result.attendanceWindow).toBeNull();
-    });
-
-    it('returns nested object when override is set', () => {
-      const result = ScheduleSerializer.entryToResponse(mockLunchEntry) as any;
-      expect(result.attendanceWindow).toEqual({
-        openTime: '12:00',
-        closeTime: '13:30',
-      });
-    });
-  });
-
-  // ── date serialization ────────────────────────────────────────────────
-
-  describe('date serialization', () => {
-    it('entry.date must be YYYY-MM-DD string (not full ISO)', () => {
-      const result = ScheduleSerializer.entryToResponse(mockEntry) as any;
-      expect(result.date).toBe('2026-01-05');
-      expect(result.date).not.toContain('T');
-    });
-
-    it('publishedAt is ISO string when published', () => {
-      const response = ScheduleSerializer.toResponse(baseSchedule);
-      expect(typeof response.publishedAt).toBe('string');
-      expect(response.publishedAt as string).toContain('T');
-    });
-
-    it('publishedAt is null for draft schedule', () => {
+    it('publishedAt is ISO when published, null for draft', () => {
+      const res = ScheduleSerializer.toResponse(baseSchedule) as any;
+      expect(typeof res.publishedAt).toBe('string');
+      expect(res.publishedAt).toContain('T');
       const draft = new MealScheduleEntity({
-        ...baseSchedule,
-        isPublished: false,
-        publishedAt: null,
-        entries: [],
+        ...baseSchedule, isPublished: false, publishedAt: null, entries: [],
       });
-      const response = ScheduleSerializer.toResponse(draft);
-      expect(response.publishedAt).toBeNull();
+      expect(ScheduleSerializer.toResponse(draft).publishedAt).toBeNull();
     });
   });
 
-  // ── exact Flutter contract keys ────────────────────────────────────────
-
-  describe('Flutter contract — exact top-level keys', () => {
-    it('schedule must have all required keys', () => {
-      const response = ScheduleSerializer.toResponse(baseSchedule);
-      const expectedKeys = ['id', 'groupId', 'weekStartDate', 'isPublished', 'publishedAt', 'entries', 'createdAt'];
-      expectedKeys.forEach((key) => {
-        expect(response).toHaveProperty(key);
-      });
+  describe('days[].meals[] — ordering + shape', () => {
+    it('groups both Monday meals and sorts them by meal.order', () => {
+      const res = ScheduleSerializer.toResponse(baseSchedule) as any;
+      const monday = res.days[0];
+      expect(monday.day).toBe('monday');
+      expect(monday.meals).toHaveLength(2);
+      expect(monday.meals[0].slotKey).toBe('breakfast'); // order 1 first
+      expect(monday.meals[1].slotKey).toBe('lunch');     // order 2 second
     });
 
-    it('entry must have all required keys', () => {
-      const result = ScheduleSerializer.entryToResponse(mockEntry);
-      const expectedKeys = ['id', 'mealId', 'day', 'slotKey', 'mealName', 'notes', 'date', 'attendanceWindow'];
-      expectedKeys.forEach((key) => {
-        expect(result).toHaveProperty(key);
+    it('meal item carries the exact contract keys', () => {
+      const item = ScheduleSerializer.entryToMealItem(breakfast) as any;
+      ['mealId', 'name', 'slotKey', 'order', 'menuItems', 'imageUrl', 'openTime', 'closeTime'].forEach(
+        (k) => expect(item).toHaveProperty(k),
+      );
+      expect(item).not.toHaveProperty('attendanceWindow'); // flat, not nested
+    });
+  });
+
+  describe('entryToMealItem — name fallback + derived fields', () => {
+    it('uses entry.mealName when present', () => {
+      expect((ScheduleSerializer.entryToMealItem(breakfast) as any).name).toBe('Poha');
+    });
+
+    it('falls back to meal.displayName when mealName is null', () => {
+      expect((ScheduleSerializer.entryToMealItem(lunch) as any).name).toBe('Lunch');
+    });
+
+    it('falls back to meal.name when mealName and displayName are null', () => {
+      const entry = new ScheduleEntryEntity({
+        ...breakfast,
+        mealName: null,
+        meal: { slotKey: 'dinner', name: 'Evening Meal', displayName: null, order: 3, menuItems: [], imageUrl: null },
       });
+      expect((ScheduleSerializer.entryToMealItem(entry) as any).name).toBe('Evening Meal');
+    });
+
+    it('derives slotKey from the joined meal, empty string when meal missing', () => {
+      expect((ScheduleSerializer.entryToMealItem(breakfast) as any).slotKey).toBe('breakfast');
+      const noMeal = new ScheduleEntryEntity({ ...breakfast, meal: undefined });
+      expect((ScheduleSerializer.entryToMealItem(noMeal) as any).slotKey).toBe('');
+    });
+
+    it('exposes flat per-day openTime/closeTime overrides', () => {
+      expect((ScheduleSerializer.entryToMealItem(breakfast) as any).openTime).toBeNull();
+      const item = ScheduleSerializer.entryToMealItem(lunch) as any;
+      expect(item.openTime).toBe('12:00');
+      expect(item.closeTime).toBe('13:30');
     });
   });
 });

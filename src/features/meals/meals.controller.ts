@@ -161,10 +161,9 @@ export class MealsController {
       return { data: [], total: 0, page: 1, limit: 10 };
     }
     return this.schedulesService.getSchedules(
-      user.organizationId!,
-      groupId,
-      user.role,
       user.sub,
+      user.role,
+      user.organizationId!,
       { groupId, page: 1, limit: 1 } as QuerySchedulesDto,
     );
   }
