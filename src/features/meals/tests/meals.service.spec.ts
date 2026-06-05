@@ -1,0 +1,335 @@
+import { Test, TestingModule } from '@nestjs/testing';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { MealsService } from '../meals.service';
+import { MealsRepository } from '../repositories/meals.repository';
+import { GroupsRepository } from '../../groups/repositories/groups.repository';
+import { AuditService } from '../../../audit/audit.service';
+import { MealEntity } from '../entities/meal.entity';
+import { GroupEntity } from '../../groups/entities/group.entity';
+
+/**
+ * MealsService unit tests.
+ *
+ * Tests verify:
+ * - Org isolation: cross-org access rejected
+ * - Dynamic rendering: no slotKey enum assumptions
+ * - Soft delete: isActive=false, not hard delete
+ * - Attendance independence: attendanceEnabled separate from isEnabled
+ * - Preference rendering: preferences array always present
+ * - Pagination contract: { data, total, page, limit }
+ */
+describe('MealsService', () => {
+  let service: MealsService;
+  let mealsRepo: jest.Mocked<MealsRepository>;
+  let groupsRepo: jest.Mocked<GroupsRepository>;
+  let auditService: jest.Mocked<AuditService>;
+
+  const mockGroup = new GroupEntity({
+    id: 'grp_01',
+    organizationId: 'org_01',
+    name: 'Boys Block A',
+    type: 'hostel',
+    isActive: true,
+    joinToken: 'HTL3K8XZ',
+    mealsEnabled: true,
+    weeklyMenuEnabled: true,
+    preferencesEnabled: true,
+    enabledPreferences: ['veg', 'chicken'],
+    vacationModeEnabled: true,
+    memberCount: 5,
+    memberIds: [],
+    blockedMemberIds: [],
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+
+  const mockGroupMealsDisabled = new GroupEntity({
+    ...mockGroup,
+    mealsEnabled: false,
+  });
+
+  const mockMeal = new MealEntity({
+    id: 'meal_01',
+    organizationId: 'org_01',
+    groupId: 'grp_01',
+    slotKey: 'breakfast',
+    name: 'Morning Meal',
+    displayName: 'Breakfast',
+    order: 0,
+    isActive: true,
+    attendanceEnabled: true,
+    enabledPreferences: ['veg', 'egg'],
+    preferencesEnabled: true,
+    attendanceWindowOpen: '06:00',
+    attendanceWindowClose: '09:00',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+
+  beforeEach(async () => {
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        MealsService,
+        {
+          provide: MealsRepository,
+          useValue: {
+            findById: jest.fn(),
+            findByGroup: jest.fn(),
+            create: jest.fn(),
+            update: jest.fn(),
+            softDelete: jest.fn(),
+            reorder: jest.fn(),
+            verifyGroupOwnership: jest.fn(),
+          },
+        },
+        {
+          provide: GroupsRepository,
+          useValue: {
+            findById: jest.fn(),
+          },
+        },
+        {
+          provide: AuditService,
+          useValue: { log: jest.fn() },
+        },
+      ],
+    }).compile();
+
+    service = module.get<MealsService>(MealsService);
+    mealsRepo = module.get(MealsRepository);
+    groupsRepo = module.get(GroupsRepository);
+    auditService = module.get(AuditService);
+  });
+
+  // ── CREATE MEAL ─────────────────────────────────────────────────────────
+
+  describe('createMeal', () => {
+    it('throws NotFoundException when group not found in org (isolation check)', async () => {
+      groupsRepo.findById.mockResolvedValue(null);
+
+      await expect(
+        service.createMeal('usr_admin', 'org_01', {
+          groupId: 'grp_ATTACKER',
+          slotKey: 'breakfast',
+          name: 'Test',
+        }),
+      ).rejects.toThrow(NotFoundException);
+
+      // Verify org isolation — findById called with org from JWT, not attacker's group
+      expect(groupsRepo.findById).toHaveBeenCalledWith('grp_ATTACKER', 'org_01');
+    });
+
+    it('throws BadRequestException when group has mealsEnabled=false', async () => {
+      groupsRepo.findById.mockResolvedValue(mockGroupMealsDisabled);
+
+      await expect(
+        service.createMeal('usr_admin', 'org_01', {
+          groupId: 'grp_01',
+          slotKey: 'lunch',
+          name: 'Lunch Meal',
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('creates meal with free-form slotKey (not enum)', async () => {
+      groupsRepo.findById.mockResolvedValue(mockGroup);
+      mealsRepo.create.mockResolvedValue(mockMeal);
+
+      const result = await service.createMeal('usr_admin', 'org_01', {
+        groupId: 'grp_01',
+        slotKey: 'iftar',  // custom slot — not in any enum
+        name: 'Iftar Meal',
+        displayName: 'Iftar',
+      });
+
+      // Verify slotKey passed through as-is (no enum validation)
+      expect(mealsRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ slotKey: 'iftar' }),
+      );
+    });
+
+    it('serializes response with isEnabled (not isActive)', async () => {
+      groupsRepo.findById.mockResolvedValue(mockGroup);
+      mealsRepo.create.mockResolvedValue(mockMeal);
+
+      const result = await service.createMeal('usr_admin', 'org_01', {
+        groupId: 'grp_01',
+        slotKey: 'breakfast',
+        name: 'Test',
+      });
+
+      expect(result).toHaveProperty('isEnabled', true);
+      expect(result).not.toHaveProperty('isActive');
+    });
+
+    it('serializes attendanceWindow as nested object', async () => {
+      groupsRepo.findById.mockResolvedValue(mockGroup);
+      mealsRepo.create.mockResolvedValue(mockMeal);
+
+      const result = await service.createMeal('usr_admin', 'org_01', {
+        groupId: 'grp_01',
+        slotKey: 'breakfast',
+        name: 'Test',
+        attendanceWindow: { openTime: '06:00', closeTime: '09:00' },
+      });
+
+      expect(result.attendanceWindow).toEqual({ openTime: '06:00', closeTime: '09:00' });
+    });
+  });
+
+  // ── GET MEALS ─────────────────────────────────────────────────────────
+
+  describe('getMeals', () => {
+    it('throws BadRequestException when groupId is missing', async () => {
+      await expect(
+        service.getMeals('usr_admin', 'hostelAdmin', 'org_01', {}),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('returns paginated response with { data, total, page, limit }', async () => {
+      groupsRepo.findById.mockResolvedValue(mockGroup);
+      mealsRepo.findByGroup.mockResolvedValue({
+        data: [mockMeal],
+        total: 1,
+        page: 1,
+        limit: 20,
+      });
+
+      const result = await service.getMeals('usr_admin', 'hostelAdmin', 'org_01', {
+        groupId: 'grp_01',
+      });
+
+      // CRITICAL: Flutter reads these exact keys
+      expect(result).toHaveProperty('data');
+      expect(result).toHaveProperty('total', 1);
+      expect(result).toHaveProperty('page', 1);
+      expect(result).toHaveProperty('limit', 20);
+
+      // Must never use non-standard keys
+      expect(result).not.toHaveProperty('items');
+      expect(result).not.toHaveProperty('results');
+      expect(result).not.toHaveProperty('count');
+      expect(result).not.toHaveProperty('pageSize');
+    });
+
+    it('student only sees enabled meals (includeDisabled=false)', async () => {
+      groupsRepo.findById.mockResolvedValue(mockGroup);
+      mealsRepo.findByGroup.mockResolvedValue({ data: [], total: 0, page: 1, limit: 20 });
+
+      await service.getMeals('usr_student', 'student', 'org_01', {
+        groupId: 'grp_01',
+      });
+
+      expect(mealsRepo.findByGroup).toHaveBeenCalledWith(
+        'grp_01',
+        'org_01',
+        expect.objectContaining({ includeDisabled: false }),
+      );
+    });
+  });
+
+  // ── UPDATE MEAL ─────────────────────────────────────────────────────────
+
+  describe('updateMeal', () => {
+    it('throws NotFoundException when meal not found in org', async () => {
+      mealsRepo.findById.mockResolvedValue(null);
+
+      await expect(
+        service.updateMeal('meal_999', 'org_01', 'usr_admin', {}),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('maps isEnabled → isActive in update payload', async () => {
+      mealsRepo.findById.mockResolvedValue(mockMeal);
+      mealsRepo.update.mockResolvedValue({ ...mockMeal, isActive: false });
+
+      await service.updateMeal('meal_01', 'org_01', 'usr_admin', {
+        isEnabled: false,
+      });
+
+      expect(mealsRepo.update).toHaveBeenCalledWith(
+        'meal_01',
+        'org_01',
+        expect.objectContaining({ isActive: false }),
+      );
+      // Must NOT pass isEnabled to repo (repo uses isActive)
+      expect(mealsRepo.update).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ isEnabled: expect.anything() }),
+      );
+    });
+
+    it('clears attendanceWindow when null provided', async () => {
+      mealsRepo.findById.mockResolvedValue(mockMeal);
+      mealsRepo.update.mockResolvedValue(mockMeal);
+
+      await service.updateMeal('meal_01', 'org_01', 'usr_admin', {
+        attendanceWindow: null,
+      });
+
+      expect(mealsRepo.update).toHaveBeenCalledWith(
+        'meal_01',
+        'org_01',
+        expect.objectContaining({
+          attendanceWindowOpen: null,
+          attendanceWindowClose: null,
+        }),
+      );
+    });
+  });
+
+  // ── DELETE (soft) ──────────────────────────────────────────────────────
+
+  describe('deleteMeal (soft)', () => {
+    it('calls softDelete (never hard delete)', async () => {
+      mealsRepo.softDelete.mockResolvedValue(undefined);
+
+      const result = await service.deleteMeal('meal_01', 'org_01', 'usr_admin');
+
+      expect(mealsRepo.softDelete).toHaveBeenCalledWith('meal_01', 'org_01');
+      expect(result).toHaveProperty('message', 'Meal archived successfully');
+    });
+  });
+
+  // ── REORDER ────────────────────────────────────────────────────────────
+
+  describe('reorderMeals', () => {
+    it('throws NotFoundException when group not in org', async () => {
+      groupsRepo.findById.mockResolvedValue(null);
+
+      await expect(
+        service.reorderMeals('org_01', 'usr_admin', {
+          groupId: 'grp_UNKNOWN',
+          mealIds: ['meal_01'],
+        }),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('throws BadRequestException for empty mealIds', async () => {
+      groupsRepo.findById.mockResolvedValue(mockGroup);
+
+      await expect(
+        service.reorderMeals('org_01', 'usr_admin', {
+          groupId: 'grp_01',
+          mealIds: [],
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('calls repo.reorder with org-scoped mealIds', async () => {
+      groupsRepo.findById.mockResolvedValue(mockGroup);
+      mealsRepo.reorder.mockResolvedValue(undefined);
+
+      await service.reorderMeals('org_01', 'usr_admin', {
+        groupId: 'grp_01',
+        mealIds: ['meal_03', 'meal_01', 'meal_02'],
+      });
+
+      expect(mealsRepo.reorder).toHaveBeenCalledWith(
+        ['meal_03', 'meal_01', 'meal_02'],
+        'org_01',
+      );
+    });
+  });
+});

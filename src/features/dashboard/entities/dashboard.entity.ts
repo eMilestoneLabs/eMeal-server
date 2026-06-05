@@ -38,11 +38,32 @@ export interface ActiveGroupItem {
   mealsEnabled: boolean;
 }
 
+// B5 Step 19: weeklyMeals item shape
+export interface WeeklyMealItem {
+  mealId: string;
+  slotKey: string;
+  displayName: string;
+  date: string; // YYYY-MM-DD
+  dayOfWeek: string; // "monday".."sunday"
+}
+
+// B5 Step 19: notifications item shape
+export interface DashboardNotificationItem {
+  id: string;
+  type: string;       // "attendance_reminder" | "meal_updated" | "system"
+  title: string;
+  body: string;
+  createdAt: string;  // ISO string
+  isRead: boolean;
+}
+
 export class StudentDashboardEntity {
   userId: string;
   organizationId: string;
   upcomingMeals: UpcomingMealItem[];
   todayAttendance: TodayAttendanceItem[];
+  weeklyMeals: WeeklyMealItem[];                      // B5 Step 19
+  notifications: DashboardNotificationItem[];          // B5 Step 19
   attendanceSummary: AttendanceSummary;
   activeGroups: ActiveGroupItem[];
   vacationMode: boolean;
@@ -54,13 +75,25 @@ export class StudentDashboardEntity {
     organizationId: string;
     upcomingMeals: UpcomingMealItem[];
     todayAttendance: TodayAttendanceItem[];
+    weeklyMeals?: WeeklyMealItem[];
+    notifications?: DashboardNotificationItem[];
     attendanceSummary: AttendanceSummary;
     activeGroups: ActiveGroupItem[];
     vacationMode: boolean;
     defaultAttendanceMode: boolean;
     generatedAt: string;
   }) {
-    Object.assign(this, data);
+    this.userId = data.userId;
+    this.organizationId = data.organizationId;
+    this.upcomingMeals = data.upcomingMeals;
+    this.todayAttendance = data.todayAttendance;
+    this.weeklyMeals = data.weeklyMeals ?? [];
+    this.notifications = data.notifications ?? [];
+    this.attendanceSummary = data.attendanceSummary;
+    this.activeGroups = data.activeGroups;
+    this.vacationMode = data.vacationMode;
+    this.defaultAttendanceMode = data.defaultAttendanceMode;
+    this.generatedAt = data.generatedAt;
   }
 }
 

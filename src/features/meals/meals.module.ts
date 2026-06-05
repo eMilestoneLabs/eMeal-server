@@ -12,6 +12,7 @@ import { SchedulesRepository } from './repositories/schedules.repository';
 
 // GroupsModule needed for GroupsRepository (org isolation + mealConfig verification)
 import { GroupsModule } from '../groups/groups.module';
+import { RealtimeModule } from '../../realtime/realtime.module';
 
 /**
  * MealsModule — Phase B3
@@ -35,6 +36,7 @@ import { GroupsModule } from '../groups/groups.module';
     PrismaModule,
     AuditModule,
     GroupsModule, // for GroupsRepository access
+    RealtimeModule,   // for 'REALTIME_GATEWAY' token (@Optional inject in services)
   ],
   controllers: [MealsController, SchedulesController],
   providers: [

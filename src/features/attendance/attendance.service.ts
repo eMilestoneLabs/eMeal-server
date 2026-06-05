@@ -200,8 +200,8 @@ export class AttendanceService {
       dto.mealId,
     );
 
-    // 8. Emit realtime event
-    this.emitAttendanceUpdated(meal.groupId, record, organizationId);
+    // 8. Emit realtime event (marked.v1 = new mark, updated.v1 = re-mark)
+    this.emitAttendanceUpdated(meal.groupId, record, organizationId, true);
 
     // 9. Audit log (fire-and-forget)
     this.audit.log({
@@ -557,12 +557,15 @@ export class AttendanceService {
     groupId: string,
     record: any,
     organizationId: string,
+    isNew = false,
   ): void {
     if (!this.gateway) return;
 
     try {
-      // Versioned event name — B4 websocket governance
-      this.gateway.emitToGroup(groupId, 'attendance.updated.v1', {
+      // B7 governance: use attendance.marked.v1 for first-time marks,
+      // attendance.updated.v1 for admin overrides / re-marks
+      const eventName = isNew ? 'attendance.marked.v1' : 'attendance.updated.v1';
+      this.gateway.emitToGroup(groupId, eventName, {
         groupId,
         userId: record.userId,
         mealId: record.mealId,

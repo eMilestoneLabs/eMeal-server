@@ -4,7 +4,10 @@ import {
   ForbiddenException,
   BadRequestException,
   Logger,
+  Inject,
+  Optional,
 } from '@nestjs/common';
+import type { RealtimeEventsService } from '../../realtime/services/realtime-events.service';
 import { MealsRepository } from './repositories/meals.repository';
 import { MealSerializer } from './serializers/meal.serializer';
 import { AuditService } from '../../audit/audit.service';
@@ -36,6 +39,8 @@ export class MealsService {
     private readonly mealsRepo: MealsRepository,
     private readonly groupsRepo: GroupsRepository,
     private readonly audit: AuditService,
+    @Optional() @Inject('REALTIME_GATEWAY')
+    private readonly realtime: RealtimeEventsService | null = null,
   ) {}
 
   // ── CREATE ────────────────────────────────────────────────────────────────
@@ -91,7 +96,16 @@ export class MealsService {
       requestId,
     });
 
-    this.logger.log(`Meal created: ${meal.id} slotKey=${meal.slotKey} group=${meal.groupId}`);
+    this.logger.log(`Meal created: \${meal.id} slotKey=\${meal.slotKey} group=\${meal.groupId}`);
+
+    // B7: emit meal.updated.v1 so clients invalidate their meal cache
+    this.realtime?.emitMealUpdated(organizationId, {
+      organizationId,
+      groupId: meal.groupId,
+      mealId: meal.id,
+      isActive: meal.isActive,
+      slotKey: meal.slotKey,
+    });
 
     return MealSerializer.toResponse(meal);
   }
@@ -213,6 +227,15 @@ export class MealsService {
       action: 'update',
       metadata: { changes: Object.keys(updateData) },
       requestId,
+    });
+
+    // B7: emit meal.updated.v1 on config change
+    this.realtime?.emitMealUpdated(organizationId, {
+      organizationId,
+      groupId: updated.groupId,
+      mealId: updated.id,
+      isActive: updated.isActive,
+      slotKey: updated.slotKey,
     });
 
     return MealSerializer.toResponse(updated);

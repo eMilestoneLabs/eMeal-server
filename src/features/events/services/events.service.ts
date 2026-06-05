@@ -4,6 +4,8 @@ import {
   ForbiddenException,
   BadRequestException,
   Logger,
+  Optional,
+  Inject,
 } from '@nestjs/common';
 import { EventsRepository } from '../repositories/events.repository';
 import { EventSerializer, EventGuestPartySerializer, EventStatsSerializer, EventMealTypeSerializer } from '../serializers/event.serializer';
@@ -15,6 +17,7 @@ import { UpdateEventDto } from '../dto/update-event.dto';
 import { CreateMealTypeDto, UpdateMealTypeDto } from '../dto/create-meal-type.dto';
 import { CreatePartyDto, UpdatePartyDto } from '../dto/create-party.dto';
 import { QueryEventsDto } from '../dto/query-events.dto';
+import type { RealtimeEventsService } from '../../../realtime/services/realtime-events.service';
 
 const ADMIN_ROLES = ['messManager', 'hostelManager', 'hostelAdmin', 'organizationManager', 'eventAdmin'];
 const EVENT_ADMIN_ROLES = ['eventAdmin', 'hostelAdmin', 'organizationManager'];
@@ -40,6 +43,8 @@ export class EventsService {
     private readonly eventsRepo: EventsRepository,
     private readonly audit: AuditService,
     private readonly redis: RedisService,
+    @Optional() @Inject('REALTIME_GATEWAY')
+    private readonly realtime: RealtimeEventsService | null = null,
   ) {}
 
   // ── EVENTS ────────────────────────────────────────────────────────────────
@@ -83,7 +88,14 @@ export class EventsService {
       requestId,
     });
 
-    this.logger.log(`Event created: ${event.id} name=${event.name} org=${organizationId}`);
+    this.logger.log(`Event created: \${event.id} name=\${event.name} org=\${organizationId}`);
+
+    // B7: signal admin dashboard that event roster changed
+    this.realtime?.emitDashboardSummaryUpdated(organizationId, event.id, {
+      organizationId,
+      groupId: event.id,  // for events, use eventId as the "groupId" room signal
+      date: new Date().toISOString().slice(0, 10),
+    });
 
     return EventSerializer.toResponse(event);
   }
@@ -149,6 +161,43 @@ export class EventsService {
       });
     }
     return EventSerializer.toResponse(event);
+  }
+
+  /**
+   * POST /events/join — Flutter: event_guest_join
+   * Resolves event by joinCode (QR scan) and registers a guest party.
+   * Does NOT require a JWT — public endpoint for guest registration.
+   */
+  async joinEventByCode(
+    joinCode: string,
+    primaryName: string,
+    adultsCount: number,
+    childrenCount: number,
+  ) {
+    const event = await this.eventsRepo.findByJoinToken(joinCode);
+    if (!event || !event.isActive) {
+      throw new NotFoundException({
+        message: 'Invalid join code. Please check with your admin.',
+        errors: { joinCode: 'No active event found with this join code' },
+        statusCode: 404,
+      });
+    }
+
+    const party = await this.eventsRepo.createParty(event.id, {
+      primaryName,
+      adultsCount: Math.max(1, adultsCount),
+      childrenCount: Math.max(0, childrenCount),
+    });
+
+    await this.invalidateEventStats(event.id);
+
+    this.realtime?.emitEventUpdated(event.organizationId, {
+      organizationId: event.organizationId,
+      eventId: event.id,
+      action: 'guest_joined',
+    });
+
+    return EventGuestPartySerializer.toResponse(party, true);
   }
 
   async updateEvent(

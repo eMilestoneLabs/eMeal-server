@@ -20,6 +20,7 @@ export const QUEUE_NAMES = {
   ANALYTICS: 'analytics-queue',
   EXPORT: 'export-queue',
   CLEANUP: 'cleanup-queue',
+  SCHEDULE_PUBLISH: 'schedule-publish-queue',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -48,6 +49,7 @@ export const JOB_TYPES = {
   CLEANUP_EXPIRED_EVENTS: 'cleanup-expired-events',
   CLEANUP_ORPHAN_RECORDS: 'cleanup-orphan-records',
   CLEANUP_AUDIT_LOGS: 'cleanup-audit-logs',
+  PUBLISH_SCHEDULE: 'publish-schedule',
 } as const;
 
 export type JobType = (typeof JOB_TYPES)[keyof typeof JOB_TYPES];
@@ -93,4 +95,5 @@ export const QUEUE_CONCURRENCY = {
   ANALYTICS: 1,            // analytics runs sequentially to avoid DB lock contention
   EXPORT: 2,               // two concurrent exports max
   CLEANUP: 1,              // cleanup always sequential for safety
+  SCHEDULE_PUBLISH: 2,     // two concurrent deferred publishes
 } as const;

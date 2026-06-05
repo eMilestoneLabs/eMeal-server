@@ -64,6 +64,9 @@ async function bootstrap() {
   await app.init();
   setupBullBoard(app);
 
+  // ── Graceful shutdown (PM2 cluster-safe) ──────────────────────────────────
+  app.enableShutdownHooks();
+
   // ── Start server ──────────────────────────────────────────────────────────
   await app.listen(port);
 

@@ -73,6 +73,29 @@ export class EventsController {
     return this.eventsService.getEventByJoinToken(token);
   }
 
+  /**
+   * POST /api/v1/events/join
+   *
+   * Flutter: event_guest_join → POST /events/join
+   * Event guest joins an event using a QR-scanned join code.
+   * Does NOT require full auth — guests register with just name + counts.
+   * Body: { joinCode, primaryName, adultsCount, childrenCount }
+   * Returns EventGuestParty (with persons[] pre-populated).
+   */
+  @Post('join')
+  @HttpCode(HttpStatus.CREATED)
+  @Public()
+  async joinEvent(
+    @Body() body: { joinCode: string; primaryName: string; adultsCount?: number; childrenCount?: number },
+  ) {
+    return this.eventsService.joinEventByCode(
+      body.joinCode,
+      body.primaryName,
+      body.adultsCount ?? 1,
+      body.childrenCount ?? 0,
+    );
+  }
+
   // ── EVENTS ────────────────────────────────────────────────────────────────
 
   @Post()
@@ -271,6 +294,42 @@ export class EventsController {
       user.role,
       req.headers['x-request-id'] as string,
     );
+  }
+
+  // ── GUEST PARTIES ALIASES (/guests → /parties) ──────────────────────────
+  // Flutter contract: GET /events/:id/guests, PATCH /events/:id/guests/:id
+
+  @Get(':id/guests')
+  async getGuests(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.eventsService.getParties(id, user.organizationId!, user.role, {
+      page: page ? parseInt(page, 10) : undefined,
+      limit: limit ? parseInt(limit, 10) : undefined,
+    });
+  }
+
+  @Patch(':id/guests/:guestId')
+  async updateGuest(
+    @CurrentUser() user: JwtPayload,
+    @Req() req: Request,
+    @Param('id') id: string,
+    @Param('guestId') guestId: string,
+    @Body() dto: UpdatePartyDto,
+  ) {
+    return this.eventsService.updateParty(id, guestId, user.organizationId!, user.sub, user.role, dto, req.headers['x-request-id'] as string);
+  }
+
+  // Flutter contract: GET /events/:id/analytics
+  @Get(':id/analytics')
+  async getEventAnalytics(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+  ) {
+    return this.eventsService.getEventStats(id, user.organizationId!);
   }
 
   // ── GUEST PERSONS ─────────────────────────────────────────────────────────

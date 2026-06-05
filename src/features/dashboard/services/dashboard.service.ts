@@ -116,6 +116,14 @@ export class DashboardService {
       });
     }
 
+    if (!groupId || groupId.trim() === '') {
+      throw new BadRequestException({
+        message: 'Validation failed',
+        errors: { groupId: 'groupId is required for attendance analytics' },
+        statusCode: 422,
+      });
+    }
+
     const fromDate = parseLocalDate(fromDateStr);
     const toDate = parseLocalDate(toDateStr);
 

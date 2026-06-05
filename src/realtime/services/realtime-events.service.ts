@@ -2,19 +2,14 @@ import { Injectable, Inject, Optional, Logger } from '@nestjs/common';
 import { AttendanceGateway } from '../gateway/attendance.gateway';
 
 /**
- * RealtimeEventsService — unified typed event emitter for all B7 realtime events.
+ * RealtimeEventsService — unified typed event emitter for all realtime events.
  *
  * This service is the ONLY interface other feature modules should use to emit
  * WebSocket events. It isolates feature modules from the gateway implementation.
  *
- * Inject pattern (in feature modules):
- *   constructor(
- *     @Optional() @Inject('REALTIME_GATEWAY') private readonly realtime: RealtimeEventsService,
- *   ) {}
- *
  * All methods are no-ops if gateway is not connected (prevents DI errors in tests).
  *
- * ── Event naming convention (versioned, additive-safe) ─────────────────────
+ * ── B7 events (versioned, additive-safe) ───────────────────────────────────
  *   attendance.marked.v1           — first-time attendance mark
  *   attendance.updated.v1          — admin override / re-mark
  *   meal.updated.v1                — meal config changed
@@ -24,6 +19,13 @@ import { AttendanceGateway } from '../gateway/attendance.gateway';
  *   dashboard.summary.updated.v1   — admin/student dashboard cache bust
  *   member.blocked.v1              — member blocked by admin
  *   group.member.updated.v1        — member joined / removed / role changed
+ *
+ * ── B5 dashboard/analytics events ─────────────────────────────────────────
+ *   dashboard.updated.v1           — dashboard data changed (full refresh signal)
+ *   analytics.updated.v1           — analytics aggregates changed
+ *   event.updated.v1               — event data changed
+ *   event.stats.updated.v1         — event statistics changed (guest count, etc.)
+ *   attendance.analytics.updated.v1 — attendance analytics cache invalidated
  */
 
 // ── Payload types (frontend-contract-locked shapes) ───────────────────────────
@@ -85,6 +87,41 @@ export interface GroupMemberUpdatedPayload {
   action: 'joined' | 'left' | 'removed' | 'blocked' | 'unblocked' | 'role_changed';
 }
 
+// ── B5 payload types ──────────────────────────────────────────────────────────
+
+export interface DashboardUpdatedPayload {
+  organizationId: string;
+  userId?: string;   // if null = all users in org; if set = specific user
+  reason: string;    // "attendance_marked" | "meal_updated" | "member_joined" | etc.
+}
+
+export interface AnalyticsUpdatedPayload {
+  organizationId: string;
+  groupId?: string;
+  type: string; // "attendance" | "meal" | "organization" | "group"
+}
+
+export interface EventUpdatedPayload {
+  organizationId: string;
+  eventId: string;
+  action: string; // "created" | "updated" | "deleted" | "guest_joined"
+}
+
+export interface EventStatsUpdatedPayload {
+  organizationId: string;
+  eventId: string;
+  total: number;
+  adults: number;
+  children: number;
+  pending: number;
+}
+
+export interface AttendanceAnalyticsUpdatedPayload {
+  organizationId: string;
+  groupId: string;
+  date: string; // YYYY-MM-DD
+}
+
 // ── Service ───────────────────────────────────────────────────────────────────
 
 @Injectable()
@@ -103,20 +140,12 @@ export class RealtimeEventsService {
 
   // ── Attendance events ─────────────────────────────────────────────────────
 
-  /**
-   * Emit when attendance is marked for the FIRST time.
-   * Broadcast to group:{groupId} room.
-   */
   emitAttendanceMarked(groupId: string, payload: AttendanceMarkedPayload): void {
     if (!this.isReady) return;
     this.gateway!.emitToGroup(groupId, 'attendance.marked.v1', payload);
     this.logger.debug(`attendance.marked.v1 → group:${groupId} userId=${payload.userId}`);
   }
 
-  /**
-   * Emit when attendance is overridden (admin override / re-mark).
-   * Broadcast to group:{groupId} room.
-   */
   emitAttendanceUpdated(groupId: string, payload: AttendanceUpdatedPayload): void {
     if (!this.isReady) return;
     this.gateway!.emitToGroup(groupId, 'attendance.updated.v1', payload);
@@ -125,20 +154,12 @@ export class RealtimeEventsService {
 
   // ── Meal events ───────────────────────────────────────────────────────────
 
-  /**
-   * Emit when a meal's config changes (isActive, slotKey, schedule, etc.).
-   * Broadcast to organization:{organizationId} room.
-   */
   emitMealUpdated(organizationId: string, payload: MealUpdatedPayload): void {
     if (!this.isReady) return;
     this.gateway!.emitToOrg(organizationId, 'meal.updated.v1', payload);
     this.logger.debug(`meal.updated.v1 → org:${organizationId} mealId=${payload.mealId}`);
   }
 
-  /**
-   * Emit when a meal is published/activated for the current day.
-   * Broadcast to group:{groupId} room (students need to see it).
-   */
   emitMealPublished(groupId: string, organizationId: string, payload: MealPublishedPayload): void {
     if (!this.isReady) return;
     this.gateway!.emitToGroup(groupId, 'meal.published.v1', payload);
@@ -147,20 +168,12 @@ export class RealtimeEventsService {
 
   // ── Schedule events ───────────────────────────────────────────────────────
 
-  /**
-   * Emit when a schedule is created or its entries are modified (still draft).
-   * Broadcast to admin room only.
-   */
   emitScheduleUpdated(organizationId: string, payload: ScheduleUpdatedPayload): void {
     if (!this.isReady) return;
     this.gateway!.emitToAdmin(organizationId, 'schedule.updated.v1', payload);
     this.logger.debug(`schedule.updated.v1 → admin:${organizationId}`);
   }
 
-  /**
-   * Emit when a schedule is published (students can now see it).
-   * Broadcast to group room so students receive it.
-   */
   emitSchedulePublished(groupId: string, organizationId: string, payload: ScheduleUpdatedPayload): void {
     if (!this.isReady) return;
     this.gateway!.emitToGroup(groupId, 'schedule.published.v1', payload);
@@ -168,13 +181,8 @@ export class RealtimeEventsService {
     this.logger.debug(`schedule.published.v1 → group:${groupId} + admin:${organizationId}`);
   }
 
-  // ── Dashboard events ──────────────────────────────────────────────────────
+  // ── Dashboard summary event ───────────────────────────────────────────────
 
-  /**
-   * Emit when dashboard summary data changes (attendance marked, meal updated, etc.).
-   * Triggers Flutter to invalidate its dashboard cache and re-fetch.
-   * Broadcast to both group and admin rooms.
-   */
   emitDashboardSummaryUpdated(
     organizationId: string,
     groupId: string,
@@ -188,26 +196,80 @@ export class RealtimeEventsService {
 
   // ── Member events ─────────────────────────────────────────────────────────
 
-  /**
-   * Emit when a member is blocked by an admin.
-   * Broadcasts to group room so all connected clients know.
-   * The blocked user's socket will be disconnected by the gateway.
-   */
   emitMemberBlocked(groupId: string, payload: MemberBlockedPayload): void {
     if (!this.isReady) return;
     this.gateway!.emitToGroup(groupId, 'member.blocked.v1', payload);
-    // Also emit directly to the blocked user's personal room
     this.gateway!.emitToUser(payload.userId, 'member.blocked.v1', payload);
     this.logger.debug(`member.blocked.v1 → group:${groupId} userId=${payload.userId}`);
   }
 
-  /**
-   * Emit when any group membership changes (joined, left, removed, role changed).
-   * Broadcast to group:{groupId} room.
-   */
   emitGroupMemberUpdated(groupId: string, payload: GroupMemberUpdatedPayload): void {
     if (!this.isReady) return;
     this.gateway!.emitToGroup(groupId, 'group.member.updated.v1', payload);
     this.logger.debug(`group.member.updated.v1 → group:${groupId} action=${payload.action}`);
+  }
+
+  // ── B5 Dashboard/Analytics/Event events ──────────────────────────────────
+
+  /**
+   * B5 Step 26: dashboard.updated.v1
+   * Emitted when any dashboard data changes (not just summary — full refresh signal).
+   * Admin room + optional specific user room.
+   */
+  emitDashboardUpdated(organizationId: string, payload: DashboardUpdatedPayload): void {
+    if (!this.isReady) return;
+    this.gateway!.emitToAdmin(organizationId, 'dashboard.updated.v1', payload);
+    if (payload.userId) {
+      this.gateway!.emitToUser(payload.userId, 'dashboard.updated.v1', payload);
+    }
+    this.logger.debug(`dashboard.updated.v1 → org:${organizationId} reason=${payload.reason}`);
+  }
+
+  /**
+   * B5 Step 26: analytics.updated.v1
+   * Emitted when analytics aggregates are invalidated (attendance/meal/org changes).
+   * Admin room only.
+   */
+  emitAnalyticsUpdated(organizationId: string, payload: AnalyticsUpdatedPayload): void {
+    if (!this.isReady) return;
+    this.gateway!.emitToAdmin(organizationId, 'analytics.updated.v1', payload);
+    this.logger.debug(`analytics.updated.v1 → admin:${organizationId} type=${payload.type}`);
+  }
+
+  /**
+   * B5 Step 26: event.updated.v1
+   * Emitted when event data changes (created, updated, guest joined, etc.).
+   * Organization room so all admins receive it.
+   */
+  emitEventUpdated(organizationId: string, payload: EventUpdatedPayload): void {
+    if (!this.isReady) return;
+    this.gateway!.emitToAdmin(organizationId, 'event.updated.v1', payload);
+    this.logger.debug(`event.updated.v1 → admin:${organizationId} eventId=${payload.eventId}`);
+  }
+
+  /**
+   * B5 Step 26: event.stats.updated.v1
+   * Emitted when event guest count or attendance stats change.
+   * Admin room only — guests don't need live stats.
+   */
+  emitEventStatsUpdated(organizationId: string, payload: EventStatsUpdatedPayload): void {
+    if (!this.isReady) return;
+    this.gateway!.emitToAdmin(organizationId, 'event.stats.updated.v1', payload);
+    this.logger.debug(`event.stats.updated.v1 → admin:${organizationId} eventId=${payload.eventId}`);
+  }
+
+  /**
+   * B5 Step 26: attendance.analytics.updated.v1
+   * Emitted when attendance analytics cache should be invalidated.
+   * Admin room — students don't use analytics endpoints.
+   */
+  emitAttendanceAnalyticsUpdated(
+    organizationId: string,
+    groupId: string,
+    payload: AttendanceAnalyticsUpdatedPayload,
+  ): void {
+    if (!this.isReady) return;
+    this.gateway!.emitToAdmin(organizationId, 'attendance.analytics.updated.v1', payload);
+    this.logger.debug(`attendance.analytics.updated.v1 → admin:${organizationId} group:${groupId}`);
   }
 }

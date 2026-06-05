@@ -8,6 +8,8 @@
  *   - todayAttendance: { present, absent, pending, skipped }
  *   - mealParticipation: [{ mealId, mealName, slotKey, count }]
  *   - recentActivity: [{ type, actorName, targetName, happenedAt }]
+ *   - weeklyMeals: [] — B5 Step 19 contract requirement
+ *   - notifications: [] — B5 Step 19 contract requirement
  */
 
 import {
@@ -21,6 +23,8 @@ export class StudentDashboardSerializer {
     return {
       upcomingMeals: entity.upcomingMeals,
       todayAttendance: entity.todayAttendance,
+      weeklyMeals: entity.weeklyMeals ?? [],
+      notifications: entity.notifications ?? [],
       attendanceSummary: {
         totalDays: entity.attendanceSummary.totalDays,
         presentDays: entity.attendanceSummary.presentDays,

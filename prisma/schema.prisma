@@ -53,14 +53,9 @@ enum AttendanceStatus {
 // NO MealType enum — meal slots are free-form slotKey VARCHAR
 // This is intentional: dynamic rendering architecture
 
-enum EventType {
-  wedding
-  corporate
-  birthday
-  festival
-  conference
-  other
-}
+// NO EventType enum — event types are free-form String
+// Polish.txt: "DO NOT create EventType enum. Event type MUST remain dynamic string."
+// Examples: "wedding", "corporate", "birthday", "festival", or any custom value
 
 enum AuditAction {
   create
@@ -139,7 +134,7 @@ model User {
   isDefaultAttendance Boolean @default(false)
   remindersEnabled    Boolean @default(true)
   loginPreference     String? @default("email") // "email" | "mobile"
-  fcmToken            String? // Phase B7: Firebase FCM push token
+  fcmToken            String? // Phase B6: Firebase FCM push token
 
   isActive    Boolean   @default(true)
   lastLoginAt DateTime?
@@ -423,31 +418,35 @@ model AttendanceRecord {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // EVENT — Simplified event-focused system
+// type is FREE-FORM String — Polish.txt: DO NOT create EventType enum
+// groupId is optional — event may be tied to an existing group
 // ─────────────────────────────────────────────────────────────────────────────
 
 model Event {
-  id             String    @id @default(cuid())
+  id             String   @id @default(cuid())
   organizationId String
-  adminId        String    // user who created the event
+  groupId        String?  // B5 Step 4: optional link to existing group
+  adminId        String   // user who created the event
   name           String
-  type           EventType @default(other)
+  type           String   @default("other") // Polish.txt: free-form string, NOT EventType enum
   eventDate      DateTime
-  expectedGuestCount Int   @default(0)
+  expectedGuestCount Int  @default(0)
 
   // QR join — serialized as "joinCode" in API (same as groups pattern)
-  joinToken    String    @unique @default(cuid())
-  autoDeleteAfter7Days Boolean @default(false)
-  autoDeleteAt DateTime? // eventDate + 7 days if autoDeleteAfter7Days=true
+  joinToken            String   @unique @default(cuid())
+  autoDeleteAfter7Days Boolean  @default(false)
+  autoDeleteAt         DateTime? // eventDate + 7 days if autoDeleteAfter7Days=true
 
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   mealTypes    EventMealType[]
   guestParties EventGuestParty[]
 
   @@index([organizationId])
+  @@index([groupId])
   @@index([joinToken])
   @@index([autoDeleteAt])
   @@map("events")
@@ -458,13 +457,13 @@ model Event {
 // ─────────────────────────────────────────────────────────────────────────────
 
 model EventMealType {
-  id         String  @id @default(cuid())
+  id         String   @id @default(cuid())
   eventId    String
-  title      String  // M-14 fix: "title" NOT "name"
-  emoji      String? // M-14 fix: emoji string
-  colorValue Int?    // M-14 fix: ARGB32 integer (Flutter Color.toARGB32())
-  isVeg      Boolean @default(true)
-  createdAt  DateTime @default(now()) // B5: required for ordering and entity contract
+  title      String   // M-14 fix: "title" NOT "name"
+  emoji      String?  // M-14 fix: emoji string
+  colorValue Int?     // M-14 fix: ARGB32 integer (Flutter Color.toARGB32())
+  isVeg      Boolean  @default(true)
+  createdAt  DateTime @default(now())
 
   event   Event         @relation(fields: [eventId], references: [id], onDelete: Cascade)
   persons EventPerson[]
@@ -475,19 +474,22 @@ model EventMealType {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // EVENT GUEST PARTY — M-16 fix: primaryName, adultsCount, childrenCount, joinedAt
+// organizationId for org-scoped queries (B5 Step 6 requirement)
 // ─────────────────────────────────────────────────────────────────────────────
 
 model EventGuestParty {
-  id           String   @id @default(cuid())
-  eventId      String
-  primaryName  String   // M-16 fix: persons[0].displayName
-  adultsCount  Int      @default(1)  // M-16 fix: "adultsCount" NOT "adultCount"
-  childrenCount Int     @default(0)  // M-16 fix: "childrenCount" NOT "childCount"
-  joinedAt     DateTime @default(now()) // M-16 fix: was missing
+  id             String   @id @default(cuid())
+  organizationId String   // B5 Step 6: required for org-isolation queries
+  eventId        String
+  primaryName    String   // M-16 fix: persons[0].displayName
+  adultsCount    Int      @default(1)  // M-16 fix: "adultsCount" NOT "adultCount"
+  childrenCount  Int      @default(0)  // M-16 fix: "childrenCount" NOT "childCount"
+  joinedAt       DateTime @default(now()) // M-16 fix: was missing
 
   event   Event         @relation(fields: [eventId], references: [id], onDelete: Cascade)
   persons EventPerson[]
 
+  @@index([organizationId])
   @@index([eventId])
   @@map("event_guest_parties")
 }
@@ -497,8 +499,8 @@ model EventGuestParty {
 // ─────────────────────────────────────────────────────────────────────────────
 
 model EventPerson {
-  id      String @id @default(cuid())
-  partyId String
+  id         String  @id @default(cuid())
+  partyId    String
   mealTypeId String?
 
   displayName  String  // M-17 fix: "displayName" NOT "name"
@@ -510,7 +512,7 @@ model EventPerson {
   selectedMealTypeId String? // M-17 fix: "selectedMealTypeId" NOT "mealTypeId"
   mealPreference     String? // M-17 fix: "mealPreference" NOT "preference"
 
-  createdAt DateTime @default(now()) // B5: required for ordering and entity contract
+  createdAt DateTime @default(now())
 
   party    EventGuestParty @relation(fields: [partyId], references: [id], onDelete: Cascade)
   mealType EventMealType?  @relation(fields: [mealTypeId], references: [id], onDelete: SetNull)
@@ -536,8 +538,6 @@ model AuditLog {
   createdAt      DateTime    @default(now())
 
   // NOTE: targetId is intentionally NOT a FK — it can reference any entity type
-  // (User, Group, Meal, Attendance, Event). A FK to users.id would cause violations
-  // whenever targetType is not "User".
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
   actor        User?         @relation("ActorAuditLogs", fields: [actorId], references: [id], onDelete: SetNull)
 

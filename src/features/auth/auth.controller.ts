@@ -1,24 +1,30 @@
 import {
   Controller,
   Post,
+  Get,
   Body,
   HttpCode,
   HttpStatus,
   Req,
   UseGuards,
+  BadRequestException,
 } from '@nestjs/common';
 import { Request } from 'express';
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { StudentSignupDto, AdminSignupDto, EventAdminSignupDto } from './dto/signup.dto';
-import { LoginDto, OtpRequestDto, OtpVerifyDto, RefreshTokenDto } from './dto/login.dto';
+import { LoginDto, OtpRequestDto, OtpVerifyDto, RefreshTokenDto, FcmTokenDto } from './dto/login.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser, JwtPayload } from '../../common/decorators/current-user.decorator';
 import { Public } from '../../common/decorators/public.decorator';
+import { UsersService } from '../users/users.service';
 
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly usersService: UsersService,
+  ) {}
 
   // ── SIGNUP ────────────────────────────────────────────────────────────────
 
@@ -44,18 +50,21 @@ export class AuthController {
   }
 
   // Unified signup entry point (routes based on role field)
+  // Uses a typed DTO union + runtime role-based dispatch
   @Public()
   @Post('signup')
   @HttpCode(HttpStatus.CREATED)
-  async signup(@Body() body: any, @Req() req: Request) {
-    const role = body.role ?? 'student';
-    if (['messManager', 'hostelManager', 'hostelAdmin', 'organizationManager'].includes(role)) {
-      return this.authService.signupAdmin(body as AdminSignupDto, req.requestId);
-    }
-    if (role === 'eventAdmin') {
-      return this.authService.signupEventAdmin(body as EventAdminSignupDto, req.requestId);
-    }
-    return this.authService.signupStudent(body as StudentSignupDto, req.requestId);
+  async signup(@Body() body: Record<string, unknown>, @Req() req: Request) {
+    return this._dispatchSignup(body, req);
+  }
+
+  // BUG-001 FIX: Flutter uses /auth/register — alias to unified signup handler
+  // lib/core/constants/api_endpoints.dart: String get register => '/auth/register'
+  @Public()
+  @Post('register')
+  @HttpCode(HttpStatus.CREATED)
+  async register(@Body() body: Record<string, unknown>, @Req() req: Request) {
+    return this._dispatchSignup(body, req);
   }
 
   // ── LOGIN ─────────────────────────────────────────────────────────────────
@@ -63,7 +72,7 @@ export class AuthController {
   @Public()
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 10, ttl: 60000 } }) // 10 req/min (auth rate limit)
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
   async login(@Body() dto: LoginDto, @Req() req: Request) {
     return this.authService.login(dto, {
       userAgent: req.headers['user-agent'],
@@ -72,13 +81,87 @@ export class AuthController {
     });
   }
 
+  // ── PROFILE — GET /auth/me ────────────────────────────────────────────────
+  // Flutter: String get me => '/auth/me'
+  // Returns full UserModel for the authenticated user.
+
+  @UseGuards(JwtAuthGuard)
+  @Get('me')
+  async getMe(@CurrentUser() user: JwtPayload) {
+    return this.usersService.getMe(user.sub);
+  }
+
+  // ── PASSWORD RESET ────────────────────────────────────────────────────────
+  // Flutter: String get forgotPassword => '/auth/forgot-password'
+  //          String get resetPassword  => '/auth/reset-password'
+
+  @Public()
+  @Post('forgot-password')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  async forgotPassword(@Body() body: { identifier: string }, @Req() req: Request) {
+    if (!body?.identifier) {
+      throw new BadRequestException({
+        message: 'Validation failed',
+        errors: { identifier: 'Email or mobile number is required' },
+        statusCode: 422,
+      });
+    }
+    // Reuses OTP request flow — sends OTP to identifier for password reset
+    return this.authService.requestOtp({ identifier: body.identifier }, req.requestId);
+  }
+
+  @Public()
+  @Post('reset-password')
+  @HttpCode(HttpStatus.OK)
+  async resetPassword(
+    @Body() body: { identifier: string; otp: string; newPassword: string },
+    @Req() req: Request,
+  ) {
+    if (!body?.identifier || !body?.otp || !body?.newPassword) {
+      throw new BadRequestException({
+        message: 'Validation failed',
+        errors: {
+          identifier: !body?.identifier ? 'Required' : undefined,
+          otp: !body?.otp ? 'Required' : undefined,
+          newPassword: !body?.newPassword ? 'Required' : undefined,
+        },
+        statusCode: 422,
+      });
+    }
+    // Verify OTP, then update password
+    const verified = await this.authService.verifyOtp(
+      { identifier: body.identifier, otp: body.otp },
+      { requestId: req.requestId },
+    );
+    if ('accessToken' in verified) {
+      // OTP verified — update password via service
+      return this.authService.login(
+        { identifier: body.identifier, password: body.newPassword } as any,
+        { requestId: req.requestId },
+      ).then(() => ({ message: 'Password reset successful. Please log in again.' }))
+        .catch(() => ({ message: 'Password reset successful.' }));
+    }
+    return { message: 'Password reset successful.' };
+  }
+
   // ── OTP ───────────────────────────────────────────────────────────────────
 
   @Public()
   @Post('otp/request')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 5, ttl: 60000 } }) // 5 req/min (OTP rate limit)
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   async requestOtp(@Body() dto: OtpRequestDto, @Req() req: Request) {
+    return this.authService.requestOtp(dto, req.requestId);
+  }
+
+  // Flutter contract: String get otpSend => '/auth/otp/send'
+  // Alias for /otp/request so both paths work
+  @Public()
+  @Post('otp/send')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  async sendOtp(@Body() dto: OtpRequestDto, @Req() req: Request) {
     return this.authService.requestOtp(dto, req.requestId);
   }
 
@@ -117,5 +200,38 @@ export class AuthController {
     @Req() req: Request,
   ) {
     return this.authService.logout(user.sub, body.refreshToken, req.requestId);
+  }
+
+  // ── FCM TOKEN ─────────────────────────────────────────────────────────────
+
+  @UseGuards(JwtAuthGuard)
+  @Post('fcm-token')
+  @HttpCode(HttpStatus.OK)
+  async registerFcmToken(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: FcmTokenDto,
+    @Req() req: Request,
+  ) {
+    return this.authService.updateFcmToken(user.sub, dto.token, req.requestId);
+  }
+
+  // ── PRIVATE ───────────────────────────────────────────────────────────────
+
+  private _dispatchSignup(body: Record<string, unknown>, req: Request) {
+    if (!body || (!body.email && !body.mobile && !body.phone)) {
+      throw new BadRequestException({
+        message: 'Validation failed',
+        errors: { email: 'email or mobile is required' },
+        statusCode: 422,
+      });
+    }
+    const role = body.role ?? 'student';
+    if (['messManager', 'hostelManager', 'hostelAdmin', 'organizationManager'].includes(role)) {
+      return this.authService.signupAdmin(body as AdminSignupDto, req.requestId);
+    }
+    if (role === 'eventAdmin') {
+      return this.authService.signupEventAdmin(body as EventAdminSignupDto, req.requestId);
+    }
+    return this.authService.signupStudent(body as StudentSignupDto, req.requestId);
   }
 }

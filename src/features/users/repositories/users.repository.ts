@@ -8,16 +8,15 @@ export class UsersRepository {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Build UserEntity from Prisma User record + computed groupIds.
-   * groupIds are computed from GroupMember table — not a DB column.
+   * Build UserEntity from a Prisma User record that already has
+   * `members` included via Prisma include clause.
+   * Using include on the parent query eliminates the N+1 pattern
+   * where buildEntity() previously fired one GroupMember query per user.
    */
-  private async buildEntity(user: any): Promise<UserEntity> {
-    // status: 'active' — blocked/removed members do not appear in groupIds
-    const members = await this.prisma.groupMember.findMany({
-      where: { userId: user.id, status: 'active' },
-      select: { groupId: true },
-    });
-    const groupIds = members.map((m) => m.groupId);
+  private buildEntityFromInclude(user: any): UserEntity {
+    const groupIds = (user.members ?? [])
+      .filter((m: any) => m.status === 'active')
+      .map((m: any) => m.groupId);
     return new UserEntity({
       ...user,
       groupIds,
@@ -25,41 +24,51 @@ export class UsersRepository {
     });
   }
 
+  /** Include clause reused across all single-record finders. */
+  private get memberInclude() {
+    return {
+      members: {
+        where: { status: 'active' as const },
+        select: { groupId: true, status: true },
+      },
+    };
+  }
+
   async findById(id: string): Promise<UserEntity | null> {
-    const user = await this.prisma.user.findUnique({ where: { id } });
+    const user = await this.prisma.user.findUnique({
+      where: { id },
+      include: this.memberInclude,
+    });
     if (!user) return null;
-    return this.buildEntity(user);
+    return this.buildEntityFromInclude(user);
   }
 
   async findByEmail(email: string, organizationId?: string): Promise<UserEntity | null> {
     const user = await this.prisma.user.findFirst({
-      where: {
-        email,
-        ...(organizationId ? { organizationId } : {}),
-      },
+      where: { email, ...(organizationId ? { organizationId } : {}) },
+      include: this.memberInclude,
     });
     if (!user) return null;
-    return this.buildEntity(user);
+    return this.buildEntityFromInclude(user);
   }
 
   async findByPhone(phone: string, organizationId?: string): Promise<UserEntity | null> {
     const user = await this.prisma.user.findFirst({
-      where: {
-        phone,
-        ...(organizationId ? { organizationId } : {}),
-      },
+      where: { phone, ...(organizationId ? { organizationId } : {}) },
+      include: this.memberInclude,
     });
     if (!user) return null;
-    return this.buildEntity(user);
+    return this.buildEntityFromInclude(user);
   }
 
   async findByIdentifier(identifier: string): Promise<UserEntity | null> {
     const isEmail = identifier.includes('@');
     const user = await this.prisma.user.findFirst({
       where: isEmail ? { email: identifier } : { phone: identifier },
+      include: this.memberInclude,
     });
     if (!user) return null;
-    return this.buildEntity(user);
+    return this.buildEntityFromInclude(user);
   }
 
   async create(data: {
@@ -73,8 +82,11 @@ export class UsersRepository {
     organizationId?: string;
     loginPreference?: string;
   }): Promise<UserEntity> {
-    const user = await this.prisma.user.create({ data });
-    return this.buildEntity(user);
+    const user = await this.prisma.user.create({
+      data,
+      include: this.memberInclude,
+    });
+    return this.buildEntityFromInclude(user);
   }
 
   async update(id: string, data: Partial<{
@@ -94,8 +106,12 @@ export class UsersRepository {
     isActive: boolean;
     organizationId: string;
   }>): Promise<UserEntity> {
-    const user = await this.prisma.user.update({ where: { id }, data });
-    return this.buildEntity(user);
+    const user = await this.prisma.user.update({
+      where: { id },
+      data,
+      include: this.memberInclude,
+    });
+    return this.buildEntityFromInclude(user);
   }
 
   async existsByEmail(email: string, organizationId?: string): Promise<boolean> {
@@ -110,5 +126,24 @@ export class UsersRepository {
       where: { phone, ...(organizationId ? { organizationId } : {}) },
     });
     return count > 0;
+  }
+
+  /**
+   * findByOrg — single query with include (no N+1).
+   * For 1000 users this was previously 1001 queries; now it is 1 query + 1 join.
+   */
+  async findByOrg(organizationId: string, skip: number, limit: number): Promise<UserEntity[]> {
+    const users = await this.prisma.user.findMany({
+      where: { organizationId, isActive: true },
+      skip,
+      take: limit,
+      orderBy: { createdAt: 'desc' },
+      include: this.memberInclude,
+    });
+    return users.map((u) => this.buildEntityFromInclude(u));
+  }
+
+  async countByOrg(organizationId: string): Promise<number> {
+    return this.prisma.user.count({ where: { organizationId, isActive: true } });
   }
 }

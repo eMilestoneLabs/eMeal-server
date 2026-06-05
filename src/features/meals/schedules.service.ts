@@ -4,6 +4,8 @@ import {
   BadRequestException,
   ConflictException,
   Logger,
+  Optional,
+  Inject,
 } from '@nestjs/common';
 import { SchedulesRepository } from './repositories/schedules.repository';
 import { MealsRepository } from './repositories/meals.repository';
@@ -12,6 +14,7 @@ import { ScheduleSerializer } from './serializers/schedule.serializer';
 import { AuditService } from '../../audit/audit.service';
 import { CreateScheduleDto, CreateScheduleEntryDto } from './dto/create-schedule.dto';
 import { UpdateScheduleDto, CloneScheduleDto } from './dto/update-schedule.dto';
+import type { RealtimeEventsService } from '../../realtime/services/realtime-events.service';
 import { QuerySchedulesDto } from './dto/query-meals.dto';
 import { PaginatedResponseDto } from '../../common/dto/paginated-response.dto';
 
@@ -59,6 +62,8 @@ export class SchedulesService {
     private readonly mealsRepo: MealsRepository,
     private readonly groupsRepo: GroupsRepository,
     private readonly audit: AuditService,
+    @Optional() @Inject('REALTIME_GATEWAY')
+    private readonly realtime: RealtimeEventsService | null = null,
   ) {}
 
   // ── CREATE ────────────────────────────────────────────────────────────────
@@ -118,7 +123,15 @@ export class SchedulesService {
       requestId,
     });
 
-    this.logger.log(`Schedule created: ${schedule.id} week=${dto.weekStartDate}`);
+    this.logger.log(`Schedule created: \${schedule.id} week=\${dto.weekStartDate}`);
+
+    this.realtime?.emitScheduleUpdated(organizationId, {
+      organizationId,
+      groupId: schedule.groupId,
+      scheduleId: schedule.id,
+      weekStart: schedule.weekStart.toISOString(),
+      isPublished: false,
+    });
 
     return ScheduleSerializer.toResponse(schedule);
   }
@@ -282,7 +295,15 @@ export class SchedulesService {
       requestId,
     });
 
-    this.logger.log(`Schedule published: ${id}`);
+    this.logger.log(`Schedule published: \${id}`);
+
+    this.realtime?.emitSchedulePublished(schedule.groupId, organizationId, {
+      organizationId,
+      groupId: schedule.groupId,
+      scheduleId: schedule.id,
+      weekStart: schedule.weekStart.toISOString(),
+      isPublished: true,
+    });
 
     return ScheduleSerializer.toResponse(schedule);
   }

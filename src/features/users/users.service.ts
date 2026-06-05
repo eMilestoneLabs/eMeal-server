@@ -75,4 +75,29 @@ export class UsersService {
     await this.usersRepo.update(userId, { fcmToken: token });
     return { message: 'FCM token updated' };
   }
+  async listByOrg(organizationId: string, params: { page: number; limit: number }) {
+    const page = Math.max(1, params.page);
+    const limit = Math.min(100, Math.max(1, params.limit));
+    const skip = (page - 1) * limit;
+    const [users, total] = await Promise.all([
+      this.usersRepo.findByOrg(organizationId, skip, limit),
+      this.usersRepo.countByOrg(organizationId),
+    ]);
+    return {
+      data: users.map(UserSerializer.toResponse),
+      total,
+      page,
+      limit,
+    };
+  }
+
+  async removeUser(userId: string, organizationId: string) {
+    const user = await this.usersRepo.findById(userId);
+    if (!user || user.organizationId !== organizationId) {
+      throw new NotFoundException('User not found');
+    }
+    await this.usersRepo.update(userId, { isActive: false });
+    return { message: 'User removed successfully' };
+  }
+
 }

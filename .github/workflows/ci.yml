@@ -1,0 +1,193 @@
+name: Backend CI
+
+# Staged, parallel, production-safe pipeline for the MealAttend backend.
+#
+#   Stage 1  fast-validation   integrity + lint + typecheck + secret scan   (parallel)
+#   Stage 2  unit              jest matrix by domain                        (parallel)
+#   Stage 3  integration       real Postgres + Redis + e2e (smoke + system)
+#   Stage 4  production        build + prisma generate + docker + PM2 config
+#   Stage 5  ci-gate           single required status - green only if all pass
+#
+# Tests are fully isolated from production: ephemeral service containers, test-only
+# env vars, no production DB/Redis/volumes are ever touched.
+
+on:
+  push:
+    branches: [eMeal-server, main]
+  pull_request:
+    branches: [eMeal-server, main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "20"
+  NODE_ENV: test
+  DATABASE_URL: postgresql://postgres:postgres@localhost:5432/emeal_test
+  REDIS_HOST: localhost
+  REDIS_PORT: "6379"
+  JWT_ACCESS_SECRET: test-jwt-access-secret-64-chars-minimum-padding-here-xxxxxxxx
+  JWT_REFRESH_SECRET: test-jwt-refresh-secret-64-chars-minimum-padding-here-xxxxxxx
+  REFRESH_TOKEN_SECRET: test-refresh-secret
+  BULL_BOARD_SECRET: test-bull-secret
+
+jobs:
+  # STAGE 1 - FAST VALIDATION (parallel matrix, no DB needed, fails fast)
+  fast-validation:
+    name: "S1 - ${{ matrix.check }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [integrity, lint, typecheck, secret-scan]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate Prisma client
+        if: matrix.check == 'typecheck'
+        run: npx prisma generate
+      - name: Repo integrity scan
+        if: matrix.check == 'integrity'
+        run: node scripts/ci/integrity-check.js
+      - name: ESLint
+        if: matrix.check == 'lint'
+        run: npm run lint
+      - name: TypeScript compile (noEmit)
+        if: matrix.check == 'typecheck'
+        run: npx tsc --noEmit
+      - name: Governance / secret scan
+        if: matrix.check == 'secret-scan'
+        run: bash scripts/ci/governance-scan.sh
+
+  # STAGE 2 - UNIT TESTS (parallel matrix by domain, no external services)
+  unit:
+    name: "S2 - unit - ${{ matrix.suite }}"
+    runs-on: ubuntu-latest
+    needs: fast-validation
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: security-contracts
+            pattern: "src/common/tests"
+          - suite: serializers
+            pattern: "serializer.spec.ts$"
+          - suite: services
+            pattern: "service.spec.ts$"
+          - suite: workers
+            pattern: "src/workers/tests"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate Prisma client
+        run: npx prisma generate
+      - name: Run unit suite (${{ matrix.suite }})
+        run: npx jest --runInBand --passWithNoTests --testPathPattern "${{ matrix.pattern }}"
+
+  # STAGE 3 - INTEGRATION + E2E (real Postgres + Redis; ephemeral, isolated)
+  integration:
+    name: "S3 - integration"
+    runs-on: ubuntu-latest
+    needs: [fast-validation, unit]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: emeal_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate Prisma client
+        run: npx prisma generate
+      # Use db push against the EPHEMERAL test DB. Switch to migrate deploy once an
+      # initial migration is committed (prisma/migrations) in B11.
+      - name: Sync schema to test database
+        run: npx prisma db push --skip-generate
+      - name: Unit suite against real DB + Redis (sanity)
+        run: npx jest --runInBand --passWithNoTests
+      - name: End-to-end suite (smoke + system B1-B5, real DB + Redis)
+        run: npm run test:e2e
+
+  # STAGE 4 - PRODUCTION VALIDATION (build artifacts, docker, PM2 config)
+  production:
+    name: "S4 - production-validate"
+    runs-on: ubuntu-latest
+    needs: [fast-validation, unit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate Prisma client
+        run: npx prisma generate
+      - name: Production build
+        run: npm run build
+      - name: Validate PM2 ecosystem config
+        run: node -e "require('./ecosystem.config.js'); console.log('PM2 ecosystem config OK')"
+      - name: Docker build (if Dockerfile present)
+        run: |
+          if [ -f Dockerfile ]; then
+            docker build -t emeal-server:ci .
+          else
+            echo "::warning::No Dockerfile yet (B11 item) - skipping docker build"
+          fi
+
+  # STAGE 5 - FINAL GATE (single required check for branch protection)
+  ci-gate:
+    name: "S5 - ci-gate"
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [fast-validation, unit, integration, production]
+    steps:
+      - name: Enforce all stages passed
+        run: |
+          echo "fast-validation: ${{ needs.fast-validation.result }}"
+          echo "unit:            ${{ needs.unit.result }}"
+          echo "integration:     ${{ needs.integration.result }}"
+          echo "production:      ${{ needs.production.result }}"
+          if [ "${{ needs.fast-validation.result }}" != "success" ] || \
+             [ "${{ needs.unit.result }}" != "success" ] || \
+             [ "${{ needs.integration.result }}" != "success" ] || \
+             [ "${{ needs.production.result }}" != "success" ]; then
+            echo "CI gate failed - one or more stages did not pass."
+            exit 1
+          fi
+          echo "CI gate passed - backend is merge-safe."

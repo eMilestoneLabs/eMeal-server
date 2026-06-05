@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Post,
+  Put,
   Patch,
   Delete,
   Body,
@@ -156,6 +157,25 @@ export class GroupsController {
 
   // ── MEMBERS ───────────────────────────────────────────────────────────────
 
+  // ── POST /groups/:id/members — Flutter: addMember = '/groups/{groupId}/members' ──
+  // Admin adds a user by userId to the group directly (without QR scan)
+
+  @Post(':id/members')
+  @HttpCode(HttpStatus.CREATED)
+  @UseGuards(RolesGuard)
+  @Roles(...ADMIN_ROLES)
+  async addMember(
+    @Param('id') groupId: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() body: { userId: string; role?: string },
+    @Req() req: Request,
+  ) {
+    if (!user.organizationId) {
+      throw new BadRequestException({ message: 'No organization', errors: { organizationId: 'Required' } });
+    }
+    return this.groupsService.addMemberById(groupId, user.organizationId!, user.sub, body.userId, body.role, req.requestId);
+  }
+
   @Get(':id/members')
   async getMembers(
     @Param('id') groupId: string,
@@ -217,4 +237,43 @@ export class GroupsController {
       req.requestId,
     );
   }
+  // ── GET /groups/:id/qr-token — Flutter: qrToken = '/groups/{groupId}/qr-token' ──
+  // Returns the current joinCode for the group (admin only).
+  // Flutter uses this to render the QR code with the join token.
+
+  @Get(':id/qr-token')
+  @UseGuards(RolesGuard)
+  @Roles(...ADMIN_ROLES)
+  async getQrToken(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.groupsService.getQrToken(id, user.organizationId!);
+  }
+
+  // ── GET /groups/:id/meal-config — Flutter: mealConfig = '/groups/{groupId}/meal-config' ─
+
+  @Get(':id/meal-config')
+  async getMealConfig(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.groupsService.getMealConfig(id, user.organizationId!);
+  }
+
+  // ── PUT /groups/:id/meal-config — Flutter: updateMealConfig ───────────────
+  // Flutter sends PUT but backend has PATCH — add PUT alias.
+
+  @Put(':id/meal-config')
+  @UseGuards(RolesGuard)
+  @Roles(...ADMIN_ROLES)
+  async putMealConfig(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: any,
+    @Req() req: Request,
+  ) {
+    return this.groupsService.updateGroup(id, user.organizationId!, user.sub, { mealConfig: dto }, req.requestId);
+  }
+
 }

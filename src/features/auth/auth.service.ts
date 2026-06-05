@@ -283,9 +283,11 @@ export class AuthService {
       userId: user?.id,
     });
 
-    this.logger.log(
-      `[DEV ONLY] OTP for ${dto.identifier}: ${otp} (expires ${expiresAt.toISOString()})`,
-    );
+    if (process.env.NODE_ENV === 'development') {
+      this.logger.debug(
+        `[DEV ONLY] OTP for ${dto.identifier}: ${otp} (expires ${expiresAt.toISOString()})`,
+      );
+    }
 
     return {
       message: 'OTP sent successfully',
@@ -506,7 +508,24 @@ export class AuthService {
     });
   }
 
-  private async checkIdentifierAvailability(email?: string, phone?: string) {
+
+  // ── FCM TOKEN ─────────────────────────────────────────────────────────────
+
+  /**
+   * B6: Register or update FCM push token for a user.
+   * POST /auth/fcm-token — authenticated endpoint.
+   */
+  async updateFcmToken(userId: string, token: string, requestId?: string): Promise<{ message: string }> {
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { fcmToken: token },
+    });
+
+    this.logger.debug(`FCM token updated for userId=${userId} requestId=${requestId}`);
+    return { message: 'FCM token registered successfully' };
+  }
+
+    private async checkIdentifierAvailability(email?: string, phone?: string) {
     if (email) {
       const emailExists = await this.usersRepo.existsByEmail(email);
       if (emailExists) {

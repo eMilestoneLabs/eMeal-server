@@ -5,6 +5,8 @@ import {
   BadRequestException,
   ForbiddenException,
   Logger,
+  Optional,
+  Inject,
 } from '@nestjs/common';
 import { GroupsRepository } from './repositories/groups.repository';
 import { MembersRepository } from './repositories/members.repository';
@@ -21,6 +23,7 @@ import { JoinGroupDto } from './dto/join-group.dto';
 import { UpdateMemberDto } from './dto/update-member.dto';
 import { QueryGroupsDto, QueryMembersDto } from './dto/query-groups.dto';
 import { ADMIN_ROLES } from '../../common/decorators/roles.decorator';
+import { RealtimeEventsService } from '../../realtime/services/realtime-events.service';
 
 @Injectable()
 export class GroupsService {
@@ -32,6 +35,8 @@ export class GroupsService {
     private readonly usersRepo: UsersRepository,
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    @Optional() @Inject('REALTIME_GATEWAY')
+    private readonly realtime: RealtimeEventsService | null = null,
   ) {}
 
   // ── CREATE ────────────────────────────────────────────────────────────────
@@ -49,7 +54,7 @@ export class GroupsService {
     const group = await this.groupsRepo.create({
       organizationId,
       name: dto.name,
-      type: dto.type,
+      type: GroupSerializer.normalizeTypeForDb(dto.type),  // BUG-002: factory_ → factory for DB
       description: dto.description,
       adminId,
       joinToken,
@@ -152,6 +157,8 @@ export class GroupsService {
 
     const updateData: any = {};
     if (dto.name !== undefined) updateData.name = dto.name;
+    // BUG-002: normalize factory_ → factory for DB on type update
+    if (dto.type !== undefined) updateData.type = GroupSerializer.normalizeTypeForDb(dto.type);
     if (dto.description !== undefined) updateData.description = dto.description;
     if (dto.maxMembers !== undefined) updateData.maxMembers = dto.maxMembers;
     if (dto.isActive !== undefined) updateData.isActive = dto.isActive;
@@ -303,7 +310,14 @@ export class GroupsService {
     // Sync user's organizationId if they don't have one yet
     await this.syncUserOrganization(userId, group.organizationId);
 
-    this.logger.log(`User ${userId} joined group ${group.id}`);
+    this.logger.log(`User \${userId} joined group \${group.id}`);
+
+    // B7: emit group membership change so group room members see the new member
+    this.realtime?.emitGroupMemberUpdated(group.id, {
+      groupId: group.id,
+      userId,
+      action: 'joined',
+    });
 
     const refreshed = await this.groupsRepo.findById(group.id, group.organizationId);
     return GroupSerializer.toResponse(refreshed!);
@@ -457,6 +471,21 @@ export class GroupsService {
       requestId,
     });
 
+    // B7: emit typed realtime events for block / unblock / role change
+    if (dto.status === 'blocked') {
+      this.realtime?.emitMemberBlocked(groupId, {
+        groupId,
+        userId: targetUserId,
+        blockedBy: actorId,
+      });
+    } else {
+      this.realtime?.emitGroupMemberUpdated(groupId, {
+        groupId,
+        userId: targetUserId,
+        action: dto.status === 'active' ? 'unblocked' : (dto.role ? 'roleChanged' : 'updated'),
+      });
+    }
+
     return GroupMemberSerializer.toResponse(updated);
   }
 
@@ -499,7 +528,68 @@ export class GroupsService {
       requestId,
     });
 
+    // B7: emit membership removal event
+    this.realtime?.emitGroupMemberUpdated(groupId, {
+      groupId,
+      userId: targetUserId,
+      action: 'removed',
+    });
+
     return { message: 'Member removed from group', userId: targetUserId };
+  }
+
+  /**
+   * POST /groups/:id/members
+   * Admin adds a specific user by userId to the group.
+   * Distinct from joinGroup (QR-based) — this is admin-initiated direct add.
+   */
+  async addMemberById(
+    groupId: string,
+    organizationId: string,
+    actorId: string,
+    targetUserId: string,
+    role?: string,
+    requestId?: string,
+  ) {
+    const group = await this.groupsRepo.findById(groupId, organizationId);
+    if (!group) throw new NotFoundException('Group not found');
+
+    const user = await this.usersRepo.findById(targetUserId);
+    if (!user) throw new NotFoundException({ message: 'User not found', errors: { userId: 'No user with this ID exists' } });
+
+    const existing = await this.membersRepo.findMembership(groupId, targetUserId);
+    if (existing) {
+      if (existing.status === 'blocked') {
+        throw new BadRequestException({ message: 'User is blocked from this group', errors: { userId: 'Unblock the user before adding them' } });
+      }
+      if (existing.status === 'active') {
+        throw new ConflictException({ message: 'You are already a member of this group.', statusCode: 409 });
+      }
+      // Re-activate removed member
+      const updated = await this.membersRepo.updateMembership(groupId, targetUserId, {
+        status: 'active',
+        role: (role as any) ?? existing.role,
+        removedAt: null as any,
+        removedBy: null as any,
+      });
+      await this.syncUserOrganization(targetUserId, organizationId);
+      this.realtime?.emitGroupMemberUpdated(groupId, { groupId, userId: targetUserId, action: 'joined' });
+      return GroupMemberSerializer.toResponse(updated);
+    }
+
+    const membership = await this.membersRepo.createMembership({
+      groupId,
+      userId: targetUserId,
+      role: (role as any) ?? 'member',
+      status: 'active',
+    });
+
+    await this.syncUserOrganization(targetUserId, organizationId);
+
+    this.audit.log({ organizationId, actorId, targetId: targetUserId, targetType: 'User', action: 'join', metadata: { groupId, addedByAdmin: true }, requestId });
+    this.realtime?.emitGroupMemberUpdated(groupId, { groupId, userId: targetUserId, action: 'joined' });
+
+    return GroupMemberSerializer.toResponse(membership);
   }
 
   // ── PRIVATE HELPERS ───────────────────────────────────────────────────────
@@ -538,4 +628,30 @@ export class GroupsService {
     // If organizationId already matches — no-op (correct state)
     // Cross-org join guard is intentionally loose in B2 — enforced by join code scoping
   }
+  // ── GET /groups/:id/qr-token ──────────────────────────────────────────────
+
+  async getQrToken(id: string, organizationId: string) {
+    const group = await this.groupsRepo.findById(id, organizationId);
+    if (!group) throw new NotFoundException('Group not found');
+    return {
+      groupId: group.id,
+      joinCode: group.joinToken,
+      qrPayload: group.joinToken,  // Flutter renders QR from this value
+    };
+  }
+
+  // ── GET /groups/:id/meal-config ───────────────────────────────────────────
+
+  async getMealConfig(id: string, organizationId: string) {
+    const group = await this.groupsRepo.findById(id, organizationId);
+    if (!group) throw new NotFoundException('Group not found');
+    return {
+      mealsEnabled: group.mealsEnabled,
+      weeklyMenuEnabled: group.weeklyMenuEnabled,
+      preferencesEnabled: group.preferencesEnabled,
+      enabledPreferences: group.enabledPreferences,
+      vacationModeEnabled: group.vacationModeEnabled,
+    };
+  }
+
 }
