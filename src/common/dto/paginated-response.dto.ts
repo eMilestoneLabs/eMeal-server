@@ -3,6 +3,9 @@
  * Flutter reads: data['data'], data['total'], data['page'] (1-indexed), data['limit']
  * NEVER use: items, results, count, pageSize, 0-indexed page
  */
+import { IsInt, IsOptional, Max, Min } from 'class-validator';
+import { Type } from 'class-transformer';
+
 export class PaginatedResponseDto<T> {
   data: T[];
   total: number;
@@ -27,6 +30,16 @@ export class PaginatedResponseDto<T> {
 }
 
 export class PaginationQueryDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
   page?: number = 1;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
   limit?: number = 20;
 }

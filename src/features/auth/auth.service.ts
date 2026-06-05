@@ -476,7 +476,7 @@ export class AuthService {
       expiresIn,
     });
 
-    const refreshPayload = { ...jwtPayload, family };
+    const refreshPayload = { ...jwtPayload, family, jti: ulid() };
     const refreshToken = this.jwtService.sign(refreshPayload, {
       secret: this.configService.get<string>('jwt.refreshSecret'),
       expiresIn: refreshExpiresIn,
