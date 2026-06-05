@@ -110,13 +110,48 @@ jobs:
             --coverageDirectory "coverage/${{ matrix.slug }}" \
             --coverageReporters=text-summary --coverageReporters=lcov --coverageReporters=json-summary \
             --collectCoverageFrom "${{ matrix.path }}**/*.ts" \
-            --json --outputFile "coverage/${{ matrix.slug }}/jest-results.json"
+            --json --outputFile "coverage/${{ matrix.slug }}/jest-results.json" || JEST_EXIT=$?
+          node scripts/ci/jest-report.js "coverage/${{ matrix.slug }}/jest-results.json" "coverage/${{ matrix.slug }}/report.html" || true
+          exit ${JEST_EXIT:-0}
       - name: Upload ${{ matrix.feature }} test report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: feature-report-${{ matrix.slug }}
           path: coverage/${{ matrix.slug }}
+          retention-days: 14
+
+  # ───────────── 2b. UNIT TESTS (consolidated, all features, coverage) ────────
+  # Runs the full feature-wise unit suite once and uploads a single consolidated
+  # coverage report (browsable HTML) + human-readable test report.
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: feature-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}", cache: npm }
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate Prisma client
+        run: npx prisma generate
+      - name: Run full unit suite (all features) + coverage
+        run: |
+          mkdir -p coverage/unit
+          npx jest --runInBand \
+            --coverage \
+            --coverageDirectory coverage/unit \
+            --coverageReporters=text-summary --coverageReporters=lcov --coverageReporters=html --coverageReporters=json-summary \
+            --json --outputFile coverage/unit/jest-results.json || JEST_EXIT=$?
+          node scripts/ci/jest-report.js coverage/unit/jest-results.json coverage/unit/unit-test-report.html || true
+          exit ${JEST_EXIT:-0}
+      - name: Upload unit test coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-coverage
+          path: coverage/unit
           retention-days: 14
 
   # ─────────────────────── 3. EXPORT VERIFICATION (artifacts) ─────────────────
@@ -187,7 +222,9 @@ jobs:
           mkdir -p artifacts/sanity
           npx jest --runInBand \
             --testPathPattern "common/tests/phase-verification" \
-            --json --outputFile artifacts/sanity/sanity-report.json
+            --json --outputFile artifacts/sanity/sanity-report.json || JEST_EXIT=$?
+          node scripts/ci/jest-report.js artifacts/sanity/sanity-report.json artifacts/sanity/sanity-report.html || true
+          exit ${JEST_EXIT:-0}
       - name: Upload sanity report
         if: always()
         uses: actions/upload-artifact@v4
@@ -267,12 +304,13 @@ jobs:
     name: Release Gate
     runs-on: ubuntu-latest
     if: always()
-    needs: [quality, feature-tests, export-verification, build, sanity, smoke, integration]
+    needs: [quality, feature-tests, unit-tests, export-verification, build, sanity, smoke, integration]
     steps:
       - name: Aggregate stage results
         run: |
           echo "Code Quality        : ${{ needs.quality.result }}"
           echo "Feature Tests       : ${{ needs.feature-tests.result }}"
+          echo "Unit Tests          : ${{ needs.unit-tests.result }}"
           echo "Export Verification : ${{ needs.export-verification.result }}"
           echo "Build & Compile     : ${{ needs.build.result }}"
           echo "Sanity Testing      : ${{ needs.sanity.result }}"
@@ -280,6 +318,7 @@ jobs:
           echo "Integration Testing : ${{ needs.integration.result }}"
           if [ "${{ needs.quality.result }}" != "success" ] || \
              [ "${{ needs.feature-tests.result }}" != "success" ] || \
+             [ "${{ needs.unit-tests.result }}" != "success" ] || \
              [ "${{ needs.export-verification.result }}" != "success" ] || \
              [ "${{ needs.build.result }}" != "success" ] || \
              [ "${{ needs.sanity.result }}" != "success" ] || \
