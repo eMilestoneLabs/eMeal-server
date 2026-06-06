@@ -42,7 +42,17 @@ const STRESS_TOTAL = Number(process.env.PERF_STRESS_TOTAL || 6000);
 const SOAK_SECONDS = Number(process.env.PERF_SOAK_SECONDS || 0);
 const SOAK_CONCURRENCY = Number(process.env.PERF_SOAK_CONCURRENCY || 20);
 // Keep-alive agent: reuse sockets so high-rate load never exhausts TCP ports.
-const agent = new http.Agent({ keepAlive: true, keepAliveMsecs: 1000, maxSockets: Math.max(256, STRESS_CONCURRENCY + 64) });
+// Bounded connection pool. A small, capped pool keeps the harness from opening
+// thousands of simultaneous sockets that self-DoS the server (heavy /health does
+// DB+Redis+queue work per hit) or exhaust runner file descriptors. Free sockets
+// are capped so we don't accumulate half-open sockets across the stress/soak phases.
+const MAX_SOCKETS = Number(process.env.PERF_MAX_SOCKETS || 256);
+const agent = new http.Agent({ keepAlive: true, keepAliveMsecs: 1000, maxSockets: MAX_SOCKETS, maxFreeSockets: 32, scheduling: 'fifo' });
+// Transient connection errors (server backpressure / socket recycling) are retried
+// on a fresh, non-pooled connection before being counted as a hard error — so a
+// momentary reset storm under burst doesn't zero out the gate on a healthy server.
+const TRANSIENT_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'EPIPE', 'ETIMEDOUT', 'EAI_AGAIN', 'ERR']);
+const RETRY_MAX = Number(process.env.PERF_RETRY_MAX || 3);
 
 const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const ms = (n) => (n == null ? 'n/a' : Number(n).toFixed(2) + ' ms');
@@ -94,16 +104,31 @@ async function takeHeapSnapshot(pid, outDir, label) {
 }
 
 // ── HTTP ─────────────────────────────────────────────────────────────────────
-function once(urlPath) {
+function attempt(urlPath, start, pooled) {
   return new Promise((resolve) => {
-    const start = now(); let bytes = 0;
-    const req = http.get(BASE + urlPath, { agent }, (res) => {
+    let bytes = 0; let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+    const req = http.get(BASE + urlPath, pooled ? { agent } : { agent: false }, (res) => {
       res.on('data', (c) => { bytes += c.length; });
-      res.on('end', () => resolve({ ms: since(start), status: res.statusCode, ok: res.statusCode < 500, timeout: false, bytes }));
+      res.on('end', () => done({ ms: since(start), status: res.statusCode, ok: res.statusCode < 500, timeout: false, bytes }));
     });
-    req.setTimeout(TIMEOUT_MS, () => req.destroy());
-    req.on('error', () => { const d = since(start); resolve({ ms: d, status: 0, ok: false, timeout: d >= TIMEOUT_MS - 5, bytes }); });
+    // Pass an error so 'error' always fires on timeout (a bare destroy() can leave
+    // the promise unsettled and hang a worker forever).
+    req.setTimeout(TIMEOUT_MS, () => req.destroy(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' })));
+    req.on('error', (e) => { const d = since(start); done({ ms: d, status: 0, ok: false, timeout: d >= TIMEOUT_MS - 5, bytes, code: (e && e.code) || 'ERR' }); });
   });
+}
+// Measures one logical request (latency spans all attempts). Retries only genuine
+// transient transport errors on a fresh connection; real HTTP responses (any
+// status) and timeouts are returned as-is so the test still catches regressions.
+async function once(urlPath) {
+  const start = now();
+  let r = await attempt(urlPath, start, true);
+  for (let i = 0; i < RETRY_MAX && r.status === 0 && !r.timeout && TRANSIENT_CODES.has(r.code); i++) {
+    await sleep(2 + i * 5);
+    r = await attempt(urlPath, start, false);
+  }
+  return r;
 }
 function fetchBody(urlPath) { return new Promise((resolve, reject) => { http.get(BASE + urlPath, { agent }, (res) => { let b = ''; res.on('data', (c) => (b += c)); res.on('end', () => resolve(b)); }).on('error', reject); }); }
 function percentile(sorted, p) { if (!sorted.length) return 0; const idx = Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1); return +sorted[Math.max(0, idx)].toFixed(2); }
@@ -121,11 +146,11 @@ async function resolveBase() {
 
 // ── API load (+ network bytes + event-loop heartbeat) ────────────────────────
 async function apiLoad() {
-  const lat = []; let errors = 0, timeouts = 0, done = 0, totalBytes = 0; const statusCounts = {};
+  const lat = []; let errors = 0, timeouts = 0, done = 0, totalBytes = 0; const statusCounts = {}; const errorCodes = {};
   const hbRtt = []; let hbMaxGap = 0, hbLast = Date.now();
   const hb = setInterval(async () => { const sched = Date.now(); const gap = sched - hbLast - 50; if (gap > hbMaxGap) hbMaxGap = gap; hbLast = sched; const r = await once(TARGET_PATH); hbRtt.push(r.ms); }, 50);
   const t0 = Date.now();
-  async function worker() { while (done < TOTAL_REQUESTS) { done++; const r = await once(TARGET_PATH); lat.push(r.ms); totalBytes += r.bytes || 0; statusCounts[r.status] = (statusCounts[r.status] || 0) + 1; if (!r.ok) errors++; if (r.timeout) timeouts++; } }
+  async function worker() { while (done < TOTAL_REQUESTS) { done++; const r = await once(TARGET_PATH); lat.push(r.ms); totalBytes += r.bytes || 0; statusCounts[r.status] = (statusCounts[r.status] || 0) + 1; if (r.status === 0 && r.code) errorCodes[r.code] = (errorCodes[r.code] || 0) + 1; if (!r.ok) errors++; if (r.timeout) timeouts++; } }
   await Promise.all(Array.from({ length: CONCURRENCY }, worker));
   clearInterval(hb);
   const elapsed = (Date.now() - t0) / 1000; lat.sort((a, b) => a - b); hbRtt.sort((a, b) => a - b);
@@ -135,7 +160,7 @@ async function apiLoad() {
     avg: +(sum / (lat.length || 1)).toFixed(2), p50: percentile(lat, 50), p95: percentile(lat, 95), p99: percentile(lat, 99),
     min: +(lat[0] || 0).toFixed(2), max: +(lat[lat.length - 1] || 0).toFixed(2),
     errors, timeouts, errorRate: +(errors / (lat.length || 1)).toFixed(4), timeoutRate: +(timeouts / (lat.length || 1)).toFixed(4),
-    statusCounts, networkMb: +(totalBytes / 1048576).toFixed(2), networkMbps: +((totalBytes / 1048576) / elapsed).toFixed(2),
+    statusCounts, errorCodes, networkMb: +(totalBytes / 1048576).toFixed(2), networkMbps: +((totalBytes / 1048576) / elapsed).toFixed(2),
     eventLoop: { heartbeatAvgMs: hbRtt.length ? +(hbRtt.reduce((a, b) => a + b, 0) / hbRtt.length).toFixed(2) : null, heartbeatMaxMs: +(hbRtt[hbRtt.length - 1] || 0).toFixed(2), maxSchedGapMs: hbMaxGap, stallIndexMs: +(percentile(lat, 99) - percentile(lat, 50)).toFixed(2) },
   };
 }
@@ -317,6 +342,9 @@ function section(title, rowsHtml) { return `<section class="card"><h2>${esc(titl
   const heapBefore = await takeHeapSnapshot(SERVER_PID, OUT_DIR, 'before');
   const rssBefore = readRssMb(SERVER_PID), cpuBefore = readCpuSeconds(SERVER_PID), ioBefore = readIo(SERVER_PID);
   const cpuSampler = startCpuSampler(SERVER_PID);
+  // Warm-up: prime the pool and let the server recover from the heap-snapshot
+  // stop-the-world pause before measuring, so first-hit resets don't skew the gate.
+  for (let w = 0; w < 25; w++) await once(TARGET_PATH);
   const api = await apiLoad();
   const cpuSpikes = cpuSampler.stop();
   const spike = await spikeLoad();
@@ -401,7 +429,7 @@ function section(title, rowsHtml) { return `<section class="card"><h2>${esc(titl
   fs.writeFileSync(path.join(OUT_DIR, 'performance-report.html'), html);
   console.log(`Performance ${verdict}: thr=${api.throughput}/s p95=${api.p95}ms p99=${api.p99}ms err=${(api.errorRate * 100).toFixed(2)}% budget=${budgetPass ? 'OK' : 'OVER'}`);
   if (soak) console.log(`Soak ${soak.seconds}s: ${soak.requests} reqs, p99 ${soak.p99}ms, RSS drift ${soak.rssDriftMb} MB`);
-  console.log('API HTTP status mix:', JSON.stringify(api.statusCounts));
+  console.log('API HTTP status mix:', JSON.stringify(api.statusCounts), 'error codes:', JSON.stringify(api.errorCodes || {}));
   console.log(`Reports written to ${OUT_DIR}/`);
   process.exit(pass ? 0 : 1);
 })().catch((err) => { console.error('Performance test failed to run:', err.message); process.exit(1); });

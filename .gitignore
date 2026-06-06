@@ -31,3 +31,7 @@ B7_VERIFY.sh
 
 # CI-generated (export artifacts, coverage reports)
 artifacts/
+
+# Performance heap snapshots (perf-test.js writes these transiently before
+# moving them into artifacts/; never commit raw root-level snapshots)
+*.heapsnapshot

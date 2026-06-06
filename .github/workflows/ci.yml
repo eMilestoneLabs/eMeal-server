@@ -342,6 +342,9 @@ jobs:
           PERF_SOAK_SECONDS: "120"
         run: |
           mkdir -p artifacts/performance
+          # Raise the open-file limit so the high-concurrency stress phase can open
+          # its sockets without ECONNREFUSED/EMFILE on the shared runner.
+          ulimit -n 65535 || true
           node --trace-gc --heapsnapshot-signal=SIGUSR2 dist/main > /tmp/server.out 2> /tmp/gc.log & echo $! > /tmp/server.pid
           for i in $(seq 1 30); do
             curl -sf http://127.0.0.1:3000/api/v1/health >/dev/null && break
