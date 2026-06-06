@@ -338,9 +338,11 @@ jobs:
       - name: Install WebSocket probe client (perf job only, not saved)
         run: npm install socket.io-client@4 --no-save --no-audit --no-fund
       - name: Start server + run performance profile
+        env:
+          PERF_SOAK_SECONDS: "120"
         run: |
           mkdir -p artifacts/performance
-          node --trace-gc dist/main > /tmp/server.out 2> /tmp/gc.log & echo $! > /tmp/server.pid
+          node --trace-gc --heapsnapshot-signal=SIGUSR2 dist/main > /tmp/server.out 2> /tmp/gc.log & echo $! > /tmp/server.pid
           for i in $(seq 1 30); do
             curl -sf http://localhost:3000/api/v1/health >/dev/null && break
             sleep 2
