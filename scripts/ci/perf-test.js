@@ -18,7 +18,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
-const BASE = process.argv[2] || 'http://localhost:3000';
+let BASE = (process.argv[2] || 'http://localhost:3000').replace('//localhost', '//127.0.0.1');
 const SERVER_PID = process.argv[3] || '';
 const OUT_DIR = process.argv[4] || 'artifacts/performance';
 const GC_LOG = process.argv[5] || '';
@@ -36,8 +36,8 @@ const SLO_P99_MS = 5000;
 const BUDGET_P95_MS = Number(process.env.PERF_BUDGET_P95 || 500);
 const BUDGET_P99_MS = Number(process.env.PERF_BUDGET_P99 || 1500);
 // 1000+ concurrent stress test
-const STRESS_CONCURRENCY = Number(process.env.PERF_STRESS_CONCURRENCY || 1000);
-const STRESS_TOTAL = Number(process.env.PERF_STRESS_TOTAL || 4000);
+const STRESS_CONCURRENCY = Number(process.env.PERF_STRESS_CONCURRENCY || 2000);
+const STRESS_TOTAL = Number(process.env.PERF_STRESS_TOTAL || 6000);
 // Mini soak test (steady load for N seconds). 0 = disabled.
 const SOAK_SECONDS = Number(process.env.PERF_SOAK_SECONDS || 0);
 const SOAK_CONCURRENCY = Number(process.env.PERF_SOAK_CONCURRENCY || 20);
@@ -107,6 +107,17 @@ function once(urlPath) {
 }
 function fetchBody(urlPath) { return new Promise((resolve, reject) => { http.get(BASE + urlPath, { agent }, (res) => { let b = ''; res.on('data', (c) => (b += c)); res.on('end', () => resolve(b)); }).on('error', reject); }); }
 function percentile(sorted, p) { if (!sorted.length) return 0; const idx = Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1); return +sorted[Math.max(0, idx)].toFixed(2); }
+
+// Resolve a reachable base URL (handles IPv4/IPv6/localhost + server boot timing).
+async function resolveBase() {
+  const raw = process.argv[2] || 'http://localhost:3000';
+  const cands = [...new Set([raw.replace('//localhost', '//127.0.0.1'), raw, raw.replace('//localhost', '//[::1]').replace('//127.0.0.1', '//[::1]')])];
+  for (let round = 0; round < 60; round++) {
+    for (const c of cands) { BASE = c; const r = await once(TARGET_PATH); if (r.status >= 200 && r.status < 500) return c; }
+    await sleep(1000);
+  }
+  BASE = cands[0]; return null;
+}
 
 // ── API load (+ network bytes + event-loop heartbeat) ────────────────────────
 async function apiLoad() {
@@ -300,6 +311,8 @@ function section(title, rowsHtml) { return `<section class="card"><h2>${esc(titl
 (async () => {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   console.log(`Performance profile → ${BASE}${TARGET_PATH} (${TOTAL_REQUESTS} reqs, c=${CONCURRENCY})`);
+  const resolved = await resolveBase();
+  console.log(resolved ? `Server reachable at ${BASE} — starting load.` : 'WARNING: server not reachable (tried IPv4/localhost/IPv6) — metrics may be n/a.');
 
   const heapBefore = await takeHeapSnapshot(SERVER_PID, OUT_DIR, 'before');
   const rssBefore = readRssMb(SERVER_PID), cpuBefore = readCpuSeconds(SERVER_PID), ioBefore = readIo(SERVER_PID);
