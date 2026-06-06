@@ -60,6 +60,7 @@ const RETRY_MAX = Number(process.env.PERF_RETRY_MAX || 3);
 // make every load request fail with ECONNREFUSED. SIGUSR1 is safe (not grabbed by
 // NestJS; Node's --heapsnapshot-signal still writes the snapshot).
 const HEAP_SIGNAL = process.env.PERF_HEAP_SIGNAL || 'SIGUSR1';
+const WS_CONNECT_TIMEOUT = Number(process.env.PERF_WS_TIMEOUT || 8000);
 
 const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const ms = (n) => (n == null ? 'n/a' : Number(n).toFixed(2) + ' ms');
@@ -150,6 +151,22 @@ async function resolveBase() {
     await sleep(1000);
   }
   BASE = cands[0]; return null;
+}
+
+// Wait until the server is responsive again (event loop idle) before the fragile
+// end-of-run probes (heap-after snapshot, WebSocket). Returns when /health answers
+// fast a few times in a row, or after maxMs. A fast 4xx/2xx both prove a calm loop.
+async function awaitServerCalm(maxMs) {
+  const deadline = Date.now() + maxMs; let calm = 0;
+  // small floor so GC settles even if the server is already idle
+  await sleep(Number(process.env.PERF_COOLDOWN_MS || 1500));
+  while (Date.now() < deadline) {
+    const r = await once(TARGET_PATH);
+    if (r.status >= 200 && r.status < 500 && r.ms < 200) { if (++calm >= 3) return true; }
+    else calm = 0;
+    await sleep(400);
+  }
+  return false;
 }
 
 // ── API load (+ network bytes + event-loop heartbeat) ────────────────────────
@@ -301,9 +318,9 @@ async function wsProbe() {
     let token = '';
     try { token = require('jsonwebtoken').sign({ sub: 'perf-user', organizationId: 'perf-org', role: 'student', family: 'perf-fam' }, JWT_SECRET, { expiresIn: '5m' }); } catch {}
     const connect = () => new Promise((resolve) => {
-      const t = now(); const s = io(BASE, { transports: ['websocket', 'polling'], auth: { token }, reconnection: true, timeout: 3000, forceNew: true });
+      const t = now(); const s = io(BASE, { transports: ['websocket', 'polling'], auth: { token }, reconnection: true, timeout: WS_CONNECT_TIMEOUT, forceNew: true });
       let settled = false; const done = (ok, err) => { if (settled) return; settled = true; resolve({ s, ms: since(t), ok, err }); };
-      s.on('connect', () => done(true)); s.on('connect_error', (e) => done(false, e && e.message)); setTimeout(() => done(false, 'timeout'), 3500);
+      s.on('connect', () => done(true)); s.on('connect_error', (e) => done(false, e && e.message)); setTimeout(() => done(false, 'timeout'), WS_CONNECT_TIMEOUT + 1000);
     });
     const c1 = await connect();
     if (!c1.ok) { try { c1.s.close(); } catch {} return { error: 'connect failed: ' + (c1.err || '') }; }
@@ -362,7 +379,9 @@ function section(title, rowsHtml) { return `<section class="card"><h2>${esc(titl
   const peak = readPeakMb(SERVER_PID);
   // Cooldown: drain the event loop after the soak/stress so the post-load heap
   // snapshot (SIGUSR1) is serviced promptly and isn't dropped as n/a.
-  await sleep(Number(process.env.PERF_COOLDOWN_MS || 6000));
+  // Let the server recover from the soak before snapshotting the heap + probing WS,
+  // so those measurements aren't dropped as n/a on a still-thrashing server.
+  await awaitServerCalm(Number(process.env.PERF_RECOVER_MS || 30000));
   const heapAfter = await takeHeapSnapshot(SERVER_PID, OUT_DIR, 'after');
   const heapGrowthMb = heapBefore && heapAfter && heapBefore.sizeMb != null && heapAfter.sizeMb != null ? +(heapAfter.sizeMb - heapBefore.sizeMb).toFixed(2) : null;
 
