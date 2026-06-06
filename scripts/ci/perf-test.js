@@ -53,6 +53,13 @@ const agent = new http.Agent({ keepAlive: true, keepAliveMsecs: 1000, maxSockets
 // momentary reset storm under burst doesn't zero out the gate on a healthy server.
 const TRANSIENT_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'EPIPE', 'ETIMEDOUT', 'EAI_AGAIN', 'ERR']);
 const RETRY_MAX = Number(process.env.PERF_RETRY_MAX || 3);
+// Signal used to trigger the server's heap snapshot. MUST match the server's
+// --heapsnapshot-signal flag AND must NOT be a signal the app treats as shutdown.
+// NestJS enableShutdownHooks() registers SIGUSR2 (among others) as a graceful-
+// shutdown trigger, so snapshotting via SIGUSR2 would close the HTTP listener and
+// make every load request fail with ECONNREFUSED. SIGUSR1 is safe (not grabbed by
+// NestJS; Node's --heapsnapshot-signal still writes the snapshot).
+const HEAP_SIGNAL = process.env.PERF_HEAP_SIGNAL || 'SIGUSR1';
 
 const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const ms = (n) => (n == null ? 'n/a' : Number(n).toFixed(2) + ' ms');
@@ -85,7 +92,7 @@ async function takeHeapSnapshot(pid, outDir, label) {
     if (!pid) return null;
     const cwd = process.cwd();
     const pre = new Set(fs.readdirSync(cwd).filter((f) => f.endsWith('.heapsnapshot')));
-    try { process.kill(Number(pid), 'SIGUSR2'); } catch { return null; }
+    try { process.kill(Number(pid), HEAP_SIGNAL); } catch { return null; }
     for (let i = 0; i < 60; i++) {
       await sleep(500);
       const created = fs.readdirSync(cwd).filter((f) => f.endsWith('.heapsnapshot') && !pre.has(f));
