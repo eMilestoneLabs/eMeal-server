@@ -93,7 +93,8 @@ async function takeHeapSnapshot(pid, outDir, label) {
     const cwd = process.cwd();
     const pre = new Set(fs.readdirSync(cwd).filter((f) => f.endsWith('.heapsnapshot')));
     try { process.kill(Number(pid), HEAP_SIGNAL); } catch { return null; }
-    for (let i = 0; i < 60; i++) {
+    const SNAP_TRIES = Number(process.env.PERF_SNAP_TRIES || 120);
+    for (let i = 0; i < SNAP_TRIES; i++) {
       await sleep(500);
       const created = fs.readdirSync(cwd).filter((f) => f.endsWith('.heapsnapshot') && !pre.has(f));
       if (created.length) {
@@ -359,6 +360,9 @@ function section(title, rowsHtml) { return `<section class="card"><h2>${esc(titl
   const soak = await soakTest(SOAK_SECONDS, SOAK_CONCURRENCY);
   const rssAfter = readRssMb(SERVER_PID), cpuAfter = readCpuSeconds(SERVER_PID), ioAfter = readIo(SERVER_PID);
   const peak = readPeakMb(SERVER_PID);
+  // Cooldown: drain the event loop after the soak/stress so the post-load heap
+  // snapshot (SIGUSR1) is serviced promptly and isn't dropped as n/a.
+  await sleep(Number(process.env.PERF_COOLDOWN_MS || 6000));
   const heapAfter = await takeHeapSnapshot(SERVER_PID, OUT_DIR, 'after');
   const heapGrowthMb = heapBefore && heapAfter && heapBefore.sizeMb != null && heapAfter.sizeMb != null ? +(heapAfter.sizeMb - heapBefore.sizeMb).toFixed(2) : null;
 
