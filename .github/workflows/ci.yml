@@ -12,7 +12,8 @@ name: eMeal Server Workflow
 #   5. Sanity Testing       cross-feature invariants + report artifact
 #   6. Smoke Testing        boots the app on real Postgres+Redis, critical edges
 #   7. Integration Testing  multi-module API journey on real Postgres+Redis
-#   8. Release Gate         one required status — green only if everything passed
+#   8. Performance Testing  load test + server RSS/CPU + DB audit, HTML report
+#   9. Release Gate         one required status — green only if everything passed
 #
 # Downstream stages declare `needs:`; an upstream failure skips the rest
 # (fail-fast) and the Release Gate goes red. All tests are isolated from
@@ -299,12 +300,68 @@ jobs:
       - name: Multi-module API journey (real DB + Redis)
         run: npm run test:e2e -- --testPathPattern "system"
 
-  # ───────────────────────────── 8. RELEASE GATE ─────────────────────────────
+  # ───────────────────────────── 8. PERFORMANCE TESTING ──────────────────────
+  # Boots the built app on real Postgres+Redis, runs a black-box load test
+  # (latency percentiles, throughput, error/timeout rate), samples server RSS+CPU
+  # from /proc (leak signal), runs a static DB/Prisma performance audit, and
+  # uploads a detailed HTML performance report. Guardrail SLO only (won't flake).
+  performance:
+    name: Performance Testing
+    runs-on: ubuntu-latest
+    needs: [quality, feature-tests, integration]
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: postgres, POSTGRES_PASSWORD: postgres, POSTGRES_DB: emeal_test }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s --health-timeout=5s --health-retries=5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s --health-timeout=5s --health-retries=5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}", cache: npm }
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate Prisma client
+        run: npx prisma generate
+      - name: Sync schema to test database
+        run: npx prisma db push --skip-generate
+      - name: Build for performance run
+        run: npm run build
+      - name: Install WebSocket probe client (perf job only, not saved)
+        run: npm install socket.io-client@4 --no-save --no-audit --no-fund
+      - name: Start server + run performance profile
+        run: |
+          mkdir -p artifacts/performance
+          node --trace-gc dist/main > /tmp/server.out 2> /tmp/gc.log & echo $! > /tmp/server.pid
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:3000/api/v1/health >/dev/null && break
+            sleep 2
+          done
+          node scripts/ci/perf-test.js http://localhost:3000 "$(cat /tmp/server.pid)" artifacts/performance /tmp/gc.log || PERF_EXIT=$?
+          kill "$(cat /tmp/server.pid)" 2>/dev/null || true
+          exit ${PERF_EXIT:-0}
+      - name: Upload performance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-report
+          path: artifacts/performance
+          retention-days: 14
+
+  # ───────────────────────────── 9. RELEASE GATE ─────────────────────────────
   release-gate:
     name: Release Gate
     runs-on: ubuntu-latest
     if: always()
-    needs: [quality, feature-tests, unit-tests, export-verification, build, sanity, smoke, integration]
+    needs: [quality, feature-tests, unit-tests, export-verification, build, sanity, smoke, integration, performance]
     steps:
       - name: Aggregate stage results
         run: |
@@ -316,6 +373,7 @@ jobs:
           echo "Sanity Testing      : ${{ needs.sanity.result }}"
           echo "Smoke Testing       : ${{ needs.smoke.result }}"
           echo "Integration Testing : ${{ needs.integration.result }}"
+          echo "Performance Testing : ${{ needs.performance.result }}"
           if [ "${{ needs.quality.result }}" != "success" ] || \
              [ "${{ needs.feature-tests.result }}" != "success" ] || \
              [ "${{ needs.unit-tests.result }}" != "success" ] || \
@@ -323,7 +381,8 @@ jobs:
              [ "${{ needs.build.result }}" != "success" ] || \
              [ "${{ needs.sanity.result }}" != "success" ] || \
              [ "${{ needs.smoke.result }}" != "success" ] || \
-             [ "${{ needs.integration.result }}" != "success" ]; then
+             [ "${{ needs.integration.result }}" != "success" ] || \
+             [ "${{ needs.performance.result }}" != "success" ]; then
             echo "::error::Release gate failed - one or more stages did not pass."
             exit 1
           fi
