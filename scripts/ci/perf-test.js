@@ -41,6 +41,8 @@ const STRESS_TOTAL = Number(process.env.PERF_STRESS_TOTAL || 4000);
 // Mini soak test (steady load for N seconds). 0 = disabled.
 const SOAK_SECONDS = Number(process.env.PERF_SOAK_SECONDS || 0);
 const SOAK_CONCURRENCY = Number(process.env.PERF_SOAK_CONCURRENCY || 20);
+// Keep-alive agent: reuse sockets so high-rate load never exhausts TCP ports.
+const agent = new http.Agent({ keepAlive: true, keepAliveMsecs: 1000, maxSockets: Math.max(256, STRESS_CONCURRENCY + 64) });
 
 const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const ms = (n) => (n == null ? 'n/a' : Number(n).toFixed(2) + ' ms');
@@ -95,7 +97,7 @@ async function takeHeapSnapshot(pid, outDir, label) {
 function once(urlPath) {
   return new Promise((resolve) => {
     const start = now(); let bytes = 0;
-    const req = http.get(BASE + urlPath, (res) => {
+    const req = http.get(BASE + urlPath, { agent }, (res) => {
       res.on('data', (c) => { bytes += c.length; });
       res.on('end', () => resolve({ ms: since(start), status: res.statusCode, ok: res.statusCode < 500, timeout: false, bytes }));
     });
@@ -103,16 +105,16 @@ function once(urlPath) {
     req.on('error', () => { const d = since(start); resolve({ ms: d, status: 0, ok: false, timeout: d >= TIMEOUT_MS - 5, bytes }); });
   });
 }
-function fetchBody(urlPath) { return new Promise((resolve, reject) => { http.get(BASE + urlPath, (res) => { let b = ''; res.on('data', (c) => (b += c)); res.on('end', () => resolve(b)); }).on('error', reject); }); }
+function fetchBody(urlPath) { return new Promise((resolve, reject) => { http.get(BASE + urlPath, { agent }, (res) => { let b = ''; res.on('data', (c) => (b += c)); res.on('end', () => resolve(b)); }).on('error', reject); }); }
 function percentile(sorted, p) { if (!sorted.length) return 0; const idx = Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1); return +sorted[Math.max(0, idx)].toFixed(2); }
 
 // ── API load (+ network bytes + event-loop heartbeat) ────────────────────────
 async function apiLoad() {
-  const lat = []; let errors = 0, timeouts = 0, done = 0, totalBytes = 0;
+  const lat = []; let errors = 0, timeouts = 0, done = 0, totalBytes = 0; const statusCounts = {};
   const hbRtt = []; let hbMaxGap = 0, hbLast = Date.now();
   const hb = setInterval(async () => { const sched = Date.now(); const gap = sched - hbLast - 50; if (gap > hbMaxGap) hbMaxGap = gap; hbLast = sched; const r = await once(TARGET_PATH); hbRtt.push(r.ms); }, 50);
   const t0 = Date.now();
-  async function worker() { while (done < TOTAL_REQUESTS) { done++; const r = await once(TARGET_PATH); lat.push(r.ms); totalBytes += r.bytes || 0; if (!r.ok) errors++; if (r.timeout) timeouts++; } }
+  async function worker() { while (done < TOTAL_REQUESTS) { done++; const r = await once(TARGET_PATH); lat.push(r.ms); totalBytes += r.bytes || 0; statusCounts[r.status] = (statusCounts[r.status] || 0) + 1; if (!r.ok) errors++; if (r.timeout) timeouts++; } }
   await Promise.all(Array.from({ length: CONCURRENCY }, worker));
   clearInterval(hb);
   const elapsed = (Date.now() - t0) / 1000; lat.sort((a, b) => a - b); hbRtt.sort((a, b) => a - b);
@@ -122,7 +124,7 @@ async function apiLoad() {
     avg: +(sum / (lat.length || 1)).toFixed(2), p50: percentile(lat, 50), p95: percentile(lat, 95), p99: percentile(lat, 99),
     min: +(lat[0] || 0).toFixed(2), max: +(lat[lat.length - 1] || 0).toFixed(2),
     errors, timeouts, errorRate: +(errors / (lat.length || 1)).toFixed(4), timeoutRate: +(timeouts / (lat.length || 1)).toFixed(4),
-    networkMb: +(totalBytes / 1048576).toFixed(2), networkMbps: +((totalBytes / 1048576) / elapsed).toFixed(2),
+    statusCounts, networkMb: +(totalBytes / 1048576).toFixed(2), networkMbps: +((totalBytes / 1048576) / elapsed).toFixed(2),
     eventLoop: { heartbeatAvgMs: hbRtt.length ? +(hbRtt.reduce((a, b) => a + b, 0) / hbRtt.length).toFixed(2) : null, heartbeatMaxMs: +(hbRtt[hbRtt.length - 1] || 0).toFixed(2), maxSchedGapMs: hbMaxGap, stallIndexMs: +(percentile(lat, 99) - percentile(lat, 50)).toFixed(2) },
   };
 }
@@ -149,7 +151,7 @@ async function soakTest(seconds, concurrency) {
   if (!seconds || seconds <= 0) return null;
   const lat = []; let errors = 0; const start = Date.now(); const end = start + seconds * 1000; const rssTrace = [];
   const sampler = setInterval(() => { const r = readRssMb(SERVER_PID); if (r != null) rssTrace.push({ tSec: Math.round((Date.now() - start) / 1000), rssMb: r }); }, 5000);
-  async function w() { while (Date.now() < end) { const r = await once(TARGET_PATH); lat.push(r.ms); if (!r.ok) errors++; } }
+  async function w() { while (Date.now() < end) { const r = await once(TARGET_PATH); lat.push(r.ms); if (!r.ok) errors++; await sleep(5); } }
   await Promise.all(Array.from({ length: concurrency }, w));
   clearInterval(sampler); lat.sort((a, b) => a - b);
   const first = rssTrace.length ? rssTrace[0].rssMb : null; const last = rssTrace.length ? rssTrace[rssTrace.length - 1].rssMb : null;
@@ -255,7 +257,7 @@ async function wsProbe() {
     let token = '';
     try { token = require('jsonwebtoken').sign({ sub: 'perf-user', organizationId: 'perf-org', role: 'student', family: 'perf-fam' }, JWT_SECRET, { expiresIn: '5m' }); } catch {}
     const connect = () => new Promise((resolve) => {
-      const t = now(); const s = io(BASE, { transports: ['websocket'], auth: { token }, reconnection: true, timeout: 3000, forceNew: true });
+      const t = now(); const s = io(BASE, { transports: ['websocket', 'polling'], auth: { token }, reconnection: true, timeout: 3000, forceNew: true });
       let settled = false; const done = (ok, err) => { if (settled) return; settled = true; resolve({ s, ms: since(t), ok, err }); };
       s.on('connect', () => done(true)); s.on('connect_error', (e) => done(false, e && e.message)); setTimeout(() => done(false, 'timeout'), 3500);
     });
@@ -386,6 +388,7 @@ function section(title, rowsHtml) { return `<section class="card"><h2>${esc(titl
   fs.writeFileSync(path.join(OUT_DIR, 'performance-report.html'), html);
   console.log(`Performance ${verdict}: thr=${api.throughput}/s p95=${api.p95}ms p99=${api.p99}ms err=${(api.errorRate * 100).toFixed(2)}% budget=${budgetPass ? 'OK' : 'OVER'}`);
   if (soak) console.log(`Soak ${soak.seconds}s: ${soak.requests} reqs, p99 ${soak.p99}ms, RSS drift ${soak.rssDriftMb} MB`);
+  console.log('API HTTP status mix:', JSON.stringify(api.statusCounts));
   console.log(`Reports written to ${OUT_DIR}/`);
   process.exit(pass ? 0 : 1);
 })().catch((err) => { console.error('Performance test failed to run:', err.message); process.exit(1); });
