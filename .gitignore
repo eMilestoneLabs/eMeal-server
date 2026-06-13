@@ -17,10 +17,12 @@ bb_deps_backup.json
 devdeps_backup.json
 
 # Dev-only docs and guides (not part of prod source)
-docs/
+docs/FLUTTER_UI_SCREENSHOT
+docs/PERMANENT_MEMORY_CORE_DEVELOPMENT
 BACKEND_IMPLEMENTATION_EXECUTION_GUIDE.md
 BACKEND_IMPLEMENTATION_PLAN.md
 FINAL_MASTER_BACKEND_GUIDE.md
+FINAL-DEEP-AUDIT-REPORT-B1-B7.md
 SETUP.md
 B2_VERIFY.sh
 B3_VERIFY.sh
@@ -28,6 +30,7 @@ B4_VERIFY.sh
 B5_VERIFY.sh
 B6_VERIFY.sh
 B7_VERIFY.sh
+CLAUDE.md
 
 # CI-generated (export artifacts, coverage reports)
 artifacts/
