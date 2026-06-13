@@ -17,11 +17,26 @@ export class GroupMemberEntity {
   removedAt: Date | null;
   removedBy: string | null;  // userId of admin
 
+  // B10 (additive): joined user profile for the member directory UI.
+  // Populated only by the paginated member-list query; null elsewhere.
+  user: {
+    id: string;
+    name: string;
+    email: string | null;
+    phone: string | null;
+    avatarUrl: string | null;
+    gender: string | null;
+    age: number | null;
+    role: string;
+    isVacationMode: boolean;
+  } | null;
+
   constructor(partial: Partial<GroupMemberEntity>) {
     Object.assign(this, partial);
     this.blockedAt = this.blockedAt ?? null;
     this.blockedBy = this.blockedBy ?? null;
     this.removedAt = this.removedAt ?? null;
     this.removedBy = this.removedBy ?? null;
+    this.user = this.user ?? null;
   }
 }

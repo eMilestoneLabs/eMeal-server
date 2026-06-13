@@ -17,6 +17,9 @@ export class GroupMemberSerializer {
       blockedAt: member.blockedAt?.toISOString() ?? null,
       blockedBy: member.blockedBy ?? null,
       removedAt: member.removedAt?.toISOString() ?? null,
+      // B10 (ADDITIVE — never remove): joined user profile for member lists.
+      // Flutter maps this to UserModel; legacy consumers ignore the extra key.
+      user: member.user ?? null,
     };
   }
 }

@@ -39,6 +39,23 @@ export class MembersRepository {
         skip,
         take: opts.limit,
         orderBy: { joinedAt: 'asc' },
+        // B10 (additive): join user profile so the Flutter member directory
+        // can render names/contacts without N+1 /users/:id calls.
+        include: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              phone: true,
+              avatarUrl: true,
+              gender: true,
+              age: true,
+              role: true,
+              isVacationMode: true,
+            },
+          },
+        },
       }),
       this.prisma.groupMember.count({ where }),
     ]);
