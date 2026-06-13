@@ -3,6 +3,7 @@ import {
   BadRequestException,
   ForbiddenException,
   NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { AttendanceService } from '../attendance.service';
 import { AttendanceRepository } from '../repositories/attendance.repository';
@@ -175,6 +176,42 @@ describe('AttendanceService', () => {
           attendanceDate: today,
         }),
       ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('rejects out-of-window marks with HTTP 423 Locked + flat error contract (GAP-ATT-1)', async () => {
+      // Build a window that is guaranteed CLOSED right now in the org timezone.
+      const nowIst = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Asia/Kolkata',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).format(new Date());
+      const closedWindow =
+        nowIst >= '12:00'
+          ? { open: '00:01', close: '00:02' }
+          : { open: '23:58', close: '23:59' };
+
+      (prisma.meal.findFirst as jest.Mock).mockResolvedValue({
+        ...mockMeal,
+        attendanceWindowOpen: closedWindow.open,
+        attendanceWindowClose: closedWindow.close,
+        organization: { timezone: 'Asia/Kolkata' },
+      });
+      (membersRepo.isActiveMember as jest.Mock).mockResolvedValue(true);
+      (prisma.user.findUnique as jest.Mock).mockResolvedValue({ isVacationMode: false });
+
+      const err: any = await service
+        .markAttendance('usr_01', 'org_01', { mealId: 'meal_01', attendanceDate: today })
+        .then(() => null)
+        .catch((e) => e);
+
+      expect(err).toBeInstanceOf(HttpException);
+      expect(err.getStatus()).toBe(423); // source-of-truth status (NOT 400)
+      const body: any = err.getResponse();
+      expect(body).toMatchObject({ statusCode: 423 }); // flat error contract (LAW-12)
+      expect(String(body.message)).toContain('Attendance window closed');
+      expect(body.errors).toHaveProperty('window');
+      expect(attendanceRepo.upsert).not.toHaveBeenCalled(); // nothing written
     });
 
     it('throws BadRequestException when attendanceDate is not today', async () => {

@@ -3,6 +3,7 @@ import {
   BadRequestException,
   ForbiddenException,
   NotFoundException,
+  HttpException,
   Logger,
   Inject,
   Optional,
@@ -170,8 +171,15 @@ export class AttendanceService {
       );
 
       if (!withinWindow) {
-        throw new BadRequestException(
-          `Attendance window closed. Window: ${meal.attendanceWindowOpen}–${meal.attendanceWindowClose}`,
+        // GAP-ATT-1 (RESOLVED): source-of-truth requires HTTP 423 (Locked) for
+        // out-of-window marks. Flat error contract (LAW-12), same message text.
+        throw new HttpException(
+          {
+            message: `Attendance window closed. Window: ${meal.attendanceWindowOpen}–${meal.attendanceWindowClose}`,
+            errors: { window: `Closed at ${meal.attendanceWindowClose}` },
+            statusCode: 423,
+          },
+          423,
         );
       }
     }
@@ -341,8 +349,10 @@ export class AttendanceService {
       dto.mealId,
     );
 
-    // 5. Emit realtime
+    // 5. Emit realtime — attendance.updated.v1 (backward compat) PLUS
+    // attendance.overridden.v1 (GAP-WS-1: source-of-truth event name)
     this.emitAttendanceUpdated(meal.groupId, record, organizationId);
+    this.emitAttendanceOverridden(meal.groupId, record);
 
     // 6. Audit
     this.audit.log({
@@ -575,6 +585,31 @@ export class AttendanceService {
       });
     } catch (err) {
       // Never let gateway failure break the HTTP response
+      this.logger.warn(`Gateway emit failed: ${err?.message}`);
+    }
+  }
+
+  /**
+   * GAP-WS-1 (RESOLVED): attendance.overridden.v1 — fired ONLY for admin
+   * overrides, in addition to attendance.updated.v1. Group room for live
+   * admin dashboards + the affected user's room so their history refreshes
+   * ("Your attendance was updated by an administrator").
+   */
+  private emitAttendanceOverridden(groupId: string, record: any): void {
+    if (!this.gateway) return;
+
+    try {
+      const payload = {
+        groupId,
+        userId: record.userId,
+        mealId: record.mealId,
+        attendanceDate: record.attendanceDate.toISOString().slice(0, 10),
+        status: record.status,
+        markedBy: record.markedBy ?? null,
+      };
+      this.gateway.emitToGroup(groupId, 'attendance.overridden.v1', payload);
+      this.gateway.emitToUser(record.userId, 'attendance.overridden.v1', payload);
+    } catch (err) {
       this.logger.warn(`Gateway emit failed: ${err?.message}`);
     }
   }

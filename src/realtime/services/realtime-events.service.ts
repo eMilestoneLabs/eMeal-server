@@ -122,6 +122,32 @@ export interface AttendanceAnalyticsUpdatedPayload {
   date: string; // YYYY-MM-DD
 }
 
+// GAP-WS-1 (RESOLVED): events named in the source-of-truth requirements.
+// Additive — emitted ALONGSIDE the existing attendance.updated.v1 /
+// event.stats.updated.v1 emits so no existing listener breaks.
+
+export interface AttendanceOverriddenPayload extends AttendanceMarkedPayload {
+  markedBy: string; // admin userId who performed the override
+  previousStatus?: string | null;
+}
+
+export interface GuestJoinedPayload {
+  organizationId: string;
+  eventId: string;
+  partyId: string;
+  primaryName: string;
+  adultsCount: number;
+  childrenCount: number;
+}
+
+export interface GuestUpdatedPayload {
+  organizationId: string;
+  eventId: string;
+  partyId: string;
+  action: string; // "renamed" | "presence_changed" | "meal_changed" | "party_updated" | "party_removed"
+  personId?: string;
+}
+
 // ── Service ───────────────────────────────────────────────────────────────────
 
 @Injectable()
@@ -271,5 +297,41 @@ export class RealtimeEventsService {
     if (!this.isReady) return;
     this.gateway!.emitToAdmin(organizationId, 'attendance.analytics.updated.v1', payload);
     this.logger.debug(`attendance.analytics.updated.v1 → admin:${organizationId} group:${groupId}`);
+  }
+
+  /**
+   * GAP-WS-1: attendance.overridden.v1
+   * Emitted when an admin overrides a member's attendance record.
+   * Group room (live dashboards) + the affected user's room (their history view).
+   * Additive: attendance.updated.v1 continues to fire for backward compatibility.
+   */
+  emitAttendanceOverridden(groupId: string, payload: AttendanceOverriddenPayload): void {
+    if (!this.isReady) return;
+    this.gateway!.emitToGroup(groupId, 'attendance.overridden.v1', payload);
+    this.gateway!.emitToUser(payload.userId, 'attendance.overridden.v1', payload);
+    this.logger.debug(`attendance.overridden.v1 → group:${groupId} user:${payload.userId}`);
+  }
+
+  /**
+   * GAP-WS-1: guest.joined.v1
+   * Emitted when a guest party joins an event (QR / join code).
+   * Admin room — event admin dashboards update without manual refresh.
+   * Additive: event.updated.v1 (action=guest_joined) continues to fire.
+   */
+  emitGuestJoined(organizationId: string, payload: GuestJoinedPayload): void {
+    if (!this.isReady) return;
+    this.gateway!.emitToAdmin(organizationId, 'guest.joined.v1', payload);
+    this.logger.debug(`guest.joined.v1 → admin:${organizationId} event:${payload.eventId}`);
+  }
+
+  /**
+   * GAP-WS-1: guest.updated.v1
+   * Emitted on guest party / person changes (rename, presence, meal selection, removal).
+   * Admin room — keeps guest lists and meal analytics live.
+   */
+  emitGuestUpdated(organizationId: string, payload: GuestUpdatedPayload): void {
+    if (!this.isReady) return;
+    this.gateway!.emitToAdmin(organizationId, 'guest.updated.v1', payload);
+    this.logger.debug(`guest.updated.v1 → admin:${organizationId} event:${payload.eventId} action=${payload.action}`);
   }
 }
