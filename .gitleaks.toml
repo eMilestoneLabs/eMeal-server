@@ -1,0 +1,30 @@
+# .gitleaks.toml — secret-scanning config for CI (gitleaks, MIT licensed).
+#
+# Extends the default gitleaks ruleset. The ONLY allowlisted matches are the
+# clearly-labelled, non-production test env values used by .github/workflows/ci.yml
+# (ephemeral service containers) and documentation placeholders. Real secrets
+# anywhere in the tree still fail the pipeline.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "CI-only test env values + documentation placeholders"
+regexes = [
+  '''test-jwt-access-secret-64-chars-minimum-padding-here''',
+  '''test-jwt-refresh-secret-64-chars-minimum-padding-here''',
+  '''test-refresh-secret''',
+  '''test-bull-secret''',
+  '''your-256-bit-secret''',
+  '''your-other-256-bit-secret''',
+  '''minio-access-key''',
+  '''minio-secret-key''',
+  '''postgres:postgres@localhost''',
+  '''postgres:PASSWORD@localhost''',
+]
+paths = [
+  '''docs/PERMANENT_MEMORY_CORE_DEVELOPMENT/''',
+  '''node_modules/''',
+  '''coverage/''',
+  '''dist/''',
+]
