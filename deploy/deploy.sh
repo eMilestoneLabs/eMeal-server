@@ -1,29 +1,40 @@
 #!/usr/bin/env bash
-# Release/redeploy on the VPS. Zero-downtime PM2 reload. Run from repo root.
-# Usage:  cd /opt/emeal-server && ./deploy/deploy.sh
+# ─────────────────────────────────────────────────────────────────────────────
+# Release / redeploy on the VPS. Zero-downtime PM2 reload.
+# Run from anywhere:   bash ~/eMeal-server/deploy/deploy.sh
+# Steps: backup -> pull -> data services -> deps -> build -> migrate -> reload -> health.
+#
+# Env overrides:
+#   BRANCH         default: eMeal-server
+#   BACKUP_REMOTE  default: gdrive:eMeal-Backups   (offsite during the pre-deploy backup)
+# ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-echo "==> Backup database first"
-mkdir -p /opt/backups
-if docker ps --format '{{.Names}}' | grep -q emeal_postgres; then
-  docker exec emeal_postgres pg_dump -U "${POSTGRES_USER:-emeal}" "${POSTGRES_DB:-emeal_db}" \
-    > "/opt/backups/emeal_$(date +%Y%m%d_%H%M%S).sql" || echo "WARN: pg_dump skipped"
-fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_DIR="$(dirname "$SCRIPT_DIR")"
+cd "$APP_DIR"
+BRANCH="${BRANCH:-eMeal-server}"
+export BACKUP_REMOTE="${BACKUP_REMOTE:-gdrive:eMeal-Backups}"
 
-echo "==> Pull latest"
-git pull origin main
+echo "==> 1/7 Pre-deploy backup (db + minio + offsite)"
+bash "$SCRIPT_DIR/backup.sh" || echo "WARN: backup step failed — continuing deploy"
 
-echo "==> Data services (postgres + redis + minio)"
+echo "==> 2/7 Pull latest ($BRANCH)"
+git pull origin "$BRANCH"
+
+echo "==> 3/7 Data services (postgres + redis + minio)"
 docker compose -f docker-compose.prod.yml up -d
 
-echo "==> Install + build"
+echo "==> 4/7 Install dependencies (npm ci)"
 npm ci
+
+echo "==> 5/7 Build (nest build)"
 npm run build
 
-echo "==> Apply migrations (deploy, not dev)"
+echo "==> 6/7 Apply migrations (prisma migrate deploy)"
 npx prisma migrate deploy
 
-echo "==> Reload app (PM2 cluster)"
+echo "==> 7/7 Reload app (PM2 cluster, zero-downtime)"
 pm2 reload ecosystem.config.js --update-env || pm2 start ecosystem.config.js --env production
 pm2 save
 
