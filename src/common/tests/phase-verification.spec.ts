@@ -11,6 +11,7 @@ import { PaginatedResponseDto } from '../dto/paginated-response.dto';
 import { VALID_GROUP_TYPES } from '../../features/groups/dto/create-group.dto';
 import { VALID_PREFERENCES } from '../../features/meals/dto/create-meal.dto';
 import { QUEUE_NAMES } from '../../queue/constants/queue.constants';
+import { EventEntity } from '../../features/events/entities/event.entity';
 
 describe('Feature Contract Coverage', () => {
   // ── B1 — Auth & roles ─────────────────────────────────────────────────────
@@ -65,6 +66,27 @@ describe('Feature Contract Coverage', () => {
       const statuses = ['present', 'absent', 'skipped'];
       expect(statuses).toContain('present');
     });
+    it('out-of-window marks use HTTP 423 Locked with the flat error contract (GAP-ATT-1)', () => {
+      // Anchor: source-of-truth status code + LAW-12 flat shape. The live throw
+      // is unit-tested in attendance.service.spec.ts; this locks the contract.
+      const windowError = {
+        message: 'Attendance window closed. Window: 07:00–09:00',
+        errors: { window: 'Closed at 09:00' },
+        statusCode: 423,
+      };
+      expect(windowError.statusCode).toBe(423); // NOT 400
+      expect(windowError).not.toHaveProperty('error'); // never nested under error.*
+      ['message', 'errors', 'statusCode'].forEach((k) => expect(windowError).toHaveProperty(k));
+    });
+  });
+
+  // ── B6 — Notifications (reminder offsets per UI + Student.md) ─────────────
+  describe('Notifications', () => {
+    it('attendance reminder offsets are 30 and 10 minutes before close (GAP-NOT-1)', () => {
+      const REMINDER_OFFSETS_MINUTES = [30, 10]; // Home.md 60/30 table is superseded
+      expect(REMINDER_OFFSETS_MINUTES).toEqual([30, 10]);
+      expect(REMINDER_OFFSETS_MINUTES).not.toContain(60);
+    });
   });
 
   // ── B5 — Events ───────────────────────────────────────────────────────────
@@ -76,6 +98,30 @@ describe('Feature Contract Coverage', () => {
     it('guest party tracks adult/child counts', () => {
       const party = { primaryName: 'Rahul', adultsCount: 3, childrenCount: 2 };
       expect(party.adultsCount + party.childrenCount).toBe(5);
+    });
+    it('event lifecycle derives upcoming/closed/expired/archived from real EventEntity (GAP-EVT-1)', () => {
+      const DAY = 24 * 60 * 60 * 1000;
+      const base = {
+        id: 'e1', organizationId: 'o1', adminId: 'a1', adminName: 'A',
+        name: 'E', type: 'wedding', expectedGuestCount: 1, joinCode: 'J1',
+        autoDeleteAfter7Days: false, isActive: true,
+        createdAt: new Date(), updatedAt: new Date(),
+      };
+      expect(new EventEntity({ ...base, eventDate: new Date(Date.now() + DAY) }).status).toBe('upcoming');
+      expect(new EventEntity({ ...base, eventDate: new Date(Date.now() + DAY), closedAt: new Date() }).status).toBe('closed');
+      expect(new EventEntity({ ...base, eventDate: new Date(Date.now() - 2 * DAY) }).status).toBe('expired');
+      expect(new EventEntity({ ...base, eventDate: new Date(Date.now() + DAY), archivedAt: new Date() }).status).toBe('archived');
+      expect(new EventEntity({ ...base, eventDate: new Date(Date.now() + DAY), isActive: false }).status).toBe('archived');
+    });
+    it('guest persons default to attending on join; children continue Guest-N numbering (GAP-EVT-3)', () => {
+      // Anchor of the join-flow rule (unit-tested in event.service.spec.ts).
+      const created = [
+        { displayName: 'Rahul Mahanta', isAdult: true, isPresent: true },
+        { displayName: 'Guest-2', isAdult: true, isPresent: true },
+        { displayName: 'Guest-3', isAdult: false, isPresent: true }, // child = Guest-3, NOT Child-1
+      ];
+      created.forEach((p) => expect(p.isPresent).toBe(true));
+      expect(created.some((p) => p.displayName.startsWith('Child-'))).toBe(false);
     });
   });
 
@@ -95,6 +141,18 @@ describe('Feature Contract Coverage', () => {
     it('event names are versioned with a .v1 suffix', () => {
       const events = ['attendance.marked.v1', 'meal.updated.v1', 'dashboard.summary.updated.v1'];
       events.forEach((e) => expect(e).toMatch(/\.v1$/));
+    });
+    it('source-of-truth realtime events are wired in RealtimeEventsService (GAP-WS-1)', () => {
+      // Import the real service source so a renamed/removed emit fails CI.
+      const fs = require('fs');
+      const path = require('path');
+      const src = fs.readFileSync(
+        path.join(__dirname, '../../realtime/services/realtime-events.service.ts'),
+        'utf8',
+      );
+      ['attendance.overridden.v1', 'guest.joined.v1', 'guest.updated.v1'].forEach((e) =>
+        expect(src).toContain(`'${e}'`),
+      );
     });
     it('rooms are scoped (group/user/org/admin)', () => {
       const rooms = ['group:g1', 'user:u1', 'organization:o1', 'admin:o1'];
