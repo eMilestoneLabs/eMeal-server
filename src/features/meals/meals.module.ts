@@ -13,6 +13,7 @@ import { SchedulesRepository } from './repositories/schedules.repository';
 // GroupsModule needed for GroupsRepository (org isolation + mealConfig verification)
 import { GroupsModule } from '../groups/groups.module';
 import { RealtimeModule } from '../../realtime/realtime.module';
+import { StorageModule } from '../../storage/storage.module';
 
 /**
  * MealsModule — Phase B3
@@ -37,6 +38,7 @@ import { RealtimeModule } from '../../realtime/realtime.module';
     AuditModule,
     GroupsModule, // for GroupsRepository access
     RealtimeModule,   // for 'REALTIME_GATEWAY' token (@Optional inject in services)
+    StorageModule,    // B11: MinIO meal-image upload
   ],
   controllers: [MealsController, SchedulesController],
   providers: [

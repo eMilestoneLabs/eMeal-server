@@ -12,7 +12,10 @@ import {
   UseGuards,
   Req,
   BadRequestException,
+  UseInterceptors,
+  UploadedFile,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { Request } from 'express';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -23,6 +26,7 @@ import { CreateMealDto } from './dto/create-meal.dto';
 import { UpdateMealDto, ReorderMealsDto } from './dto/update-meal.dto';
 import { QueryMealsDto, QuerySchedulesDto } from './dto/query-meals.dto';
 import { SchedulesService } from './schedules.service';
+import { StorageService } from '../../storage/storage.service';
 
 /**
  * MealsController
@@ -58,6 +62,7 @@ export class MealsController {
   constructor(
     private readonly mealsService: MealsService,
     private readonly schedulesService: SchedulesService,
+    private readonly storage: StorageService,
   ) {}
 
   // ── CREATE ────────────────────────────────────────────────────────────────
@@ -194,17 +199,58 @@ export class MealsController {
   @Post(':id/image')
   @UseGuards(RolesGuard)
   @Roles(...ADMIN_ROLES)
+  @UseInterceptors(FileInterceptor('image'))
   @HttpCode(HttpStatus.OK)
   async uploadMealImage(
     @CurrentUser() user: JwtPayload,
     @Param('id') id: string,
+    @UploadedFile()
+    file: { buffer: Buffer; mimetype: string; size: number } | undefined,
     @Req() req: Request,
   ) {
-    // Stub: return placeholder. Real implementation will upload to Cloudflare R2.
-    return {
-      imageUrl: null,
-      message: 'Image upload endpoint ready. R2 integration pending in B11.',
-    };
+    if (!user.organizationId) {
+      throw new BadRequestException({
+        message: 'No organization',
+        errors: { organizationId: 'User has no organization' },
+      });
+    }
+    if (!file) {
+      throw new BadRequestException({
+        message: 'No image uploaded',
+        errors: { image: 'multipart field "image" is required' },
+      });
+    }
+    // 200 KB cap (source-of-truth meal media limit); JPEG/PNG only.
+    if (file.size > 200 * 1024) {
+      throw new BadRequestException({
+        message: 'Image too large',
+        errors: { image: 'Image must be 200KB or smaller' },
+      });
+    }
+    if (file.mimetype !== 'image/jpeg' && file.mimetype !== 'image/png') {
+      throw new BadRequestException({
+        message: 'Unsupported image type',
+        errors: { image: 'Only JPEG and PNG are allowed' },
+      });
+    }
+
+    const imageUrl = await this.storage.uploadMealImage(
+      user.organizationId,
+      id,
+      file.buffer,
+      file.mimetype as 'image/jpeg' | 'image/png',
+    );
+
+    // Persist the URL on the meal (org-scoped; admin role already enforced).
+    await this.mealsService.updateMeal(
+      id,
+      user.organizationId,
+      user.sub,
+      { imageUrl } as UpdateMealDto,
+      req.requestId,
+    );
+
+    return { imageUrl };
   }
 
   // ── GET ONE — declared AFTER all named sub-routes ─────────────────────────
