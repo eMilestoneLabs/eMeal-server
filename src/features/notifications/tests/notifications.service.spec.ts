@@ -112,7 +112,8 @@ describe('NotificationsService', () => {
 
   // ── Attendance reminder scheduling ─────────────────────────────────────────
 
-  it('scheduleAttendanceReminders enqueues 60min and 30min reminders when window is far enough', async () => {
+  it('scheduleAttendanceReminders enqueues 30min and 10min reminders when window is far enough', async () => {
+    // GAP-NOT-1 (RESOLVED): source-of-truth offsets are 30/10 min before close
     const windowCloseAt = new Date(Date.now() + 90 * 60 * 1000); // 90 min from now
 
     await service.scheduleAttendanceReminders({
@@ -123,17 +124,17 @@ describe('NotificationsService', () => {
       windowCloseAt,
     });
 
-    // Both 60-min and 30-min reminders should be enqueued
+    // Both 30-min and 10-min reminders should be enqueued
     expect(mockQueue.scheduleAttendanceReminder).toHaveBeenCalledTimes(2);
 
     const calls = mockQueue.scheduleAttendanceReminder.mock.calls;
     const minutesBefore = calls.map((c: any[]) => c[0].minutesBefore);
-    expect(minutesBefore).toContain(60);
     expect(minutesBefore).toContain(30);
+    expect(minutesBefore).toContain(10);
   });
 
-  it('scheduleAttendanceReminders enqueues only 30min reminder when window is 40 min away', async () => {
-    const windowCloseAt = new Date(Date.now() + 40 * 60 * 1000); // 40 min from now
+  it('scheduleAttendanceReminders enqueues only the 10min reminder when window is 25 min away', async () => {
+    const windowCloseAt = new Date(Date.now() + 25 * 60 * 1000); // 25 min from now
 
     await service.scheduleAttendanceReminders({
       organizationId: 'org-1',
@@ -144,11 +145,11 @@ describe('NotificationsService', () => {
     });
 
     expect(mockQueue.scheduleAttendanceReminder).toHaveBeenCalledTimes(1);
-    expect(mockQueue.scheduleAttendanceReminder.mock.calls[0][0].minutesBefore).toBe(30);
+    expect(mockQueue.scheduleAttendanceReminder.mock.calls[0][0].minutesBefore).toBe(10);
   });
 
-  it('scheduleAttendanceReminders enqueues nothing when window is less than 35 min away', async () => {
-    const windowCloseAt = new Date(Date.now() + 20 * 60 * 1000); // 20 min from now
+  it('scheduleAttendanceReminders enqueues nothing when window is less than 15 min away', async () => {
+    const windowCloseAt = new Date(Date.now() + 10 * 60 * 1000); // 10 min from now
 
     await service.scheduleAttendanceReminders({
       organizationId: 'org-1',

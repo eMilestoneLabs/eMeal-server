@@ -114,23 +114,9 @@ export class NotificationsService {
     const closeMs = params.windowCloseAt.getTime();
     const minutesUntilClose = (closeMs - now) / (1000 * 60);
 
-    // 60-minute reminder — only if window closes more than 65 minutes from now
-    if (minutesUntilClose > 65) {
-      const delay = closeMs - now - 60 * 60 * 1000;
-      await this.queue.scheduleAttendanceReminder(
-        {
-          organizationId: params.organizationId,
-          groupId: params.groupId,
-          mealId: params.mealId,
-          mealSlotKey: params.mealSlotKey,
-          windowCloseAt: params.windowCloseAt.toISOString(),
-          minutesBefore: 60,
-        },
-        delay,
-      );
-      this.logger.log(`Scheduled 60min reminder for meal=${params.mealId}`);
-    }
-
+    // GAP-NOT-1 (RESOLVED): source-of-truth reminder offsets are 30 and 10 minutes
+    // before the attendance window closes (FLUTTER_UI_SCREENSHOT student Settings:
+    // "Reminded 30 min and 10 min before attendance windows close" + Student.md).
     // 30-minute reminder — only if window closes more than 35 minutes from now
     if (minutesUntilClose > 35) {
       const delay = closeMs - now - 30 * 60 * 1000;
@@ -146,6 +132,23 @@ export class NotificationsService {
         delay,
       );
       this.logger.log(`Scheduled 30min reminder for meal=${params.mealId}`);
+    }
+
+    // 10-minute closing reminder — only if window closes more than 15 minutes from now
+    if (minutesUntilClose > 15) {
+      const delay = closeMs - now - 10 * 60 * 1000;
+      await this.queue.scheduleAttendanceReminder(
+        {
+          organizationId: params.organizationId,
+          groupId: params.groupId,
+          mealId: params.mealId,
+          mealSlotKey: params.mealSlotKey,
+          windowCloseAt: params.windowCloseAt.toISOString(),
+          minutesBefore: 10,
+        },
+        delay,
+      );
+      this.logger.log(`Scheduled 10min reminder for meal=${params.mealId}`);
     }
   }
 
