@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# Nightly backup — PostgreSQL dump + MinIO object mirror, with retention.
+# Nightly backup — PostgreSQL dump + MinIO object mirror, with retention,
+# plus OPTIONAL offsite push via rclone (e.g. Google Drive — free, no cost).
 # Runs as the deploy user (must be in the `docker` group). No sudo required.
 #
 # Usage:   ./deploy/backup.sh
-# Cron:    0 2 * * * /home/emeal/eMeal-server/deploy/backup.sh >> /home/emeal/backups/cron.log 2>&1
+# Cron:    0 2 * * * BACKUP_REMOTE=gdrive:eMeal-Backups /home/emeal/eMeal-server/deploy/backup.sh >> /home/emeal/backups/cron.log 2>&1
 #
 # Env overrides (optional):
 #   BACKUP_DIR      default: $HOME/backups
-#   RETENTION_DAYS  default: 30   (db dumps older than this are pruned)
+#   RETENTION_DAYS  default: 30   (LOCAL db dumps older than this are pruned)
 #   PG_CONTAINER    default: emeal_postgres
+#   BACKUP_REMOTE   default: ""   (set to an rclone remote:path to enable offsite
+#                                  copy, e.g. gdrive:eMeal-Backups. No-op if unset
+#                                  or if rclone is not installed. Uses `copy`, so
+#                                  the remote keeps full history — never deleted.)
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -18,6 +23,7 @@ APP_DIR="$(dirname "$SCRIPT_DIR")"
 BACKUP_DIR="${BACKUP_DIR:-$HOME/backups}"
 RETENTION_DAYS="${RETENTION_DAYS:-30}"
 PG_CONTAINER="${PG_CONTAINER:-emeal_postgres}"
+BACKUP_REMOTE="${BACKUP_REMOTE:-}"
 TS="$(date +%Y%m%d_%H%M%S)"
 
 mkdir -p "$BACKUP_DIR/db" "$BACKUP_DIR/minio"
@@ -43,9 +49,19 @@ docker run --rm --network host --entrypoint /bin/sh \
   mc mirror --overwrite --remove local/${MINIO_BUCKET} /backup" || \
   echo "[$(date -Iseconds)] WARN minio mirror skipped/failed" >> "$BACKUP_DIR/backup.log"
 
-# 3) Retention — prune db dumps older than RETENTION_DAYS
+# 3) Retention — prune LOCAL db dumps older than RETENTION_DAYS
 find "$BACKUP_DIR/db" -name 'emeal_*.sql.gz' -mtime +"$RETENTION_DAYS" -delete
+
+# 4) OPTIONAL offsite push (rclone). copy = never deletes remote (keeps full history).
+if [ -n "$BACKUP_REMOTE" ] && command -v rclone >/dev/null 2>&1; then
+  if rclone copy "$BACKUP_DIR" "$BACKUP_REMOTE" --transfers 4 --checkers 8 \
+       --log-file "$BACKUP_DIR/offsite.log" --log-level INFO; then
+    echo "[$(date -Iseconds)] offsite copy OK -> $BACKUP_REMOTE" >> "$BACKUP_DIR/backup.log"
+  else
+    echo "[$(date -Iseconds)] WARN offsite copy failed -> $BACKUP_REMOTE" >> "$BACKUP_DIR/backup.log"
+  fi
+fi
 
 SIZE="$(du -h "$BACKUP_DIR/db/emeal_${TS}.sql.gz" | cut -f1)"
 echo "[$(date -Iseconds)] backup OK  db=emeal_${TS}.sql.gz ($SIZE)" >> "$BACKUP_DIR/backup.log"
-echo "Backup complete: $BACKUP_DIR/db/emeal_${TS}.sql.gz ($SIZE)"
+echo "Backup complete: $BACKUP_DIR/db/emeal_${TS}.sql.gz ($SIZE)${BACKUP_REMOTE:+  +offsite:$BACKUP_REMOTE}"
