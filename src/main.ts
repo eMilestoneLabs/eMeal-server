@@ -26,6 +26,13 @@ async function bootstrap() {
   );
   app.use(compression());
 
+  // Behind Nginx (the sole ingress) trust the first proxy hop so Express
+  // derives the real client IP from X-Forwarded-For. Without this, every
+  // request appears to come from 127.0.0.1 and per-IP rate limiting
+  // (ThrottlerGuard on login/OTP) collapses into a single global counter.
+  // '1' trusts only Nginx — clients cannot spoof X-Forwarded-For.
+  app.getHttpAdapter().getInstance().set('trust proxy', 1);
+
   // ── B7: Redis Socket.IO adapter ───────────────────────────────────────────
   // Must be registered BEFORE enableCors so Socket.IO inherits CORS config.
   // Gracefully falls back to in-memory adapter if @socket.io/redis-adapter
