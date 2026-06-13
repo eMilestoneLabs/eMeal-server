@@ -119,6 +119,8 @@ export class EventEntity {
   autoDeleteAfter7Days: boolean;
   autoDeleteAt: Date | null;
   isActive: boolean;
+  closedAt: Date | null;   // GAP-EVT-1: admin Close Event timestamp
+  archivedAt: Date | null; // GAP-EVT-1: admin Archive Event timestamp
   mealTypes: EventMealTypeEntity[];
   guestParties: EventGuestPartyEntity[];
   createdAt: Date;
@@ -137,6 +139,8 @@ export class EventEntity {
     autoDeleteAfter7Days: boolean;
     autoDeleteAt?: Date | null;
     isActive: boolean;
+    closedAt?: Date | null;
+    archivedAt?: Date | null;
     mealTypes?: EventMealTypeEntity[];
     guestParties?: EventGuestPartyEntity[];
     createdAt: Date;
@@ -154,10 +158,30 @@ export class EventEntity {
     this.autoDeleteAfter7Days = data.autoDeleteAfter7Days;
     this.autoDeleteAt = data.autoDeleteAt ?? null;
     this.isActive = data.isActive;
+    this.closedAt = data.closedAt ?? null;
+    this.archivedAt = data.archivedAt ?? null;
     this.mealTypes = data.mealTypes ?? [];
     this.guestParties = data.guestParties ?? [];
     this.createdAt = data.createdAt;
     this.updatedAt = data.updatedAt;
+  }
+
+  /**
+   * GAP-EVT-1 (RESOLVED): derived event status per Event_admin.md §4 + §18.
+   *   archived  — archivedAt set, or soft-deleted (isActive=false): hidden, restorable
+   *   expired   — event date has passed: read-only (view/export only)
+   *   closed    — admin closed the event before its date: no joins/modifications
+   *   upcoming  — open: guests may join, modify attendance + meal selections
+   * Additive serializer field — Flutter computes its own EventStatus and
+   * ignores unknown JSON keys, so this cannot break the locked contract.
+   */
+  get status(): 'upcoming' | 'closed' | 'expired' | 'archived' {
+    if (this.archivedAt || !this.isActive) return 'archived';
+    const endOfEventDay = new Date(this.eventDate);
+    endOfEventDay.setUTCHours(23, 59, 59, 999);
+    if (Date.now() > endOfEventDay.getTime()) return 'expired';
+    if (this.closedAt) return 'closed';
+    return 'upcoming';
   }
 }
 
@@ -180,6 +204,7 @@ export class EventStatsEntity {
     adults: number;
     children: number;
     present: number;
+    pending?: number; // attending guests without a meal selection (Event_admin.md §12)
     vegCount: number;
     nonVegCount: number;
     mealTypeBreakdown: Array<{ mealTypeId: string; title: string; count: number }>;
@@ -189,7 +214,9 @@ export class EventStatsEntity {
     this.adults = data.adults;
     this.children = data.children;
     this.present = data.present;
-    this.pending = data.total - data.present;
+    // Pending = ATTENDING guests who have not selected a meal yet.
+    // Fallback (legacy callers): registered minus attending.
+    this.pending = data.pending ?? data.total - data.present;
     this.vegCount = data.vegCount;
     this.nonVegCount = data.nonVegCount;
     this.mealTypeBreakdown = data.mealTypeBreakdown;

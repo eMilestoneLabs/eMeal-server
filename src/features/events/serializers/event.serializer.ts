@@ -111,6 +111,10 @@ export class EventSerializer {
       joinCode: event.joinCode,
       autoDeleteAfter7Days: event.autoDeleteAfter7Days,
       isActive: event.isActive,
+      // GAP-EVT-1: additive lifecycle fields — Flutter ignores unknown keys
+      status: event.status,
+      closedAt: event.closedAt ? event.closedAt.toISOString() : null,
+      archivedAt: event.archivedAt ? event.archivedAt.toISOString() : null,
       mealTypes: EventMealTypeSerializer.toList(event.mealTypes),
       createdAt: event.createdAt.toISOString(),
       updatedAt: event.updatedAt.toISOString(),
@@ -132,6 +136,10 @@ export class EventSerializer {
       joinCode: event.joinCode,
       autoDeleteAfter7Days: event.autoDeleteAfter7Days,
       isActive: event.isActive,
+      // GAP-EVT-1: additive lifecycle fields
+      status: event.status,
+      closedAt: event.closedAt ? event.closedAt.toISOString() : null,
+      archivedAt: event.archivedAt ? event.archivedAt.toISOString() : null,
       mealTypeCount: event.mealTypes.length,
       createdAt: event.createdAt.toISOString(),
       updatedAt: event.updatedAt.toISOString(),

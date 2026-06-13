@@ -2,7 +2,8 @@ import {
   Injectable,
   NotFoundException,
   ForbiddenException,
-  BadRequestException,
+  ConflictException,
+  HttpException,
   Logger,
   Optional,
   Inject,
@@ -183,6 +184,18 @@ export class EventsService {
       });
     }
 
+    // GAP-EVT-1 (RESOLVED): closed/expired/archived events accept no new guests
+    if (event.status !== 'upcoming') {
+      throw new HttpException(
+        {
+          message: 'This event is closed and no longer accepting guests.',
+          errors: { event: `Event status is ${event.status}` },
+          statusCode: 423,
+        },
+        423,
+      );
+    }
+
     const party = await this.eventsRepo.createParty(event.id, {
       primaryName,
       adultsCount: Math.max(1, adultsCount),
@@ -195,6 +208,16 @@ export class EventsService {
       organizationId: event.organizationId,
       eventId: event.id,
       action: 'guest_joined',
+    });
+
+    // GAP-WS-1 (RESOLVED): source-of-truth event name — additive emit
+    this.realtime?.emitGuestJoined(event.organizationId, {
+      organizationId: event.organizationId,
+      eventId: event.id,
+      partyId: party.id,
+      primaryName: party.primaryName,
+      adultsCount: party.adultsCount,
+      childrenCount: party.childrenCount,
     });
 
     return EventGuestPartySerializer.toResponse(party, true);
@@ -364,6 +387,18 @@ export class EventsService {
       });
     }
 
+    // GAP-EVT-2 (RESOLVED): deletion is BLOCKED when any guest has already
+    // selected this meal type (Event_admin.md: "Deletion should be blocked
+    // if guests have already selected that meal type").
+    const selections = await this.eventsRepo.countMealTypeSelections(mealTypeId, eventId);
+    if (selections > 0) {
+      throw new ConflictException({
+        message: 'Cannot delete this meal type — guests have already selected it.',
+        errors: { mealTypeId: `${selections} guest(s) have selected this meal type` },
+        statusCode: 409,
+      });
+    }
+
     await this.eventsRepo.deleteMealType(mealTypeId, eventId);
     await this.invalidateEventStats(eventId);
 
@@ -384,7 +419,7 @@ export class EventsService {
     organizationId: string,
     dto: CreatePartyDto,
   ) {
-    await this.assertEventOwnership(eventId, organizationId);
+    await this.assertEventModifiable(eventId, organizationId);
 
     const party = await this.eventsRepo.createParty(eventId, {
       primaryName: dto.primaryName,
@@ -435,6 +470,8 @@ export class EventsService {
       });
     }
 
+    await this.assertEventModifiable(eventId, organizationId);
+
     const party = await this.eventsRepo.updateParty(partyId, eventId, {
       primaryName: dto.primaryName,
       adultsCount: dto.adultsCount,
@@ -448,6 +485,16 @@ export class EventsService {
       targetType: 'EventGuestParty',
       action: 'update',
       requestId,
+    });
+
+    await this.invalidateEventStats(eventId);
+
+    // GAP-WS-1 (RESOLVED): guest.updated.v1
+    this.realtime?.emitGuestUpdated(organizationId, {
+      organizationId,
+      eventId,
+      partyId,
+      action: 'party_updated',
     });
 
     return EventGuestPartySerializer.toResponse(party, true);
@@ -471,6 +518,8 @@ export class EventsService {
       });
     }
 
+    await this.assertEventModifiable(eventId, organizationId);
+
     await this.eventsRepo.deleteParty(partyId, eventId);
     await this.invalidateEventStats(eventId);
 
@@ -482,6 +531,14 @@ export class EventsService {
       action: 'delete',
       requestId,
     });
+
+    // GAP-WS-1 (RESOLVED): guest.updated.v1 (party removed)
+    this.realtime?.emitGuestUpdated(organizationId, {
+      organizationId,
+      eventId,
+      partyId,
+      action: 'party_removed',
+    });
   }
 
   // ── PERSON DETAILS (name / meal preference) ───────────────────────────────
@@ -492,7 +549,7 @@ export class EventsService {
     organizationId: string,
     dto: { displayName?: string; selectedMealTypeId?: string | null; mealPreference?: string | null },
   ) {
-    await this.assertEventOwnership(eventId, organizationId);
+    await this.assertEventModifiable(eventId, organizationId);
 
     const person = await this.eventsRepo.updatePersonDetails(personId, eventId, dto);
     if (!person) {
@@ -503,6 +560,15 @@ export class EventsService {
     }
 
     await this.invalidateEventStats(eventId);
+
+    // GAP-WS-1 (RESOLVED): guest.updated.v1
+    this.realtime?.emitGuestUpdated(organizationId, {
+      organizationId,
+      eventId,
+      partyId: person.partyId,
+      action: dto.displayName !== undefined ? 'renamed' : 'meal_changed',
+      personId: person.id,
+    });
 
     return {
       id: person.id,
@@ -520,7 +586,7 @@ export class EventsService {
     organizationId: string,
     isPresent: boolean,
   ) {
-    await this.assertEventOwnership(eventId, organizationId);
+    await this.assertEventModifiable(eventId, organizationId);
 
     const person = await this.eventsRepo.updatePersonPresence(personId, eventId, isPresent);
     if (!person) {
@@ -531,6 +597,15 @@ export class EventsService {
     }
 
     await this.invalidateEventStats(eventId);
+
+    // GAP-WS-1 (RESOLVED): guest.updated.v1
+    this.realtime?.emitGuestUpdated(organizationId, {
+      organizationId,
+      eventId,
+      partyId: person.partyId,
+      action: 'presence_changed',
+      personId: person.id,
+    });
 
     return { id: person.id, isPresent: person.isPresent };
   }
@@ -557,7 +632,155 @@ export class EventsService {
     return serialized;
   }
 
+  // ── EVENT LIFECYCLE (GAP-EVT-1 RESOLVED) ─────────────────────────────────
+
+  /**
+   * POST /events/:id/close — danger-zone action (Event_admin.md §18).
+   * Closed events accept no new guests and no guest-data modifications.
+   * Admin retains view + export access. Closed + date passed → expired.
+   */
+  async closeEvent(
+    id: string,
+    organizationId: string,
+    adminId: string,
+    role: string,
+    requestId?: string,
+  ) {
+    this.assertEventAdmin(role);
+    await this.assertEventOwnership(id, organizationId);
+
+    const updated = await this.eventsRepo.update(id, organizationId, {
+      closedAt: new Date(),
+    });
+
+    this.audit.log({
+      organizationId,
+      actorId: adminId,
+      targetId: id,
+      targetType: 'Event',
+      action: 'update',
+      metadata: { lifecycle: 'closed' },
+      requestId,
+    });
+
+    await this.invalidateEventStats(id);
+
+    this.realtime?.emitEventUpdated(organizationId, {
+      organizationId,
+      eventId: id,
+      action: 'closed',
+    });
+
+    return EventSerializer.toResponse(updated);
+  }
+
+  /**
+   * POST /events/:id/archive — hides the event from active lists (restorable).
+   */
+  async archiveEvent(
+    id: string,
+    organizationId: string,
+    adminId: string,
+    role: string,
+    requestId?: string,
+  ) {
+    this.assertEventAdmin(role);
+    await this.assertEventOwnership(id, organizationId);
+
+    const updated = await this.eventsRepo.update(id, organizationId, {
+      archivedAt: new Date(),
+    });
+
+    this.audit.log({
+      organizationId,
+      actorId: adminId,
+      targetId: id,
+      targetType: 'Event',
+      action: 'update',
+      metadata: { lifecycle: 'archived' },
+      requestId,
+    });
+
+    await this.invalidateEventStats(id);
+
+    this.realtime?.emitEventUpdated(organizationId, {
+      organizationId,
+      eventId: id,
+      action: 'archived',
+    });
+
+    return EventSerializer.toResponse(updated);
+  }
+
+  /**
+   * POST /events/:id/restore — restores an archived event.
+   */
+  async restoreEvent(
+    id: string,
+    organizationId: string,
+    adminId: string,
+    role: string,
+    requestId?: string,
+  ) {
+    this.assertEventAdmin(role);
+    await this.assertEventOwnership(id, organizationId);
+
+    const updated = await this.eventsRepo.update(id, organizationId, {
+      archivedAt: null,
+      isActive: true,
+    });
+
+    this.audit.log({
+      organizationId,
+      actorId: adminId,
+      targetId: id,
+      targetType: 'Event',
+      action: 'update',
+      metadata: { lifecycle: 'restored' },
+      requestId,
+    });
+
+    await this.invalidateEventStats(id);
+
+    this.realtime?.emitEventUpdated(organizationId, {
+      organizationId,
+      eventId: id,
+      action: 'restored',
+    });
+
+    return EventSerializer.toResponse(updated);
+  }
+
   // ── PRIVATE HELPERS ────────────────────────────────────────────────────────
+
+  /**
+   * GAP-EVT-1: guest data can only be modified while the event is Upcoming.
+   * Closed / Expired / Archived events are locked (423) — admin keeps
+   * view + export access through the unguarded GET endpoints.
+   */
+  private async assertEventModifiable(
+    eventId: string,
+    organizationId: string,
+  ): Promise<void> {
+    const event = await this.eventsRepo.findById(eventId, organizationId);
+    if (!event) {
+      throw new NotFoundException({
+        message: 'Event not found',
+        errors: { eventId: 'No event found with this ID in your organization' },
+        statusCode: 404,
+      });
+    }
+    if (event.status !== 'upcoming') {
+      throw new HttpException(
+        {
+          message: 'This event is closed and can no longer be modified.',
+          errors: { event: `Event status is ${event.status}` },
+          statusCode: 423,
+        },
+        423,
+      );
+    }
+  }
 
   private assertEventAdmin(role: string): void {
     if (!EVENT_ADMIN_ROLES.includes(role)) {

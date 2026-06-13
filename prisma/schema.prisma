@@ -437,6 +437,12 @@ model Event {
   autoDeleteAfter7Days Boolean  @default(false)
   autoDeleteAt         DateTime? // eventDate + 7 days if autoDeleteAfter7Days=true
 
+  // GAP-EVT-1 (RESOLVED): persisted event lifecycle (Event_admin.md §4 + §18)
+  // Derived status: archivedAt → archived | date passed → expired |
+  // closedAt → closed | otherwise upcoming. Serialized as additive "status".
+  closedAt   DateTime? // admin "Close Event" danger-zone action
+  archivedAt DateTime? // admin "Archive Event" (hidden, restorable)
+
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

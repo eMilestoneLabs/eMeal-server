@@ -177,6 +177,59 @@ export class EventsController {
     );
   }
 
+  // ── EVENT LIFECYCLE (GAP-EVT-1 RESOLVED) — additive endpoints ────────────
+
+  /**
+   * POST /api/v1/events/:id/close — danger-zone Close Event action.
+   * After closing: guests cannot join or modify data; admin keeps view/export.
+   */
+  @Post(':id/close')
+  async closeEvent(
+    @CurrentUser() user: JwtPayload,
+    @Req() req: Request,
+    @Param('id') id: string,
+  ) {
+    return this.eventsService.closeEvent(
+      id,
+      user.organizationId!,
+      user.sub,
+      user.role,
+      req.headers['x-request-id'] as string,
+    );
+  }
+
+  /** POST /api/v1/events/:id/archive — hide event from active lists (restorable). */
+  @Post(':id/archive')
+  async archiveEvent(
+    @CurrentUser() user: JwtPayload,
+    @Req() req: Request,
+    @Param('id') id: string,
+  ) {
+    return this.eventsService.archiveEvent(
+      id,
+      user.organizationId!,
+      user.sub,
+      user.role,
+      req.headers['x-request-id'] as string,
+    );
+  }
+
+  /** POST /api/v1/events/:id/restore — restore an archived event. */
+  @Post(':id/restore')
+  async restoreEvent(
+    @CurrentUser() user: JwtPayload,
+    @Req() req: Request,
+    @Param('id') id: string,
+  ) {
+    return this.eventsService.restoreEvent(
+      id,
+      user.organizationId!,
+      user.sub,
+      user.role,
+      req.headers['x-request-id'] as string,
+    );
+  }
+
   // ── MEAL TYPES ────────────────────────────────────────────────────────────
 
   @Post(':id/meal-types')

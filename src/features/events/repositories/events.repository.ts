@@ -28,6 +28,8 @@ interface UpdateEventData {
   autoDeleteAfter7Days?: boolean;
   autoDeleteAt?: Date | null;
   isActive?: boolean;
+  closedAt?: Date | null;   // GAP-EVT-1
+  archivedAt?: Date | null; // GAP-EVT-1
 }
 
 interface FindManyOptions {
@@ -112,6 +114,8 @@ export class EventsRepository {
       autoDeleteAfter7Days: event.autoDeleteAfter7Days,
       autoDeleteAt: event.autoDeleteAt ?? null,
       isActive: event.isActive,
+      closedAt: event.closedAt ?? null,
+      archivedAt: event.archivedAt ?? null,
       mealTypes: (event.mealTypes ?? []).map((mt: any) => this.buildMealTypeEntity(mt)),
       guestParties: (event.guestParties ?? []).map((p: any) => this.buildPartyEntity(p)),
       createdAt: event.createdAt,
@@ -241,6 +245,8 @@ export class EventsRepository {
         ...(data.autoDeleteAfter7Days !== undefined && { autoDeleteAfter7Days: data.autoDeleteAfter7Days }),
         ...(data.autoDeleteAt !== undefined && { autoDeleteAt: data.autoDeleteAt }),
         ...(data.isActive !== undefined && { isActive: data.isActive }),
+        ...(data.closedAt !== undefined && { closedAt: data.closedAt }),
+        ...(data.archivedAt !== undefined && { archivedAt: data.archivedAt }),
       },
       include: {
         mealTypes: { orderBy: { createdAt: 'asc' } },
@@ -337,6 +343,9 @@ export class EventsRepository {
       // Auto-generate person rows
       const personData: any[] = [];
 
+      // GAP-EVT-3 (RESOLVED): persons are created ATTENDING by default —
+      // the UI shows "N/N attending" immediately after join; guests then
+      // deselect members who will not attend. isPresent is set deliberately.
       // Primary person
       personData.push({
         partyId: p.id,
@@ -344,10 +353,10 @@ export class EventsRepository {
         isAdult: true,
         isPrimary: true,
         isNameEdited: true,
-        isPresent: false,
+        isPresent: true,
       });
 
-      // Remaining adults
+      // Remaining adults — Guest-2 ... Guest-{adultsCount}
       for (let i = 1; i < adultsCount; i++) {
         personData.push({
           partyId: p.id,
@@ -355,19 +364,20 @@ export class EventsRepository {
           isAdult: true,
           isPrimary: false,
           isNameEdited: false,
-          isPresent: false,
+          isPresent: true,
         });
       }
 
-      // Children
+      // Children — numbering CONTINUES after adults (Event_Guest.md + UI:
+      // 3 adults + 2 children → Guest-4 [Child], Guest-5 [Child], not Child-1/2)
       for (let i = 0; i < childrenCount; i++) {
         personData.push({
           partyId: p.id,
-          displayName: `Child-${i + 1}`,
+          displayName: `Guest-${adultsCount + i + 1}`,
           isAdult: false,
           isPrimary: false,
           isNameEdited: false,
-          isPresent: false,
+          isPresent: true,
         });
       }
 
@@ -510,27 +520,43 @@ export class EventsRepository {
       }),
       this.prisma.eventMealType.findMany({
         where: { eventId },
-        select: { id: true, title: true },
+        select: { id: true, title: true, isVeg: true },
       }),
     ]);
 
     const total = persons.length;
     const adults = persons.filter((p: any) => p.isAdult).length;
     const children = persons.filter((p: any) => !p.isAdult).length;
-    const present = persons.filter((p: any) => p.isPresent).length;
 
-    // Veg/non-veg breakdown by mealPreference
+    // CRITICAL BUSINESS RULE (Event_admin.md §12): all meal analytics are
+    // calculated from ATTENDING guests only. Registered ≠ Attending.
+    // "Absent Guests = No Meal Required."
+    const attending = persons.filter((p: any) => p.isPresent);
+    const present = attending.length;
+
+    // Veg/non-veg classification: prefer the selected meal type's isVeg flag;
+    // fall back to the mealPreference string for legacy rows.
+    const vegTypeIds = new Set(
+      mealTypes.filter((mt: any) => mt.isVeg).map((mt: any) => mt.id),
+    );
+    const nonVegTypeIds = new Set(
+      mealTypes.filter((mt: any) => !mt.isVeg).map((mt: any) => mt.id),
+    );
     const vegPrefs = new Set(['veg', 'jain']);
-    const vegCount = persons.filter(
-      (p: any) => p.mealPreference && vegPrefs.has(p.mealPreference),
+    const vegCount = attending.filter((p: any) =>
+      p.selectedMealTypeId
+        ? vegTypeIds.has(p.selectedMealTypeId)
+        : p.mealPreference && vegPrefs.has(p.mealPreference),
     ).length;
-    const nonVegCount = persons.filter(
-      (p: any) => p.mealPreference && !vegPrefs.has(p.mealPreference),
+    const nonVegCount = attending.filter((p: any) =>
+      p.selectedMealTypeId
+        ? nonVegTypeIds.has(p.selectedMealTypeId)
+        : p.mealPreference && !vegPrefs.has(p.mealPreference),
     ).length;
 
-    // Meal type breakdown
+    // Meal type breakdown — attending guests only
     const mealTypeCountMap = new Map<string, number>();
-    for (const p of persons) {
+    for (const p of attending) {
       if (p.selectedMealTypeId) {
         mealTypeCountMap.set(
           p.selectedMealTypeId,
@@ -544,12 +570,18 @@ export class EventsRepository {
       count: mealTypeCountMap.get(mt.id) ?? 0,
     }));
 
+    // Pending = attending guests without any meal selection
+    const pending = attending.filter(
+      (p: any) => !p.selectedMealTypeId && !p.mealPreference,
+    ).length;
+
     return new EventStatsEntity({
       eventId,
       total,
       adults,
       children,
       present,
+      pending,
       vegCount,
       nonVegCount,
       mealTypeBreakdown,
@@ -562,6 +594,20 @@ export class EventsRepository {
   async verifyOwnership(id: string, organizationId: string): Promise<boolean> {
     const count = await this.prisma.event.count({ where: { id, organizationId } });
     return count > 0;
+  }
+
+  /**
+   * GAP-EVT-2: count guests who have selected this meal type.
+   * Deletion must be blocked when > 0 (source-of-truth rule).
+   * Checks both selectedMealTypeId (contract field) and mealTypeId (FK).
+   */
+  async countMealTypeSelections(mealTypeId: string, eventId: string): Promise<number> {
+    return this.prisma.eventPerson.count({
+      where: {
+        party: { eventId },
+        OR: [{ selectedMealTypeId: mealTypeId }, { mealTypeId }],
+      },
+    });
   }
 
   /** Verify a meal type belongs to an event in the given org. */
