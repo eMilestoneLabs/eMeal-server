@@ -96,27 +96,40 @@ export class AuthService {
       this.configService.get<number>('app.bcryptRounds') ?? 12,
     );
 
-    // Create organization for admin if provided
-    let organizationId: string | undefined;
-    if (dto.organizationName) {
-      const slug = dto.organizationSlug ??
-        dto.organizationName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+    // BUGFIX (Admin.md: "Organization created automatically on signup, slug
+    // generated from name"): an organization is auto-created for EVERY admin.
+    // The frozen admin signup form sends no organizationName, so we derive one
+    // from the admin's name; an explicit organizationName is still honored.
+    // Without this, admins had organizationId=null and could not create groups.
+    const orgName =
+      dto.organizationName && dto.organizationName.trim()
+        ? dto.organizationName.trim()
+        : `${dto.name}'s Organization`;
 
-      // Ensure slug uniqueness
-      const exists = await this.authRepo.slugExists(slug);
-      if (exists) {
+    const baseSlug =
+      (((dto.organizationSlug && dto.organizationSlug.trim()) || orgName)
+        .toLowerCase()
+        .replace(/\s+/g, '-')
+        .replace(/[^a-z0-9-]/g, '')
+        .replace(/-+/g, '-')
+        .replace(/^-+|-+$/g, '')) || 'org';
+
+    // Ensure slug uniqueness. An explicit organizationName collision is rejected
+    // (preserves prior behavior); an auto-derived slug gets a short unique suffix
+    // so signup never fails for two admins with the same name.
+    let slug = baseSlug;
+    if (await this.authRepo.slugExists(slug)) {
+      if (dto.organizationName) {
         throw new ConflictException({
           message: 'Validation failed',
           errors: { organizationSlug: 'Organization with this name already exists' },
         });
       }
-
-      const org = await this.authRepo.createOrganization({
-        name: dto.organizationName,
-        slug,
-      });
-      organizationId = org.id;
+      slug = `${baseSlug}-${ulid().slice(-6).toLowerCase()}`;
     }
+
+    const org = await this.authRepo.createOrganization({ name: orgName, slug });
+    const organizationId: string = org.id;
 
     const user = await this.usersRepo.create({
       name: dto.name,
