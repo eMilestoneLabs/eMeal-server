@@ -1,6 +1,14 @@
 import { MealEntity } from '../entities/meal.entity';
 
 /**
+ * Reserved slotKey for the implicit per-group "general attendance" slot (#9/#10).
+ * Used for attendance-only groups (or groups with no meals yet) so members can
+ * still mark attendance. Hidden from normal meal lists; surfaced only by
+ * GET /meals/today as a day-level mark card (isGeneralAttendance = true).
+ */
+export const GENERAL_ATTENDANCE_SLOT_KEY = '__general__';
+
+/**
  * MealSerializer — converts MealEntity to exact Flutter JSON contract.
  *
  * CONTRACT (from lib/shared/models/meal_model.dart — LOCKED):
@@ -66,6 +74,10 @@ export class MealSerializer {
             closeTime: meal.attendanceWindowClose,
           }
         : null,
+
+      // Additive (#9/#10): true for the implicit general-attendance slot so the
+      // client renders a day-level Mark card instead of a meal card.
+      isGeneralAttendance: meal.slotKey === GENERAL_ATTENDANCE_SLOT_KEY,
 
       createdAt: meal.createdAt.toISOString(),
     };

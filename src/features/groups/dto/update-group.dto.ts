@@ -9,7 +9,11 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
-import { MealConfigDto, VALID_GROUP_TYPES } from './create-group.dto';
+import {
+  MealConfigDto,
+  VALID_GROUP_TYPES,
+  VALID_FUNCTIONAL_ROLES,
+} from './create-group.dto';
 
 export class UpdateGroupDto {
   @IsOptional()
@@ -43,4 +47,14 @@ export class UpdateGroupDto {
   @ValidateNested()
   @Type(() => MealConfigDto)
   mealConfig?: MealConfigDto;
+
+  /**
+   * Additive (#8): update the requesting admin's functional role for THIS group.
+   * Applies to the requester's own membership (per-group title).
+   */
+  @IsOptional()
+  @IsIn(VALID_FUNCTIONAL_ROLES, {
+    message: `functionalRole must be one of: ${VALID_FUNCTIONAL_ROLES.join(', ')}`,
+  })
+  functionalRole?: string;
 }

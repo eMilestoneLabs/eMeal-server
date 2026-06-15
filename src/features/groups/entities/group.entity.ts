@@ -34,6 +34,11 @@ export class GroupEntity {
   memberIds: string[];
   blockedMemberIds: string[];
 
+  // Additive (#8): the REQUESTER's functional role for this group, computed
+  // per-request from their GroupMember.functionalRole. null -> client falls
+  // back to the user's global role. Not a DB column on Group.
+  functionalRole: string | null;
+
   createdAt: Date;
   updatedAt: Date;
 
@@ -43,6 +48,7 @@ export class GroupEntity {
     this.memberCount = this.memberCount ?? 0;
     this.memberIds = this.memberIds ?? [];
     this.blockedMemberIds = this.blockedMemberIds ?? [];
+    this.functionalRole = this.functionalRole ?? null;
     this.enabledPreferences = this.enabledPreferences ?? [];
     this.description = this.description ?? null;
     this.adminId = this.adminId ?? null;

@@ -66,12 +66,16 @@ export class GroupsService {
       vacationModeEnabled: dto.mealConfig?.vacationModeEnabled ?? true,
     });
 
-    // Auto-add creator as groupManager member
+    // Auto-add creator as groupManager member.
+    // Additive (#8): persist the admin's explicitly-chosen functional role for
+    // THIS group (e.g. hostelAdmin here, messManager elsewhere). null -> the
+    // client falls back to the user's global role.
     await this.membersRepo.createMembership({
       groupId: group.id,
       userId: adminId,
       role: 'groupManager',
       status: 'active',
+      functionalRole: dto.functionalRole ?? null,
     });
 
     this.audit.log({
@@ -114,8 +118,18 @@ export class GroupsService {
         })
       : await this.groupsRepo.findByMembership(userId, organizationId, { page, limit });
 
+    // Additive (#8): attach the requester's per-group functional role so the
+    // client can show "Hostel Admin" / "Mess Manager" per group (null = global).
+    const data = await Promise.all(
+      result.data.map(async (g) => {
+        const m = await this.membersRepo.findMembership(g.id, userId);
+        g.functionalRole = m?.functionalRole ?? null;
+        return GroupSerializer.toResponse(g);
+      }),
+    );
+
     return {
-      data: result.data.map(GroupSerializer.toResponse),
+      data,
       total: result.total,
       page: result.page,
       limit: result.limit,
@@ -139,6 +153,10 @@ export class GroupsService {
         });
       }
     }
+
+    // Additive (#8): requester's per-group functional role for display.
+    const myMembership = await this.membersRepo.findMembership(id, userId);
+    group.functionalRole = myMembership?.functionalRole ?? null;
 
     return GroupSerializer.toResponse(group);
   }
@@ -174,6 +192,17 @@ export class GroupsService {
     }
 
     const group = await this.groupsRepo.update(id, organizationId, updateData);
+
+    // Additive (#8): update the requesting admin's functional role for THIS
+    // group (per-group title). Only applies when the actor is a member.
+    if (dto.functionalRole !== undefined) {
+      const membership = await this.membersRepo.findMembership(id, actorId);
+      if (membership) {
+        await this.membersRepo.updateMembership(id, actorId, {
+          functionalRole: dto.functionalRole,
+        });
+      }
+    }
 
     this.audit.log({
       organizationId,

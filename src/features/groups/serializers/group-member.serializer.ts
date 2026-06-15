@@ -11,6 +11,8 @@ export class GroupMemberSerializer {
       groupId: member.groupId,
       userId: member.userId,
       role: member.role,
+      // additive (#8): per-group functional title (null -> client uses global role)
+      functionalRole: member.functionalRole ?? null,
       status: member.status,
       joinedAt: member.joinedAt.toISOString(),
       updatedAt: member.updatedAt.toISOString(),

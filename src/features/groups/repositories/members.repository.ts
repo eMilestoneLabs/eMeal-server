@@ -86,6 +86,7 @@ export class MembersRepository {
     userId: string;
     role?: string;
     status?: string;
+    functionalRole?: string | null; // additive (#8): per-group functional title
   }): Promise<GroupMemberEntity> {
     const m = await this.prisma.groupMember.create({
       data: {
@@ -93,6 +94,9 @@ export class MembersRepository {
         userId: data.userId,
         role: (data.role ?? 'member') as any,
         status: (data.status ?? 'active') as any,
+        ...(data.functionalRole !== undefined
+          ? { functionalRole: data.functionalRole as any }
+          : {}),
       },
     });
     return this.toEntity(m);
@@ -106,6 +110,7 @@ export class MembersRepository {
     userId: string,
     data: Partial<{
       role: string;
+      functionalRole: string | null; // additive (#8)
       status: string;
       blockedAt: Date;
       blockedBy: string;

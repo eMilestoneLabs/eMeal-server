@@ -51,6 +51,13 @@ export class AttendanceSerializer {
       mealId: record.mealId,
       organizationId: record.organizationId,
 
+      // Additive (Issues #4/#7/#11): joined member identity for admin-facing
+      // lists, dashboard activity and exports. Null when the user relation was
+      // not included (e.g. a user's own records). Existing clients ignore it.
+      userName: record.user?.name ?? null,
+      userEmail: record.user?.email ?? null,
+      userPhone: record.user?.phone ?? null,
+
       // M-10 fix: Flutter reads json['date'] — YYYY-MM-DD string
       date: toDateString(record.attendanceDate),
 

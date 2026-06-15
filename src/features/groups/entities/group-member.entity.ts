@@ -7,6 +7,7 @@ export class GroupMemberEntity {
   groupId: string;
   userId: string;
   role: string;    // MemberRole: member | moderator | groupManager
+  functionalRole: string | null; // additive (#8): per-group UserRole-style title; null -> fall back to User.role
   status: string;  // MemberStatus: active | pending | blocked | removed
   joinedAt: Date;
   updatedAt: Date;
@@ -33,6 +34,7 @@ export class GroupMemberEntity {
 
   constructor(partial: Partial<GroupMemberEntity>) {
     Object.assign(this, partial);
+    this.functionalRole = this.functionalRole ?? null;
     this.blockedAt = this.blockedAt ?? null;
     this.blockedBy = this.blockedBy ?? null;
     this.removedAt = this.removedAt ?? null;

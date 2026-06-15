@@ -56,6 +56,9 @@ export class GroupSerializer {
       blockedMemberIds: group.blockedMemberIds,
       maxMembers: group.maxMembers ?? null,
 
+      // Additive (#8): requester's per-group functional role (null = use global).
+      functionalRole: group.functionalRole ?? null,
+
       // M-07 fix: always nested mealConfig object — never flattened
       mealConfig: {
         mealsEnabled: group.mealsEnabled,

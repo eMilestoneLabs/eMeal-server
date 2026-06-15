@@ -29,6 +29,23 @@ export const VALID_GROUP_TYPES = [
   'other',
 ] as const;
 
+/**
+ * Functional roles an admin may assign to a member FOR A SPECIFIC GROUP (#8).
+ * Mirrors the Flutter UserRole enum exactly. Additive — never returned as an
+ * enum column rename; stored on GroupMember.functionalRole (nullable).
+ */
+export const VALID_FUNCTIONAL_ROLES = [
+  'student',
+  'member',
+  'guest',
+  'messManager',
+  'hostelManager',
+  'hostelAdmin',
+  'organizationManager',
+  'eventAdmin',
+  'eventGuest',
+] as const;
+
 export class MealConfigDto {
   @IsOptional()
   @IsBoolean()
@@ -85,4 +102,14 @@ export class CreateGroupDto {
   @ValidateNested()
   @Type(() => MealConfigDto)
   mealConfig?: MealConfigDto;
+
+  /**
+   * Additive (#8): the creator's functional role FOR THIS GROUP.
+   * Optional — when omitted the service falls back to the creator's global role.
+   */
+  @IsOptional()
+  @IsIn(VALID_FUNCTIONAL_ROLES, {
+    message: `functionalRole must be one of: ${VALID_FUNCTIONAL_ROLES.join(', ')}`,
+  })
+  functionalRole?: string;
 }

@@ -253,6 +253,10 @@ model GroupMember {
   groupId   String
   userId    String
   role      MemberRole   @default(member)
+  // Additive (#8): per-group functional title chosen by admin
+  // (e.g. messManager in one group, hostelAdmin in another).
+  // NULL -> client falls back to the user's global User.role.
+  functionalRole UserRole?
   status    MemberStatus @default(active)
   joinedAt  DateTime     @default(now())
   updatedAt DateTime     @updatedAt

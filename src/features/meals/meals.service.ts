@@ -9,7 +9,10 @@ import {
 } from '@nestjs/common';
 import type { RealtimeEventsService } from '../../realtime/services/realtime-events.service';
 import { MealsRepository } from './repositories/meals.repository';
-import { MealSerializer } from './serializers/meal.serializer';
+import {
+  MealSerializer,
+  GENERAL_ATTENDANCE_SLOT_KEY,
+} from './serializers/meal.serializer';
 import { AuditService } from '../../audit/audit.service';
 import { CreateMealDto } from './dto/create-meal.dto';
 import { UpdateMealDto, ReorderMealsDto } from './dto/update-meal.dto';
@@ -146,12 +149,82 @@ export class MealsService {
       includeDisabled: isAdmin && !!query.includeDisabled,
     });
 
+    // #9/#10: never surface the implicit general-attendance slot as a normal
+    // meal (it is only returned by getTodayMeals as a day-level mark card).
+    const visible = result.data.filter(
+      (m) => m.slotKey !== GENERAL_ATTENDANCE_SLOT_KEY,
+    );
+    const removed = result.data.length - visible.length;
+
     return PaginatedResponseDto.of(
-      MealSerializer.toList(result.data),
-      result.total,
+      MealSerializer.toList(visible),
+      Math.max(0, result.total - removed),
       result.page,
       result.limit,
     );
+  }
+
+  // ── TODAY (with attendance-only fallback) ──────────────────────────────────
+
+  /**
+   * Today's meals for a group. If the group has NO active meals (attendance-only
+   * group, or meals not configured yet — #9/#10), returns a single implicit
+   * "general attendance" slot so members can still mark attendance for the day.
+   */
+  async getTodayMeals(
+    userId: string,
+    role: string,
+    organizationId: string,
+    groupId: string,
+  ) {
+    const result = await this.getMeals(userId, role, organizationId, {
+      groupId,
+      page: 1,
+      limit: 50,
+    } as QueryMealsDto);
+
+    if (result.data.length > 0) return result;
+
+    // Attendance-only path: ensure + return the implicit general slot.
+    const slot = await this.ensureGeneralSlot(groupId, organizationId);
+    return PaginatedResponseDto.of(
+      [MealSerializer.toResponse(slot)],
+      1,
+      1,
+      50,
+    );
+  }
+
+  /**
+   * Find-or-create the implicit per-group general-attendance slot (#9/#10).
+   * Idempotent; bypasses the mealsEnabled guard on purpose so attendance works
+   * for attendance-only groups. Hidden from normal meal lists by slotKey.
+   */
+  async ensureGeneralSlot(groupId: string, organizationId: string) {
+    const existing = await this.mealsRepo.findByGroup(groupId, organizationId, {
+      page: 1,
+      limit: 1,
+      slotKey: GENERAL_ATTENDANCE_SLOT_KEY,
+      includeDisabled: true,
+    });
+    if (existing.data.length > 0) return existing.data[0];
+
+    return this.mealsRepo.create({
+      organizationId,
+      groupId,
+      slotKey: GENERAL_ATTENDANCE_SLOT_KEY,
+      name: 'Attendance',
+      displayName: 'Daily Attendance',
+      order: 0,
+      attendanceEnabled: true,
+      description: null,
+      menuItems: [],
+      imageUrl: null,
+      preferencesEnabled: false,
+      enabledPreferences: [],
+      attendanceWindowOpen: null,
+      attendanceWindowClose: null,
+    });
   }
 
   // ── GET ONE ───────────────────────────────────────────────────────────────

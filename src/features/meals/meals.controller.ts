@@ -144,11 +144,13 @@ export class MealsController {
     if (!user.organizationId || !groupId) {
       return { data: [], total: 0, page: 1, limit: 20 };
     }
-    return this.mealsService.getMeals(
+    // #9/#10: getTodayMeals returns an implicit general-attendance slot when the
+    // group has no active meals, so attendance-only groups still work.
+    return this.mealsService.getTodayMeals(
       user.sub,
       user.role,
       user.organizationId,
-      { groupId, isActive: true, page: 1, limit: 50 } as QueryMealsDto,
+      groupId,
     );
   }
 
