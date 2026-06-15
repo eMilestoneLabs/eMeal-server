@@ -14,6 +14,7 @@ import {
   Min,
   MinLength,
 } from 'class-validator';
+import { Transform } from 'class-transformer';
 
 // Student / regular user signup
 export class StudentSignupDto {
@@ -50,6 +51,9 @@ export class StudentSignupDto {
   age?: number;
 
   @IsOptional()
+  @Transform(({ value }) =>
+    typeof value === 'string' ? value.trim().toLowerCase() : value,
+  )
   @IsIn(['male', 'female', 'other', 'prefer_not_to_say'])
   gender?: string;
 }
@@ -88,6 +92,9 @@ export class AdminSignupDto {
   age?: number;
 
   @IsOptional()
+  @Transform(({ value }) =>
+    typeof value === 'string' ? value.trim().toLowerCase() : value,
+  )
   @IsIn(['male', 'female', 'other', 'prefer_not_to_say'])
   gender?: string;
 

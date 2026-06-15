@@ -10,6 +10,7 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
+import { Transform } from 'class-transformer';
 
 export class UpdateUserDto {
   @IsOptional()
@@ -31,6 +32,9 @@ export class UpdateUserDto {
   avatarUrl?: string;
 
   @IsOptional()
+  @Transform(({ value }) =>
+    typeof value === 'string' ? value.trim().toLowerCase() : value,
+  )
   @IsIn(['male', 'female', 'other', 'prefer_not_to_say'])
   gender?: string;
 
