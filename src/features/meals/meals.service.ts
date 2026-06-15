@@ -167,9 +167,16 @@ export class MealsService {
   // ── TODAY (with attendance-only fallback) ──────────────────────────────────
 
   /**
-   * Today's meals for a group. If the group has NO active meals (attendance-only
-   * group, or meals not configured yet — #9/#10), returns a single implicit
-   * "general attendance" slot so members can still mark attendance for the day.
+   * Today's meals for a group (#9/#10).
+   * - Active meals configured        -> return them (meal-based attendance).
+   * - mealsEnabled == false (no meal
+   *   system)                        -> return the implicit "general attendance"
+   *                                     slot so attendance-only groups work.
+   * - mealsEnabled == true but NONE
+   *   configured                     -> return EMPTY. The admin must configure at
+   *                                     least one meal; the client shows
+   *                                     "No meal has been configured ... Attendance
+   *                                     is not allowed." (attendance stays blocked).
    */
   async getTodayMeals(
     userId: string,
@@ -185,14 +192,21 @@ export class MealsService {
 
     if (result.data.length > 0) return result;
 
-    // Attendance-only path: ensure + return the implicit general slot.
-    const slot = await this.ensureGeneralSlot(groupId, organizationId);
-    return PaginatedResponseDto.of(
-      [MealSerializer.toResponse(slot)],
-      1,
-      1,
-      50,
-    );
+    // No active meals. Only provide the implicit attendance slot when the meal
+    // system is DISABLED for this group (true attendance-only mode). When meals
+    // are ENABLED but none configured, attendance is intentionally blocked.
+    const group = await this.groupsRepo.findById(groupId, organizationId);
+    if (group && group.mealsEnabled === false) {
+      const slot = await this.ensureGeneralSlot(groupId, organizationId);
+      return PaginatedResponseDto.of(
+        [MealSerializer.toResponse(slot)],
+        1,
+        1,
+        50,
+      );
+    }
+
+    return PaginatedResponseDto.of([], 0, 1, 50);
   }
 
   /**
