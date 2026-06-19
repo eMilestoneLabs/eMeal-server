@@ -29,6 +29,10 @@ export class ScheduleEntryEntity {
   // Optional notes shown to students (e.g. "Extra fruits today")
   notes: string | null;
 
+  // Per-day meal preference override (#6). null = inherit from the meal.
+  preferencesEnabled: boolean | null;
+  enabledPreferences: string[];
+
   // Populated from Meal join — required for days[].meals[] serialization (M-12)
   meal?: {
     slotKey: string;
@@ -49,6 +53,8 @@ export class ScheduleEntryEntity {
     this.closeTime = partial.closeTime ?? null;
     this.mealName = partial.mealName ?? null;
     this.notes = partial.notes ?? null;
+    this.preferencesEnabled = partial.preferencesEnabled ?? null;
+    this.enabledPreferences = partial.enabledPreferences ?? [];
     this.meal = partial.meal;
   }
 }

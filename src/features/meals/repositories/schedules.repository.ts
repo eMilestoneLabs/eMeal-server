@@ -49,6 +49,8 @@ export class SchedulesRepository {
       date: raw.date,
       openTime: raw.openTime ?? null,
       closeTime: raw.closeTime ?? null,
+      preferencesEnabled: raw.preferencesEnabled ?? null,
+      enabledPreferences: raw.enabledPreferences ?? [],
       mealName: raw.mealName ?? null,
       notes: raw.notes ?? null,
       meal: raw.meal
@@ -136,6 +138,94 @@ export class SchedulesRepository {
     return schedule ? this.buildScheduleEntity(schedule) : null;
   }
 
+  /**
+   * Additive overlay for GET /meals/today (Weekly / Day-Wise Meal Mode).
+   * Returns per-meal overrides for TODAY (org timezone) sourced from the
+   * group's published schedule. Empty map = no active schedule for today,
+   * so the caller falls back to master meals (no behavioural change).
+   */
+  async findTodayOverlay(
+    groupId: string,
+    organizationId: string,
+  ): Promise<
+    Map<
+      string,
+      {
+        openTime: string | null;
+        closeTime: string | null;
+        mealName: string | null;
+        preferencesEnabled: boolean | null;
+        enabledPreferences: string[];
+      }
+    >
+  > {
+    const overlay = new Map<
+      string,
+      {
+        openTime: string | null;
+        closeTime: string | null;
+        mealName: string | null;
+        preferencesEnabled: boolean | null;
+        enabledPreferences: string[];
+      }
+    >();
+
+    // Resolve org timezone (same source the attendance engine uses).
+    const org = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { timezone: true },
+    });
+    const tz = org?.timezone ?? 'Asia/Kolkata';
+
+    // Today's calendar date in org tz -> UTC midnight + dayOfWeek (0=Mon..6=Sun).
+    const todayStr = new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date());
+    const [yy, mm, dd] = todayStr.split('-').map(Number);
+    const todayUtc = new Date(Date.UTC(yy, mm - 1, dd));
+    const dow = (todayUtc.getUTCDay() + 6) % 7;
+    const weekStart = new Date(todayUtc.getTime() - dow * 86400000);
+
+    // 1) Exact published week (true date-based / Day-Wise).
+    const weekSchedule = await this.findPublishedForWeek(
+      groupId,
+      organizationId,
+      weekStart,
+    );
+    let entries = weekSchedule
+      ? weekSchedule.entries.filter(
+          (e) => e.date.getTime() === todayUtc.getTime(),
+        )
+      : [];
+
+    // 2) Fallback: most recent published schedule matched by weekday (recurring).
+    if (entries.length === 0) {
+      const recent = await this.findByGroup(groupId, organizationId, {
+        page: 1,
+        limit: 1,
+        publishedOnly: true,
+      });
+      const latest = recent.data[0];
+      if (latest) {
+        entries = latest.entries.filter((e) => e.dayOfWeek === dow);
+      }
+    }
+
+    for (const e of entries) {
+      overlay.set(e.mealId, {
+        openTime: e.openTime ?? null,
+        closeTime: e.closeTime ?? null,
+        mealName: e.mealName ?? null,
+        preferencesEnabled: e.preferencesEnabled ?? null,
+        enabledPreferences: e.enabledPreferences ?? [],
+      });
+    }
+    return overlay;
+  }
+
   async create(data: {
     organizationId: string;
     groupId: string;
@@ -148,6 +238,8 @@ export class SchedulesRepository {
       notes?: string | null;
       openTime?: string | null;
       closeTime?: string | null;
+      preferencesEnabled?: boolean | null;
+      enabledPreferences?: string[] | null;
     }>;
   }): Promise<MealScheduleEntity> {
     const schedule = await this.prisma.mealSchedule.create({
@@ -166,6 +258,8 @@ export class SchedulesRepository {
                 notes: e.notes ?? null,
                 openTime: e.openTime ?? null,
                 closeTime: e.closeTime ?? null,
+                preferencesEnabled: e.preferencesEnabled ?? null,
+                enabledPreferences: e.enabledPreferences ?? [],
               })),
             }
           : undefined,
@@ -194,6 +288,8 @@ export class SchedulesRepository {
         notes?: string | null;
         openTime?: string | null;
         closeTime?: string | null;
+        preferencesEnabled?: boolean | null;
+        enabledPreferences?: string[] | null;
       }>;
       replaceEntries?: boolean;
     },
@@ -224,6 +320,8 @@ export class SchedulesRepository {
                 notes: e.notes ?? null,
                 openTime: e.openTime ?? null,
                 closeTime: e.closeTime ?? null,
+                preferencesEnabled: e.preferencesEnabled ?? null,
+                enabledPreferences: e.enabledPreferences ?? [],
               })),
             });
           }
@@ -240,6 +338,8 @@ export class SchedulesRepository {
                   notes: entry.notes ?? null,
                   openTime: entry.openTime ?? null,
                   closeTime: entry.closeTime ?? null,
+                  preferencesEnabled: entry.preferencesEnabled ?? null,
+                  enabledPreferences: entry.enabledPreferences ?? [],
                 },
               });
             } else {
@@ -253,6 +353,8 @@ export class SchedulesRepository {
                   notes: entry.notes ?? null,
                   openTime: entry.openTime ?? null,
                   closeTime: entry.closeTime ?? null,
+                  preferencesEnabled: entry.preferencesEnabled ?? null,
+                  enabledPreferences: entry.enabledPreferences ?? [],
                 },
               });
             }
@@ -267,6 +369,17 @@ export class SchedulesRepository {
     const result = await this.prisma.mealSchedule.updateMany({
       where: { id, organizationId },
       data: { isPublished: true, publishedAt: new Date() },
+    });
+    if (result.count === 0) throw new NotFoundException('Schedule not found');
+    return this.findById(id, organizationId) as Promise<MealScheduleEntity>;
+  }
+
+  // Issue 2: revert a published schedule back to draft (inverse of publish).
+  // Additive — mirrors publish(); idempotent and org-isolated.
+  async revert(id: string, organizationId: string): Promise<MealScheduleEntity> {
+    const result = await this.prisma.mealSchedule.updateMany({
+      where: { id, organizationId },
+      data: { isPublished: false, publishedAt: null },
     });
     if (result.count === 0) throw new NotFoundException('Schedule not found');
     return this.findById(id, organizationId) as Promise<MealScheduleEntity>;
@@ -295,6 +408,8 @@ export class SchedulesRepository {
                   notes: e.notes ?? null,
                   openTime: e.openTime ?? null,
                   closeTime: e.closeTime ?? null,
+                  preferencesEnabled: e.preferencesEnabled ?? null,
+                  enabledPreferences: e.enabledPreferences ?? [],
                 })),
               }
             : undefined,

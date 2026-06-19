@@ -61,6 +61,7 @@ export class GroupsService {
       maxMembers: dto.maxMembers,
       mealsEnabled: dto.mealConfig?.mealsEnabled ?? true,
       weeklyMenuEnabled: dto.mealConfig?.weeklyMenuEnabled ?? false,
+      dayWiseMealsEnabled: dto.mealConfig?.dayWiseMealsEnabled ?? false,
       preferencesEnabled: dto.mealConfig?.preferencesEnabled ?? false,
       enabledPreferences: dto.mealConfig?.enabledPreferences ?? [],
       vacationModeEnabled: dto.mealConfig?.vacationModeEnabled ?? true,
@@ -186,6 +187,21 @@ export class GroupsService {
       const mc = dto.mealConfig;
       if (mc.mealsEnabled !== undefined) updateData.mealsEnabled = mc.mealsEnabled;
       if (mc.weeklyMenuEnabled !== undefined) updateData.weeklyMenuEnabled = mc.weeklyMenuEnabled;
+      if (mc.dayWiseMealsEnabled !== undefined) updateData.dayWiseMealsEnabled = mc.dayWiseMealsEnabled;
+      // Additive guard: Weekly Menu and Day-Wise Meals are mutually exclusive,
+      // and when the meal system is ON exactly one mode must be active
+      // (truth table: both-ON and both-OFF are Not Allowed).
+      if (updateData.weeklyMenuEnabled === true) updateData.dayWiseMealsEnabled = false;
+      if (updateData.dayWiseMealsEnabled === true) updateData.weeklyMenuEnabled = false;
+      // Not-both-OFF: if both modes are turned off while meals stay enabled,
+      // default to Weekly Meal Mode so the meal system always has a delivery mode.
+      if (
+        updateData.mealsEnabled !== false &&
+        updateData.weeklyMenuEnabled === false &&
+        updateData.dayWiseMealsEnabled === false
+      ) {
+        updateData.weeklyMenuEnabled = true;
+      }
       if (mc.preferencesEnabled !== undefined) updateData.preferencesEnabled = mc.preferencesEnabled;
       if (mc.enabledPreferences !== undefined) updateData.enabledPreferences = mc.enabledPreferences;
       if (mc.vacationModeEnabled !== undefined) updateData.vacationModeEnabled = mc.vacationModeEnabled;
@@ -677,6 +693,7 @@ export class GroupsService {
     return {
       mealsEnabled: group.mealsEnabled,
       weeklyMenuEnabled: group.weeklyMenuEnabled,
+      dayWiseMealsEnabled: group.dayWiseMealsEnabled,
       preferencesEnabled: group.preferencesEnabled,
       enabledPreferences: group.enabledPreferences,
       vacationModeEnabled: group.vacationModeEnabled,

@@ -149,6 +149,7 @@ export class GroupsRepository {
     maxMembers?: number;
     mealsEnabled?: boolean;
     weeklyMenuEnabled?: boolean;
+    dayWiseMealsEnabled?: boolean;
     preferencesEnabled?: boolean;
     enabledPreferences?: string[];
     vacationModeEnabled?: boolean;
@@ -164,6 +165,7 @@ export class GroupsRepository {
         maxMembers: data.maxMembers,
         mealsEnabled: data.mealsEnabled ?? true,
         weeklyMenuEnabled: data.weeklyMenuEnabled ?? false,
+        dayWiseMealsEnabled: data.dayWiseMealsEnabled ?? false,
         preferencesEnabled: data.preferencesEnabled ?? false,
         enabledPreferences: data.enabledPreferences ?? [],
         vacationModeEnabled: data.vacationModeEnabled ?? true,
@@ -183,6 +185,7 @@ export class GroupsRepository {
       maxMembers: number | null;
       mealsEnabled: boolean;
       weeklyMenuEnabled: boolean;
+      dayWiseMealsEnabled: boolean;
       preferencesEnabled: boolean;
       enabledPreferences: string[];
       vacationModeEnabled: boolean;

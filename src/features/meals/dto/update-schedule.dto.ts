@@ -3,6 +3,7 @@ import {
   IsNotEmpty,
   IsOptional,
   IsArray,
+  IsBoolean,
   IsDateString,
   ValidateNested,
   MaxLength,
@@ -51,6 +52,16 @@ export class UpdateScheduleEntryDto {
   @ValidateNested()
   @Type(() => ScheduleEntryWindowDto)
   attendanceWindow?: ScheduleEntryWindowDto | null;
+
+  /** Per-day meal preference override (#6). */
+  @IsOptional()
+  @IsBoolean()
+  preferencesEnabled?: boolean;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  enabledPreferences?: string[];
 }
 
 /**

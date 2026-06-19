@@ -25,6 +25,7 @@ export class GroupEntity {
   // ── mealConfig flat columns — serialized as nested object ────────────────
   mealsEnabled: boolean;
   weeklyMenuEnabled: boolean;
+  dayWiseMealsEnabled: boolean;
   preferencesEnabled: boolean;
   enabledPreferences: string[];
   vacationModeEnabled: boolean;

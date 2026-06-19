@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import type { RealtimeEventsService } from '../../realtime/services/realtime-events.service';
 import { MealsRepository } from './repositories/meals.repository';
+import { SchedulesRepository } from './repositories/schedules.repository';
 import {
   MealSerializer,
   GENERAL_ATTENDANCE_SLOT_KEY,
@@ -41,6 +42,7 @@ export class MealsService {
   constructor(
     private readonly mealsRepo: MealsRepository,
     private readonly groupsRepo: GroupsRepository,
+    private readonly schedulesRepo: SchedulesRepository,
     private readonly audit: AuditService,
     @Optional() @Inject('REALTIME_GATEWAY')
     private readonly realtime: RealtimeEventsService | null = null,
@@ -190,7 +192,47 @@ export class MealsService {
       limit: 50,
     } as QueryMealsDto);
 
-    if (result.data.length > 0) return result;
+    if (result.data.length > 0) {
+      // Additive: overlay the active planner schedule (Weekly / Day-Wise Meal
+      // Mode) onto today's meals so per-day attendance window, preference
+      // enforcement and meal visibility follow admin configuration. Attendance,
+      // analytics, history and notifications stay unchanged (same mealId/date).
+      const planGroup = await this.groupsRepo.findById(groupId, organizationId);
+      if (
+        planGroup &&
+        (planGroup.weeklyMenuEnabled || planGroup.dayWiseMealsEnabled)
+      ) {
+        const overlay = await this.schedulesRepo.findTodayOverlay(
+          groupId,
+          organizationId,
+        );
+        if (overlay.size > 0) {
+          const overlaid = result.data
+            .filter((m: any) => overlay.has(m.id))
+            .map((m: any) => {
+              const o = overlay.get(m.id)!;
+              const next: any = { ...m };
+              if (o.openTime) {
+                next.attendanceWindow = {
+                  openTime: o.openTime,
+                  closeTime: o.closeTime ?? null,
+                };
+              }
+              if (o.preferencesEnabled !== null) {
+                next.preferencesEnabled = o.preferencesEnabled;
+                if (o.enabledPreferences.length > 0) {
+                  next.enabledPreferences = o.enabledPreferences;
+                }
+              }
+              return next;
+            });
+          if (overlaid.length > 0) {
+            return PaginatedResponseDto.of(overlaid, overlaid.length, 1, 50);
+          }
+        }
+      }
+      return result;
+    }
 
     // No active meals. Only provide the implicit attendance slot when the meal
     // system is DISABLED for this group (true attendance-only mode). When meals

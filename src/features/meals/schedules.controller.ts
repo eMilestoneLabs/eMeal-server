@@ -148,6 +148,29 @@ export class SchedulesController {
     );
   }
 
+  // ── REVERT (Issue 2) ──────────────────────────────────────────────────────
+
+  /**
+   * POST /schedules/:id/revert — unpublish a published schedule back to draft
+   * so the admin can edit and re-publish. Additive, idempotent, admin-only.
+   */
+  @Post(':id/revert')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(RolesGuard)
+  @Roles(...ADMIN_ROLES)
+  async revertSchedule(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+    @Req() req: Request,
+  ) {
+    return this.schedulesService.revertToDraft(
+      id,
+      user.organizationId!,
+      user.sub,
+      req.requestId,
+    );
+  }
+
   // ── CLONE ─────────────────────────────────────────────────────────────────
 
   @Post(':id/clone')

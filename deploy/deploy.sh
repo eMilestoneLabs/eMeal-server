@@ -28,6 +28,9 @@ docker compose -f docker-compose.prod.yml up -d
 echo "==> 4/7 Install dependencies (npm ci)"
 npm ci
 
+echo "==> 4.5/7 Generate Prisma Client (idempotent - safe on every deploy)"
+npx prisma generate
+
 echo "==> 5/7 Build (nest build)"
 npm run build
 

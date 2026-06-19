@@ -63,6 +63,7 @@ export class GroupSerializer {
       mealConfig: {
         mealsEnabled: group.mealsEnabled,
         weeklyMenuEnabled: group.weeklyMenuEnabled,
+        dayWiseMealsEnabled: group.dayWiseMealsEnabled,
         preferencesEnabled: group.preferencesEnabled,
         enabledPreferences: group.enabledPreferences,
         vacationModeEnabled: group.vacationModeEnabled,

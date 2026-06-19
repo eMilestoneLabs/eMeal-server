@@ -66,6 +66,17 @@ export class CreateScheduleEntryDto {
   @ValidateNested()
   @Type(() => ScheduleEntryWindowDto)
   attendanceWindow?: ScheduleEntryWindowDto;
+
+  /** Per-day meal preference override (#6). null/absent = inherit from meal. */
+  @IsOptional()
+  @IsBoolean()
+  preferencesEnabled?: boolean;
+
+  /** Per-day enabled preference tags (#6). */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  enabledPreferences?: string[];
 }
 
 /**

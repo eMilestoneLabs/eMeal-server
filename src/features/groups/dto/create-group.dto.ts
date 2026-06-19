@@ -57,6 +57,10 @@ export class MealConfigDto {
 
   @IsOptional()
   @IsBoolean()
+  dayWiseMealsEnabled?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
   preferencesEnabled?: boolean;
 
   /**

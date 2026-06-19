@@ -308,6 +308,44 @@ export class SchedulesService {
     return ScheduleSerializer.toResponse(schedule);
   }
 
+  // ── REVERT (Issue 2) ──────────────────────────────────────────────────────
+
+  /**
+   * Revert a published schedule back to draft so the admin can edit it again
+   * and re-publish (Issue 2). Additive — mirrors publishSchedule with the
+   * inverse state. Idempotent: reverting an already-draft schedule is safe.
+   */
+  async revertToDraft(
+    id: string,
+    organizationId: string,
+    adminId: string,
+    requestId?: string,
+  ) {
+    const schedule = await this.schedulesRepo.revert(id, organizationId);
+
+    this.audit.log({
+      organizationId,
+      actorId: adminId,
+      targetId: id,
+      targetType: 'MealSchedule',
+      action: 'update',
+      metadata: { published: false, weekStartDate: schedule.weekStart.toISOString() },
+      requestId,
+    });
+
+    this.logger.log(`Schedule reverted to draft: ${id}`);
+
+    this.realtime?.emitSchedulePublished(schedule.groupId, organizationId, {
+      organizationId,
+      groupId: schedule.groupId,
+      scheduleId: schedule.id,
+      weekStart: schedule.weekStart.toISOString(),
+      isPublished: false,
+    });
+
+    return ScheduleSerializer.toResponse(schedule);
+  }
+
   // ── CLONE ─────────────────────────────────────────────────────────────────
 
   /**
@@ -363,6 +401,8 @@ export class SchedulesService {
       mealName?: string | null;
       notes?: string | null;
       attendanceWindow?: { openTime: string; closeTime: string } | null;
+      preferencesEnabled?: boolean | null;
+      enabledPreferences?: string[] | null;
     }>,
   ) {
     const validatedEntries: Array<{
@@ -374,6 +414,8 @@ export class SchedulesService {
       notes: string | null;
       openTime: string | null;
       closeTime: string | null;
+      preferencesEnabled: boolean | null;
+      enabledPreferences: string[];
     }> = [];
 
     for (const entry of entriesDto) {
@@ -400,6 +442,8 @@ export class SchedulesService {
         notes: entry.notes ?? null,
         openTime: entry.attendanceWindow?.openTime ?? null,
         closeTime: entry.attendanceWindow?.closeTime ?? null,
+        preferencesEnabled: entry.preferencesEnabled ?? null,
+        enabledPreferences: entry.enabledPreferences ?? [],
       });
     }
 

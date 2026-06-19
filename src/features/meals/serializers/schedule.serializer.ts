@@ -86,6 +86,9 @@ export class ScheduleSerializer {
       // Flat fields — per-day override (null = Flutter uses meal template timing)
       openTime: entry.openTime ?? null,
       closeTime: entry.closeTime ?? null,
+      // Additive (#6): per-day meal preference.
+      preferencesEnabled: entry.preferencesEnabled ?? false,
+      enabledPreferences: entry.enabledPreferences ?? [],
     };
   }
 

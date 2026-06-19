@@ -224,6 +224,7 @@ model Group {
   // (M-07 fix: NOT mealPrefsEnabled, NOT missing vacationModeEnabled)
   mealsEnabled         Boolean  @default(true)
   weeklyMenuEnabled    Boolean  @default(false)
+  dayWiseMealsEnabled  Boolean  @default(false)   // additive: mutually exclusive with weeklyMenuEnabled (Day-Wise Meal Mode)
   preferencesEnabled   Boolean  @default(false)   // serialized as "preferencesEnabled"
   enabledPreferences   String[] @default([])       // lowercase: "veg","chicken","fish","mutton","egg","jain"
   vacationModeEnabled  Boolean  @default(true)
@@ -368,6 +369,9 @@ model ScheduleEntry {
   closeTime  String?  // per-day override (null = use meal template attendanceWindowClose)
   mealName   String?  // what's being served on this day (e.g. "Poha", "Dal Rice")
   notes      String?  // optional notes shown to students (e.g. "Extra fruits today")
+  // Additive (#6): per-day meal preference override. null = inherit from meal.
+  preferencesEnabled Boolean?
+  enabledPreferences String[] @default([])
 
   schedule MealSchedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
   meal     Meal         @relation(fields: [mealId], references: [id], onDelete: Cascade)
