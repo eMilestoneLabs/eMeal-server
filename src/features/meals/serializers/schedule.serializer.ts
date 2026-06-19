@@ -81,7 +81,10 @@ export class ScheduleSerializer {
       name,
       slotKey: entry.meal?.slotKey ?? '',
       order: entry.meal?.order ?? 0,
-      menuItems: entry.meal?.menuItems ?? [],
+      menuItems:
+        entry.menuItems && entry.menuItems.length > 0
+          ? entry.menuItems
+          : entry.meal?.menuItems ?? [],
       imageUrl: entry.meal?.imageUrl ?? null,
       // Flat fields — per-day override (null = Flutter uses meal template timing)
       openTime: entry.openTime ?? null,

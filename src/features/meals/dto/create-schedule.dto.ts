@@ -77,6 +77,11 @@ export class CreateScheduleEntryDto {
   @IsArray()
   @IsString({ each: true })
   enabledPreferences?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  menuItems?: string[];
 }
 
 /**

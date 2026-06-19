@@ -224,6 +224,10 @@ export class MealsService {
                   next.enabledPreferences = o.enabledPreferences;
                 }
               }
+              // Issue 3: per-day menu shown on the meal card + detail screen.
+              if (o.menuItems && o.menuItems.length > 0) {
+                next.menuItems = o.menuItems;
+              }
               return next;
             });
           if (overlaid.length > 0) {

@@ -403,6 +403,7 @@ export class SchedulesService {
       attendanceWindow?: { openTime: string; closeTime: string } | null;
       preferencesEnabled?: boolean | null;
       enabledPreferences?: string[] | null;
+      menuItems?: string[] | null;
     }>,
   ) {
     const validatedEntries: Array<{
@@ -416,6 +417,7 @@ export class SchedulesService {
       closeTime: string | null;
       preferencesEnabled: boolean | null;
       enabledPreferences: string[];
+      menuItems: string[];
     }> = [];
 
     for (const entry of entriesDto) {
@@ -444,6 +446,7 @@ export class SchedulesService {
         closeTime: entry.attendanceWindow?.closeTime ?? null,
         preferencesEnabled: entry.preferencesEnabled ?? null,
         enabledPreferences: entry.enabledPreferences ?? [],
+        menuItems: entry.menuItems ?? [],
       });
     }
 

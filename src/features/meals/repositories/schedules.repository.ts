@@ -51,6 +51,7 @@ export class SchedulesRepository {
       closeTime: raw.closeTime ?? null,
       preferencesEnabled: raw.preferencesEnabled ?? null,
       enabledPreferences: raw.enabledPreferences ?? [],
+      menuItems: raw.menuItems ?? [],
       mealName: raw.mealName ?? null,
       notes: raw.notes ?? null,
       meal: raw.meal
@@ -156,6 +157,7 @@ export class SchedulesRepository {
         mealName: string | null;
         preferencesEnabled: boolean | null;
         enabledPreferences: string[];
+        menuItems: string[];
       }
     >
   > {
@@ -167,6 +169,7 @@ export class SchedulesRepository {
         mealName: string | null;
         preferencesEnabled: boolean | null;
         enabledPreferences: string[];
+        menuItems: string[];
       }
     >();
 
@@ -221,6 +224,7 @@ export class SchedulesRepository {
         mealName: e.mealName ?? null,
         preferencesEnabled: e.preferencesEnabled ?? null,
         enabledPreferences: e.enabledPreferences ?? [],
+        menuItems: e.menuItems ?? [],
       });
     }
     return overlay;
@@ -240,6 +244,7 @@ export class SchedulesRepository {
       closeTime?: string | null;
       preferencesEnabled?: boolean | null;
       enabledPreferences?: string[] | null;
+      menuItems?: string[] | null;
     }>;
   }): Promise<MealScheduleEntity> {
     const schedule = await this.prisma.mealSchedule.create({
@@ -260,6 +265,7 @@ export class SchedulesRepository {
                 closeTime: e.closeTime ?? null,
                 preferencesEnabled: e.preferencesEnabled ?? null,
                 enabledPreferences: e.enabledPreferences ?? [],
+                menuItems: e.menuItems ?? [],
               })),
             }
           : undefined,
@@ -290,6 +296,7 @@ export class SchedulesRepository {
         closeTime?: string | null;
         preferencesEnabled?: boolean | null;
         enabledPreferences?: string[] | null;
+      menuItems?: string[] | null;
       }>;
       replaceEntries?: boolean;
     },
@@ -322,6 +329,7 @@ export class SchedulesRepository {
                 closeTime: e.closeTime ?? null,
                 preferencesEnabled: e.preferencesEnabled ?? null,
                 enabledPreferences: e.enabledPreferences ?? [],
+                menuItems: e.menuItems ?? [],
               })),
             });
           }
@@ -340,6 +348,7 @@ export class SchedulesRepository {
                   closeTime: entry.closeTime ?? null,
                   preferencesEnabled: entry.preferencesEnabled ?? null,
                   enabledPreferences: entry.enabledPreferences ?? [],
+                  menuItems: entry.menuItems ?? [],
                 },
               });
             } else {
@@ -355,6 +364,7 @@ export class SchedulesRepository {
                   closeTime: entry.closeTime ?? null,
                   preferencesEnabled: entry.preferencesEnabled ?? null,
                   enabledPreferences: entry.enabledPreferences ?? [],
+                  menuItems: entry.menuItems ?? [],
                 },
               });
             }
@@ -410,6 +420,7 @@ export class SchedulesRepository {
                   closeTime: e.closeTime ?? null,
                   preferencesEnabled: e.preferencesEnabled ?? null,
                   enabledPreferences: e.enabledPreferences ?? [],
+                  menuItems: e.menuItems ?? [],
                 })),
               }
             : undefined,

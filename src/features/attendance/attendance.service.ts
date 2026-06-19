@@ -592,6 +592,11 @@ export class AttendanceService {
     const keysToDelete: string[] = [
       summaryKey(organizationId, userId, groupId),
       groupDaySummaryKey(organizationId, groupId, date),
+      // Issue 4: bust the cached dashboards so admin present/absent counts and
+      // the student dashboard reflect this mark immediately (the documented
+      // "invalidated on attendance change" behaviour was not wired before).
+      `dashboard:admin:${organizationId}`,
+      `dashboard:student:${organizationId}:${userId}`,
     ];
 
     if (mealId) {

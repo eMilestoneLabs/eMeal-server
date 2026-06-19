@@ -372,6 +372,7 @@ model ScheduleEntry {
   // Additive (#6): per-day meal preference override. null = inherit from meal.
   preferencesEnabled Boolean?
   enabledPreferences String[] @default([])
+  menuItems          String[] @default([]) // per-day menu (independent of master meal)
 
   schedule MealSchedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
   meal     Meal         @relation(fields: [mealId], references: [id], onDelete: Cascade)

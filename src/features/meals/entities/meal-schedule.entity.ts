@@ -32,6 +32,7 @@ export class ScheduleEntryEntity {
   // Per-day meal preference override (#6). null = inherit from the meal.
   preferencesEnabled: boolean | null;
   enabledPreferences: string[];
+  menuItems: string[];
 
   // Populated from Meal join — required for days[].meals[] serialization (M-12)
   meal?: {
@@ -55,6 +56,7 @@ export class ScheduleEntryEntity {
     this.notes = partial.notes ?? null;
     this.preferencesEnabled = partial.preferencesEnabled ?? null;
     this.enabledPreferences = partial.enabledPreferences ?? [];
+    this.menuItems = partial.menuItems ?? [];
     this.meal = partial.meal;
   }
 }
