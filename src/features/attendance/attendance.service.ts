@@ -161,13 +161,51 @@ export class AttendanceService {
       );
     }
 
-    // Check within attendance window
-    if (meal.attendanceWindowOpen && meal.attendanceWindowClose) {
+    // Per-day window override (Weekly / Day-Wise Meal Mode): a published
+    // schedule entry for THIS meal today takes precedence over the master meal
+    // window, so enforcement matches exactly what the student sees on
+    // GET /meals/today. Falls back to the master window when no schedule applies.
+    let effectiveOpen = meal.attendanceWindowOpen;
+    let effectiveClose = meal.attendanceWindowClose;
+    {
+      const todayUtc = toUtcMidnight(todayInTz);
+      const dow = (todayUtc.getUTCDay() + 6) % 7;
+      let entry = await this.prisma.scheduleEntry.findFirst({
+        where: {
+          mealId: meal.id,
+          date: todayUtc,
+          schedule: { groupId: meal.groupId, organizationId, isPublished: true },
+        },
+        select: { openTime: true, closeTime: true },
+      });
+      if (!entry) {
+        entry = await this.prisma.scheduleEntry.findFirst({
+          where: {
+            mealId: meal.id,
+            dayOfWeek: dow,
+            schedule: {
+              groupId: meal.groupId,
+              organizationId,
+              isPublished: true,
+            },
+          },
+          orderBy: { schedule: { weekStart: 'desc' } },
+          select: { openTime: true, closeTime: true },
+        });
+      }
+      if (entry && entry.openTime) {
+        effectiveOpen = entry.openTime;
+        effectiveClose = entry.closeTime;
+      }
+    }
+
+    // Check within attendance window (effective = per-day override or master)
+    if (effectiveOpen && effectiveClose) {
       const currentTime = getCurrentTimeInTimezone(orgTimezone);
       const withinWindow = isWithinWindow(
         currentTime,
-        meal.attendanceWindowOpen,
-        meal.attendanceWindowClose,
+        effectiveOpen,
+        effectiveClose,
       );
 
       if (!withinWindow) {
@@ -175,8 +213,8 @@ export class AttendanceService {
         // out-of-window marks. Flat error contract (LAW-12), same message text.
         throw new HttpException(
           {
-            message: `Attendance window closed. Window: ${meal.attendanceWindowOpen}–${meal.attendanceWindowClose}`,
-            errors: { window: `Closed at ${meal.attendanceWindowClose}` },
+            message: `Attendance window closed. Window: ${effectiveOpen}–${effectiveClose}`,
+            errors: { window: `Closed at ${effectiveClose}` },
             statusCode: 423,
           },
           423,
