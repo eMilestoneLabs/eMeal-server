@@ -82,6 +82,13 @@ export class CreateScheduleEntryDto {
   @IsArray()
   @IsString({ each: true })
   menuItems?: string[];
+
+  /** Additive: per-day ₹ price (integer). null = inherit master meal price. */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(1000000)
+  price?: number;
 }
 
 /**

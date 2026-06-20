@@ -88,6 +88,7 @@ export class MealsService {
       enabledPreferences: dto.enabledPreferences ?? [],
       attendanceWindowOpen: dto.attendanceWindow?.openTime ?? null,
       attendanceWindowClose: dto.attendanceWindow?.closeTime ?? null,
+      price: dto.price ?? null,
     });
 
     // Fire-and-forget audit log
@@ -228,6 +229,10 @@ export class MealsService {
               if (o.menuItems && o.menuItems.length > 0) {
                 next.menuItems = o.menuItems;
               }
+              // Additive: per-day price override (null = inherit master price).
+              if (o.price != null) {
+                next.price = o.price;
+              }
               return next;
             });
           if (overlaid.length > 0) {
@@ -338,6 +343,7 @@ export class MealsService {
     if ('imageUrl' in dto)            updateData.imageUrl = dto.imageUrl ?? null;
     if (dto.preferencesEnabled !== undefined) updateData.preferencesEnabled = dto.preferencesEnabled;
     if (dto.enabledPreferences !== undefined) updateData.enabledPreferences = dto.enabledPreferences;
+    if (dto.price !== undefined) updateData.price = dto.price;
 
     // Handle attendanceWindow — null clears the window; object updates both fields
     if ('attendanceWindow' in dto) {

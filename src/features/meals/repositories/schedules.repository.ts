@@ -32,6 +32,7 @@ export class SchedulesRepository {
             order: true,
             menuItems: true,
             imageUrl: true,
+            price: true,
           },
         },
       },
@@ -52,6 +53,7 @@ export class SchedulesRepository {
       preferencesEnabled: raw.preferencesEnabled ?? null,
       enabledPreferences: raw.enabledPreferences ?? [],
       menuItems: raw.menuItems ?? [],
+      price: raw.price ?? null,
       mealName: raw.mealName ?? null,
       notes: raw.notes ?? null,
       meal: raw.meal
@@ -62,6 +64,7 @@ export class SchedulesRepository {
             order: raw.meal.order ?? 0,
             menuItems: raw.meal.menuItems ?? [],
             imageUrl: raw.meal.imageUrl ?? null,
+            price: raw.meal.price ?? null,
           }
         : undefined,
     });
@@ -158,6 +161,7 @@ export class SchedulesRepository {
         preferencesEnabled: boolean | null;
         enabledPreferences: string[];
         menuItems: string[];
+        price: number | null;
       }
     >
   > {
@@ -170,6 +174,7 @@ export class SchedulesRepository {
         preferencesEnabled: boolean | null;
         enabledPreferences: string[];
         menuItems: string[];
+        price: number | null;
       }
     >();
 
@@ -225,6 +230,7 @@ export class SchedulesRepository {
         preferencesEnabled: e.preferencesEnabled ?? null,
         enabledPreferences: e.enabledPreferences ?? [],
         menuItems: e.menuItems ?? [],
+        price: e.price ?? null,
       });
     }
     return overlay;
@@ -245,6 +251,7 @@ export class SchedulesRepository {
       preferencesEnabled?: boolean | null;
       enabledPreferences?: string[] | null;
       menuItems?: string[] | null;
+      price?: number | null;
     }>;
   }): Promise<MealScheduleEntity> {
     const schedule = await this.prisma.mealSchedule.create({
@@ -266,6 +273,7 @@ export class SchedulesRepository {
                 preferencesEnabled: e.preferencesEnabled ?? null,
                 enabledPreferences: e.enabledPreferences ?? [],
                 menuItems: e.menuItems ?? [],
+                price: e.price ?? null,
               })),
             }
           : undefined,
@@ -297,6 +305,7 @@ export class SchedulesRepository {
         preferencesEnabled?: boolean | null;
         enabledPreferences?: string[] | null;
       menuItems?: string[] | null;
+      price?: number | null;
       }>;
       replaceEntries?: boolean;
     },
@@ -330,6 +339,7 @@ export class SchedulesRepository {
                 preferencesEnabled: e.preferencesEnabled ?? null,
                 enabledPreferences: e.enabledPreferences ?? [],
                 menuItems: e.menuItems ?? [],
+                price: e.price ?? null,
               })),
             });
           }
@@ -349,6 +359,7 @@ export class SchedulesRepository {
                   preferencesEnabled: entry.preferencesEnabled ?? null,
                   enabledPreferences: entry.enabledPreferences ?? [],
                   menuItems: entry.menuItems ?? [],
+                  price: entry.price ?? null,
                 },
               });
             } else {
@@ -365,6 +376,7 @@ export class SchedulesRepository {
                   preferencesEnabled: entry.preferencesEnabled ?? null,
                   enabledPreferences: entry.enabledPreferences ?? [],
                   menuItems: entry.menuItems ?? [],
+                  price: entry.price ?? null,
                 },
               });
             }
@@ -421,6 +433,7 @@ export class SchedulesRepository {
                   preferencesEnabled: e.preferencesEnabled ?? null,
                   enabledPreferences: e.enabledPreferences ?? [],
                   menuItems: e.menuItems ?? [],
+                  price: e.price ?? null,
                 })),
               }
             : undefined,

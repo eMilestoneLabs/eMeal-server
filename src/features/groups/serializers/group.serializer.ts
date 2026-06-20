@@ -67,6 +67,7 @@ export class GroupSerializer {
         preferencesEnabled: group.preferencesEnabled,
         enabledPreferences: group.enabledPreferences,
         vacationModeEnabled: group.vacationModeEnabled,
+        mealPricingEnabled: group.mealPricingEnabled,
       },
 
       createdAt: group.createdAt.toISOString(),

@@ -36,6 +36,7 @@ export class MealsRepository {
       enabledPreferences: raw.enabledPreferences ?? [],
       attendanceWindowOpen: raw.attendanceWindowOpen ?? null,
       attendanceWindowClose: raw.attendanceWindowClose ?? null,
+      price: raw.price ?? null,
       createdAt: raw.createdAt,
       updatedAt: raw.updatedAt,
     });
@@ -113,6 +114,7 @@ export class MealsRepository {
     enabledPreferences?: string[];
     attendanceWindowOpen?: string | null;
     attendanceWindowClose?: string | null;
+    price?: number | null;
   }): Promise<MealEntity> {
     const meal = await this.prisma.meal.create({
       data: {
@@ -130,6 +132,7 @@ export class MealsRepository {
         enabledPreferences: data.enabledPreferences ?? [],
         attendanceWindowOpen: data.attendanceWindowOpen ?? null,
         attendanceWindowClose: data.attendanceWindowClose ?? null,
+        price: data.price ?? null,
       },
     });
     return this.buildEntity(meal);
@@ -156,6 +159,7 @@ export class MealsRepository {
       enabledPreferences: string[];
       attendanceWindowOpen: string | null;
       attendanceWindowClose: string | null;
+      price: number | null;
     }>,
   ): Promise<MealEntity> {
     const result = await this.prisma.meal.updateMany({

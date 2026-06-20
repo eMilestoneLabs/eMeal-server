@@ -92,6 +92,8 @@ export class ScheduleSerializer {
       // Additive (#6): per-day meal preference.
       preferencesEnabled: entry.preferencesEnabled ?? false,
       enabledPreferences: entry.enabledPreferences ?? [],
+      // Additive: per-day ₹ price (fallback to master meal price).
+      price: entry.price ?? entry.meal?.price ?? null,
     };
   }
 

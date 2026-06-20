@@ -34,6 +34,7 @@ export class AttendanceRepository {
       note: record.note ?? null,
       markedAt: record.markedAt ?? null,
       markedBy: record.markedBy ?? null,
+      price: record.price ?? null,
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
       meal: record.meal
@@ -89,6 +90,7 @@ export class AttendanceRepository {
     note?: string | null;
     markedAt?: Date | null;
     markedBy?: string | null;
+    price?: number | null;
   }): Promise<AttendanceEntity> {
     const record = await this.prisma.attendanceRecord.upsert({
       where: {
@@ -109,6 +111,7 @@ export class AttendanceRepository {
         note: data.note ?? null,
         markedAt: data.markedAt ?? new Date(),
         markedBy: data.markedBy ?? null,
+        price: data.price ?? null,
       },
       update: {
         status: data.status as any,
@@ -116,6 +119,7 @@ export class AttendanceRepository {
         note: data.note ?? null,
         markedAt: data.markedAt ?? new Date(),
         markedBy: data.markedBy ?? null,
+        price: data.price ?? null,
       },
       include: this.mealInclude,
     });
@@ -386,6 +390,7 @@ export class AttendanceRepository {
       note?: string | null;
       markedAt?: Date;
       markedBy?: string | null;
+      price?: number | null;
     }>,
   ): Promise<AttendanceEntity[]> {
     const now = new Date();
@@ -411,6 +416,7 @@ export class AttendanceRepository {
             note: e.note ?? null,
             markedAt: e.markedAt ?? now,
             markedBy: e.markedBy ?? null,
+            price: e.price ?? null,
           },
           update: {
             status: e.status as any,
@@ -418,6 +424,7 @@ export class AttendanceRepository {
             note: e.note ?? null,
             markedAt: e.markedAt ?? now,
             markedBy: e.markedBy ?? null,
+            price: e.price ?? null,
           },
           include: this.mealInclude,
         }),

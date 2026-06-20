@@ -75,6 +75,9 @@ export class MealSerializer {
           }
         : null,
 
+      // Additive: ₹ meal price (null when pricing disabled/unset)
+      price: meal.price ?? null,
+
       // Additive (#9/#10): true for the implicit general-attendance slot so the
       // client renders a day-level Mark card instead of a meal card.
       isGeneralAttendance: meal.slotKey === GENERAL_ATTENDANCE_SLOT_KEY,

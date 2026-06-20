@@ -153,6 +153,7 @@ export class GroupsRepository {
     preferencesEnabled?: boolean;
     enabledPreferences?: string[];
     vacationModeEnabled?: boolean;
+    mealPricingEnabled?: boolean;
   }): Promise<GroupEntity> {
     const group = await this.prisma.group.create({
       data: {
@@ -169,6 +170,7 @@ export class GroupsRepository {
         preferencesEnabled: data.preferencesEnabled ?? false,
         enabledPreferences: data.enabledPreferences ?? [],
         vacationModeEnabled: data.vacationModeEnabled ?? true,
+        mealPricingEnabled: data.mealPricingEnabled ?? false,
       },
       include: { members: this.memberSelect },
     });
@@ -189,6 +191,7 @@ export class GroupsRepository {
       preferencesEnabled: boolean;
       enabledPreferences: string[];
       vacationModeEnabled: boolean;
+      mealPricingEnabled: boolean;
       isActive: boolean;
       joinToken: string;
       joinTokenExpiresAt: Date | null;

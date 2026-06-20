@@ -99,6 +99,42 @@ export class AttendanceService {
     } | null,
   ) {}
 
+  /**
+   * Resolves the ₹ price that applies to a meal on a date: the per-day published
+   * schedule entry price OVERRIDES the master meal price. Snapshotted onto the
+   * attendance record so billing/exports reflect what the member actually saw.
+   */
+  private async resolveEffectiveMealPrice(
+    mealId: string,
+    groupId: string,
+    organizationId: string,
+    attendanceDate: string,
+    masterPrice: number | null,
+  ): Promise<number | null> {
+    const dateUtc = toUtcMidnight(attendanceDate);
+    const dow = (dateUtc.getUTCDay() + 6) % 7;
+    let entry = await this.prisma.scheduleEntry.findFirst({
+      where: {
+        mealId,
+        date: dateUtc,
+        schedule: { groupId, organizationId, isPublished: true },
+      },
+      select: { price: true },
+    });
+    if (!entry) {
+      entry = await this.prisma.scheduleEntry.findFirst({
+        where: {
+          mealId,
+          dayOfWeek: dow,
+          schedule: { groupId, organizationId, isPublished: true },
+        },
+        orderBy: { schedule: { weekStart: 'desc' } },
+        select: { price: true },
+      });
+    }
+    return entry?.price ?? masterPrice ?? null;
+  }
+
   // ── Mark attendance (student) ─────────────────────────────────────────────
 
   async markAttendance(
@@ -165,6 +201,7 @@ export class AttendanceService {
     // schedule entry for THIS meal today takes precedence over the master meal
     // window, so enforcement matches exactly what the student sees on
     // GET /meals/today. Falls back to the master window when no schedule applies.
+    let effectivePrice: number | null = meal.price ?? null;
     let effectiveOpen = meal.attendanceWindowOpen;
     let effectiveClose = meal.attendanceWindowClose;
     {
@@ -176,7 +213,7 @@ export class AttendanceService {
           date: todayUtc,
           schedule: { groupId: meal.groupId, organizationId, isPublished: true },
         },
-        select: { openTime: true, closeTime: true },
+        select: { openTime: true, closeTime: true, price: true },
       });
       if (!entry) {
         entry = await this.prisma.scheduleEntry.findFirst({
@@ -190,12 +227,15 @@ export class AttendanceService {
             },
           },
           orderBy: { schedule: { weekStart: 'desc' } },
-          select: { openTime: true, closeTime: true },
+          select: { openTime: true, closeTime: true, price: true },
         });
       }
       if (entry && entry.openTime) {
         effectiveOpen = entry.openTime;
         effectiveClose = entry.closeTime;
+      }
+      if (entry && entry.price != null) {
+        effectivePrice = entry.price;
       }
     }
 
@@ -235,6 +275,7 @@ export class AttendanceService {
       note: dto.note ?? null,
       markedAt: new Date(),
       markedBy: null, // student marks own attendance
+      price: effectivePrice,
     });
 
     // 7. Invalidate Redis cache
@@ -274,7 +315,7 @@ export class AttendanceService {
     const mealIds = [...new Set(dto.entries.map((e) => e.mealId))];
     const meals = await this.prisma.meal.findMany({
       where: { id: { in: mealIds }, organizationId },
-      select: { id: true, groupId: true, attendanceEnabled: true },
+      select: { id: true, groupId: true, attendanceEnabled: true, price: true },
     });
 
     if (meals.length !== mealIds.length) {
@@ -293,21 +334,31 @@ export class AttendanceService {
 
     const mealMap = new Map(meals.map((m) => [m.id, m]));
 
-    const entries = dto.entries.map((e) => {
-      const meal = mealMap.get(e.mealId)!;
-      return {
-        organizationId,
-        groupId: meal.groupId,
-        userId,
-        mealId: e.mealId,
-        attendanceDate: toUtcMidnight(e.attendanceDate),
-        status: e.status ?? 'present',
-        preference: e.preference ?? null,
-        note: e.note ?? null,
-        markedAt: new Date(),
-        markedBy: null,
-      };
-    });
+    const entries = await Promise.all(
+      dto.entries.map(async (e) => {
+        const meal = mealMap.get(e.mealId)!;
+        const price = await this.resolveEffectiveMealPrice(
+          meal.id,
+          meal.groupId,
+          organizationId,
+          e.attendanceDate,
+          (meal as any).price ?? null,
+        );
+        return {
+          organizationId,
+          groupId: meal.groupId,
+          userId,
+          mealId: e.mealId,
+          attendanceDate: toUtcMidnight(e.attendanceDate),
+          status: e.status ?? 'present',
+          preference: e.preference ?? null,
+          note: e.note ?? null,
+          markedAt: new Date(),
+          markedBy: null,
+          price,
+        };
+      }),
+    );
 
     const records = await this.attendanceRepo.bulkUpsert(entries);
 
@@ -352,7 +403,7 @@ export class AttendanceService {
     // 1. Verify meal exists in org
     const meal = await this.prisma.meal.findFirst({
       where: { id: dto.mealId, organizationId },
-      select: { id: true, groupId: true },
+      select: { id: true, groupId: true, price: true },
     });
     if (!meal) throw new NotFoundException('Meal not found');
 
@@ -365,6 +416,13 @@ export class AttendanceService {
 
     // 3. Admin override bypasses window validation and vacation mode
     const attendanceDateUtc = toUtcMidnight(dto.attendanceDate);
+    const overridePrice = await this.resolveEffectiveMealPrice(
+      meal.id,
+      meal.groupId,
+      organizationId,
+      dto.attendanceDate,
+      (meal as any).price ?? null,
+    );
     const record = await this.attendanceRepo.upsert({
       organizationId,
       groupId: meal.groupId,
@@ -376,6 +434,7 @@ export class AttendanceService {
       note: dto.note ?? null,
       markedAt: new Date(),
       markedBy: adminId, // tracks who performed override
+      price: overridePrice,
     });
 
     // 4. Invalidate cache

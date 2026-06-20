@@ -33,6 +33,8 @@ export class ScheduleEntryEntity {
   preferencesEnabled: boolean | null;
   enabledPreferences: string[];
   menuItems: string[];
+  // Additive: per-day ₹ price override (null = inherit master meal price).
+  price: number | null;
 
   // Populated from Meal join — required for days[].meals[] serialization (M-12)
   meal?: {
@@ -42,6 +44,7 @@ export class ScheduleEntryEntity {
     order: number;
     menuItems: string[];
     imageUrl: string | null;
+    price: number | null;
   };
 
   constructor(partial: Partial<ScheduleEntryEntity> & Pick<ScheduleEntryEntity, 'id' | 'scheduleId' | 'mealId' | 'dayOfWeek' | 'date'>) {
@@ -57,6 +60,7 @@ export class ScheduleEntryEntity {
     this.preferencesEnabled = partial.preferencesEnabled ?? null;
     this.enabledPreferences = partial.enabledPreferences ?? [];
     this.menuItems = partial.menuItems ?? [];
+    this.price = partial.price ?? null;
     this.meal = partial.meal;
   }
 }

@@ -41,6 +41,9 @@ export class MealEntity {
   attendanceWindowOpen: string | null;  // "HH:mm"
   attendanceWindowClose: string | null; // "HH:mm"
 
+  // Additive: ₹ price (integer). Null when pricing disabled/unset.
+  price: number | null;
+
   createdAt: Date;
   updatedAt: Date;
 
@@ -61,6 +64,7 @@ export class MealEntity {
     this.enabledPreferences = partial.enabledPreferences ?? [];
     this.attendanceWindowOpen = partial.attendanceWindowOpen ?? null;
     this.attendanceWindowClose = partial.attendanceWindowClose ?? null;
+    this.price = partial.price ?? null;
     this.createdAt = partial.createdAt ?? new Date();
     this.updatedAt = partial.updatedAt ?? new Date();
   }

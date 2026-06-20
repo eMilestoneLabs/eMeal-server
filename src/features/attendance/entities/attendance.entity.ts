@@ -21,6 +21,8 @@ export class AttendanceEntity {
   note: string | null;
   markedAt: Date | null;
   markedBy: string | null; // userId of admin who performed manual override
+  // Additive: ₹ price snapshot at mark time (per-day override or master meal price).
+  price: number | null;
 
   createdAt: Date;
   updatedAt: Date;

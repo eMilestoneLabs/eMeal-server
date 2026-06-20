@@ -404,6 +404,7 @@ export class SchedulesService {
       preferencesEnabled?: boolean | null;
       enabledPreferences?: string[] | null;
       menuItems?: string[] | null;
+      price?: number | null;
     }>,
   ) {
     const validatedEntries: Array<{
@@ -418,6 +419,7 @@ export class SchedulesService {
       preferencesEnabled: boolean | null;
       enabledPreferences: string[];
       menuItems: string[];
+      price: number | null;
     }> = [];
 
     for (const entry of entriesDto) {
@@ -447,6 +449,7 @@ export class SchedulesService {
         preferencesEnabled: entry.preferencesEnabled ?? null,
         enabledPreferences: entry.enabledPreferences ?? [],
         menuItems: entry.menuItems ?? [],
+        price: entry.price ?? null,
       });
     }
 

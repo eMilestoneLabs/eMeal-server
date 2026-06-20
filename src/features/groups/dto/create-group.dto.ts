@@ -75,6 +75,11 @@ export class MealConfigDto {
   @IsOptional()
   @IsBoolean()
   vacationModeEnabled?: boolean;
+
+  /** Additive: when ON, meals carry a ₹ price (master + per-day). */
+  @IsOptional()
+  @IsBoolean()
+  mealPricingEnabled?: boolean;
 }
 
 export class CreateGroupDto {

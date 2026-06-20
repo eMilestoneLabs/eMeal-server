@@ -3,6 +3,9 @@ import {
   IsNotEmpty,
   IsOptional,
   IsArray,
+  IsInt,
+  Min,
+  Max,
   IsBoolean,
   IsDateString,
   ValidateNested,
@@ -67,6 +70,13 @@ export class UpdateScheduleEntryDto {
   @IsArray()
   @IsString({ each: true })
   menuItems?: string[];
+
+  /** Additive: per-day ₹ price (integer). */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(1000000)
+  price?: number;
 }
 
 /**

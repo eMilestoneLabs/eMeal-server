@@ -228,6 +228,8 @@ model Group {
   preferencesEnabled   Boolean  @default(false)   // serialized as "preferencesEnabled"
   enabledPreferences   String[] @default([])       // lowercase: "veg","chicken","fish","mutton","egg","jain"
   vacationModeEnabled  Boolean  @default(true)
+  // Additive: when ON, meals carry a ₹ price; shown to students + used for billing/exports
+  mealPricingEnabled   Boolean  @default(false)
 
   maxMembers Int?
   isActive   Boolean  @default(true)
@@ -307,6 +309,8 @@ model Meal {
   // Preference system — two-level (group-level + per-meal override)
   preferencesEnabled Boolean  @default(false)
   enabledPreferences String[] @default([]) // empty = inherit from group mealConfig
+  // Additive: master ₹ meal price (null when pricing disabled/unset). Per-day override lives on ScheduleEntry.price
+  price              Int?
 
   // Attendance window — stored flat, serialized as nested { openTime, closeTime }
   // (M-04 fix: attendanceWindow MUST always be nested in API response)
@@ -373,6 +377,8 @@ model ScheduleEntry {
   preferencesEnabled Boolean?
   enabledPreferences String[] @default([])
   menuItems          String[] @default([]) // per-day menu (independent of master meal)
+  // Additive: per-day ₹ price override (null = inherit master Meal.price)
+  price              Int?
 
   schedule MealSchedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
   meal     Meal         @relation(fields: [mealId], references: [id], onDelete: Cascade)
@@ -405,6 +411,8 @@ model AttendanceRecord {
 
   markedAt DateTime?
   markedBy String?    // userId of admin who performed manual override (nullable)
+  // Additive: ₹ price snapshot at mark time (per-day override or master). Null = pre-pricing record.
+  price    Int?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

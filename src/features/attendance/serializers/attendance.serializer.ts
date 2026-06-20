@@ -66,6 +66,7 @@ export class AttendanceSerializer {
       note: record.note ?? null,
       markedAt: record.markedAt ? record.markedAt.toISOString() : null,
       markedBy: record.markedBy ?? null,
+      price: record.price ?? null,
 
       // M-10 fix: mealName always present as flat field
       mealName,
@@ -94,6 +95,7 @@ export class AttendanceSerializer {
       date: toDateString(record.attendanceDate),
       status: record.status,
       preference: record.preference ?? null,
+      price: record.price ?? null,
       markedAt: record.markedAt ? record.markedAt.toISOString() : null,
     };
   }

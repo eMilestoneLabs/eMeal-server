@@ -65,6 +65,7 @@ export class GroupsService {
       preferencesEnabled: dto.mealConfig?.preferencesEnabled ?? false,
       enabledPreferences: dto.mealConfig?.enabledPreferences ?? [],
       vacationModeEnabled: dto.mealConfig?.vacationModeEnabled ?? true,
+      mealPricingEnabled: dto.mealConfig?.mealPricingEnabled ?? false,
     });
 
     // Auto-add creator as groupManager member.
@@ -205,6 +206,7 @@ export class GroupsService {
       if (mc.preferencesEnabled !== undefined) updateData.preferencesEnabled = mc.preferencesEnabled;
       if (mc.enabledPreferences !== undefined) updateData.enabledPreferences = mc.enabledPreferences;
       if (mc.vacationModeEnabled !== undefined) updateData.vacationModeEnabled = mc.vacationModeEnabled;
+      if (mc.mealPricingEnabled !== undefined) updateData.mealPricingEnabled = mc.mealPricingEnabled;
     }
 
     const group = await this.groupsRepo.update(id, organizationId, updateData);
@@ -697,6 +699,7 @@ export class GroupsService {
       preferencesEnabled: group.preferencesEnabled,
       enabledPreferences: group.enabledPreferences,
       vacationModeEnabled: group.vacationModeEnabled,
+      mealPricingEnabled: group.mealPricingEnabled,
     };
   }
 

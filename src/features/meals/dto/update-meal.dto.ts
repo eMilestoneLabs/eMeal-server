@@ -81,6 +81,13 @@ export class UpdateMealDto {
   @ValidateNested()
   @Type(() => AttendanceWindowDto)
   attendanceWindow?: AttendanceWindowDto | null;
+
+  /** Additive: meal price in ₹ (integer). */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(1000000)
+  price?: number;
 }
 
 /**

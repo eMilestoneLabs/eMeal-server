@@ -29,6 +29,8 @@ export class GroupEntity {
   preferencesEnabled: boolean;
   enabledPreferences: string[];
   vacationModeEnabled: boolean;
+  // Additive: ₹ pricing toggle
+  mealPricingEnabled: boolean;
 
   // ── Computed from GroupMember at query time ───────────────────────────────
   memberCount: number;
@@ -51,6 +53,7 @@ export class GroupEntity {
     this.blockedMemberIds = this.blockedMemberIds ?? [];
     this.functionalRole = this.functionalRole ?? null;
     this.enabledPreferences = this.enabledPreferences ?? [];
+    this.mealPricingEnabled = this.mealPricingEnabled ?? false;
     this.description = this.description ?? null;
     this.adminId = this.adminId ?? null;
     this.maxMembers = this.maxMembers ?? null;

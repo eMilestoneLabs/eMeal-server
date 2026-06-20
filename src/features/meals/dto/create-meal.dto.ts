@@ -120,4 +120,11 @@ export class CreateMealDto {
   @ValidateNested()
   @Type(() => AttendanceWindowDto)
   attendanceWindow?: AttendanceWindowDto;
+
+  /** Additive: meal price in ₹ (integer). Used when group mealPricingEnabled. */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(1000000)
+  price?: number;
 }
