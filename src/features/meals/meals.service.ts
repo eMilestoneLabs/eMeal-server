@@ -21,6 +21,7 @@ import { QueryMealsDto } from './dto/query-meals.dto';
 import { ADMIN_ROLES } from '../../common/decorators/roles.decorator';
 import { PaginatedResponseDto } from '../../common/dto/paginated-response.dto';
 import { GroupsRepository } from '../groups/repositories/groups.repository';
+import { getCurrentTimeInTimezone } from '../../common/utils/date.utils';
 
 /**
  * MealsService — business logic for meal CRUD and ordering.
@@ -327,6 +328,31 @@ export class MealsService {
         message: 'Meal not found',
         errors: { id: 'Meal does not exist in your organization' },
       });
+    }
+
+    // Issue 3: once today's attendance window has opened, the meal price is
+    // locked. Historical bills are already protected by the per-record price
+    // snapshot; this guard prevents the master price from being changed after
+    // attendance has started for the day. Only an actual PRICE CHANGE is
+    // blocked — every other field stays editable, and new prices can still be
+    // set before the window opens.
+    if (
+      dto.price !== undefined &&
+      (dto.price ?? null) !== (existing.price ?? null) &&
+      existing.attendanceWindowOpen
+    ) {
+      const timezone = await this.mealsRepo.getOrganizationTimezone(
+        organizationId,
+      );
+      const nowHHmm = getCurrentTimeInTimezone(timezone);
+      if (nowHHmm >= existing.attendanceWindowOpen) {
+        throw new BadRequestException({
+          message: 'Meal price cannot be changed after attendance has started.',
+          errors: {
+            price: `Locked since attendance opened at ${existing.attendanceWindowOpen}`,
+          },
+        });
+      }
     }
 
     // Build update payload — only include explicitly provided fields

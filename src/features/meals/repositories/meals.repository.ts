@@ -221,4 +221,16 @@ export class MealsRepository {
     });
     return count > 0;
   }
+
+  /**
+   * Resolve an organization's IANA timezone (defaults to Asia/Kolkata).
+   * Used by the price-lock guard to compute "now" in the org's local time.
+   */
+  async getOrganizationTimezone(organizationId: string): Promise<string> {
+    const org = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { timezone: true },
+    });
+    return org?.timezone ?? 'Asia/Kolkata';
+  }
 }
