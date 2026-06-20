@@ -69,7 +69,7 @@ export class MealConfigDto {
    */
   @IsOptional()
   @IsArray()
-  @IsIn(['veg', 'chicken', 'fish', 'mutton', 'egg', 'jain'], { each: true })
+  @IsString({ each: true })
   enabledPreferences?: string[];
 
   @IsOptional()

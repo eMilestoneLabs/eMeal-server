@@ -32,7 +32,7 @@ export class BulkAttendanceEntryDto {
   status?: string;
 
   @IsOptional()
-  @IsIn(['veg', 'chicken', 'fish', 'mutton', 'egg', 'jain'])
+  @IsString()
   preference?: string;
 
   @IsOptional()

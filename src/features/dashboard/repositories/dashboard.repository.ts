@@ -24,16 +24,40 @@ import {
 export class DashboardRepository {
   constructor(private readonly prisma: PrismaService) {}
 
+  /**
+   * Today's UTC-midnight bounds computed in the ORGANIZATION's timezone, so
+   * "today" matches how attendance stores attendanceDate (org-local date).
+   * Fixes admin/student counts reading 0 near midnight when the UTC date
+   * differs from the org-local date (e.g. 02:21 IST = previous UTC day).
+   */
+  private async getTodayBoundsInOrgTz(
+    organizationId: string,
+  ): Promise<{ todayUtc: Date; tomorrowUtc: Date }> {
+    const org = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { timezone: true },
+    });
+    const tz = org?.timezone ?? 'Asia/Kolkata';
+    const todayStr = new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date());
+    const [yy, mm, dd] = todayStr.split('-').map(Number);
+    const todayUtc = new Date(Date.UTC(yy, mm - 1, dd));
+    const tomorrowUtc = new Date(todayUtc);
+    tomorrowUtc.setUTCDate(tomorrowUtc.getUTCDate() + 1);
+    return { todayUtc, tomorrowUtc };
+  }
+
   // ─── STUDENT DASHBOARD ────────────────────────────────────────────────────
 
   async buildStudentDashboard(
     userId: string,
     organizationId: string,
   ): Promise<StudentDashboardEntity> {
-    const now = new Date();
-    const todayUtc = new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
-    );
+    const { todayUtc } = await this.getTodayBoundsInOrgTz(organizationId);
 
     // Fetch user preferences + group memberships in parallel
     const [user, groupMemberships] = await this.prisma.$transaction([
@@ -145,12 +169,8 @@ export class DashboardRepository {
   // ─── ADMIN DASHBOARD ──────────────────────────────────────────────────────
 
   async buildAdminDashboard(organizationId: string): Promise<AdminDashboardEntity> {
-    const now = new Date();
-    const todayUtc = new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
-    );
-    const tomorrowUtc = new Date(todayUtc);
-    tomorrowUtc.setDate(tomorrowUtc.getDate() + 1);
+    const { todayUtc, tomorrowUtc } =
+      await this.getTodayBoundsInOrgTz(organizationId);
 
     // Parallel queries for dashboard aggregation
     const [

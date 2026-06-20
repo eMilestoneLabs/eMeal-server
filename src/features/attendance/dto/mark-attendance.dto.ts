@@ -42,12 +42,12 @@ export class MarkAttendanceDto {
 
   /**
    * Meal preference — only valid when meal.preferencesEnabled=true.
-   * Exact lowercase values per Flutter preference system.
+   * Free-form (admin-driven custom tags); the admin defines the tag list per
+   * meal/day, so any non-empty string up to 50 chars is accepted.
    */
   @IsOptional()
-  @IsIn(['veg', 'chicken', 'fish', 'mutton', 'egg', 'jain'], {
-    message: 'preference must be one of: veg, chicken, fish, mutton, egg, jain',
-  })
+  @IsString()
+  @MaxLength(50)
   preference?: string;
 
   /** Optional student note. */

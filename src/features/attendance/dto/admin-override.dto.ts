@@ -39,7 +39,7 @@ export class AdminOverrideDto {
   status: string;
 
   @IsOptional()
-  @IsIn(['veg', 'chicken', 'fish', 'mutton', 'egg', 'jain'])
+  @IsString()
   preference?: string;
 
   @IsOptional()
