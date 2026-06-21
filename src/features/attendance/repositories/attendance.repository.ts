@@ -328,9 +328,10 @@ export class AttendanceRepository {
     presentCount: number;
     absentCount: number;
     skippedCount: number;
+    snapshotPrice: number | null;
     preferenceBreakdown: Record<string, number>;
   }> {
-    const [statusGroups, prefGroups] = await Promise.all([
+    const [statusGroups, prefGroups, priceGroups] = await Promise.all([
       this.prisma.attendanceRecord.groupBy({
         by: ['status'],
         where: { mealId, organizationId, attendanceDate },
@@ -346,6 +347,20 @@ export class AttendanceRepository {
           status: 'present',
         },
         _count: { preference: true },
+      }),
+      // Issue 1: snapshot unit price actually billed for this meal+date.
+      // Group present records by their captured price snapshot so the admin
+      // dashboard never shows a later-edited (live) Meal.price for a closed day.
+      this.prisma.attendanceRecord.groupBy({
+        by: ['price'],
+        where: {
+          mealId,
+          organizationId,
+          attendanceDate,
+          status: 'present',
+          price: { not: null },
+        },
+        _count: { price: true },
       }),
     ]);
 
@@ -364,10 +379,25 @@ export class AttendanceRepository {
       }
     }
 
+    // Pick the most common snapshot price among present records (mode). Within a
+    // closed window snapshots are uniform; if mixed (edited mid-window) the
+    // dominant price wins, the higher price breaking ties.
+    let snapshotPrice: number | null = null;
+    let bestCount = -1;
+    for (const row of priceGroups) {
+      if (row.price == null) continue;
+      const c = row._count.price;
+      if (c > bestCount || (c === bestCount && row.price > (snapshotPrice ?? 0))) {
+        bestCount = c;
+        snapshotPrice = row.price;
+      }
+    }
+
     return {
       presentCount: statusCounts.present,
       absentCount: statusCounts.absent,
       skippedCount: statusCounts.skipped,
+      snapshotPrice,
       preferenceBreakdown,
     };
   }

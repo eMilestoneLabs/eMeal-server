@@ -100,6 +100,12 @@ export class MealAttendanceSummaryEntity {
   absentCount: number;
   skippedCount: number;
 
+  // Issue 1: snapshot unit price actually billed for present records on this
+  // meal+date (null when pricing is off or nobody marked present). The admin
+  // dashboard prefers this over the live Meal.price so editing a closed meal's
+  // price never rewrites what today already displayed.
+  snapshotPrice?: number | null;
+
   // Preference breakdown (only populated when meal has preferencesEnabled)
   preferenceBreakdown: Record<string, number>; // { "veg": 5, "chicken": 3, ... }
 

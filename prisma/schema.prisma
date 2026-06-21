@@ -570,3 +570,50 @@ model AuditLog {
   @@index([createdAt])
   @@map("audit_logs")
 }
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NOTICE BOARD — Phase B: in-app announcements + bell center (no FCM)
+// Additive + self-contained. organizationId / groupId / createdBy / userId are
+// plain scalar columns (indexed) for tenant isolation WITHOUT altering the
+// frozen Organization / User / Group models. The only relation is the
+// self-contained Notice -> NoticeRead cascade.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Notice {
+  id             String    @id @default(cuid())
+  organizationId String    // tenant isolation (derived from JWT, never client)
+  groupId        String?   // null = organization-wide notice
+  createdBy      String    // admin userId who posted it
+  title          String
+  body           String
+  priority       String    @default("normal") // low | normal | high | urgent
+  pinned         Boolean   @default(false)
+  publishedAt    DateTime  @default(now())
+  expiresAt      DateTime?
+  isActive       Boolean   @default(true)     // soft delete / archive
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  reads NoticeRead[]
+
+  @@index([organizationId])
+  @@index([groupId])
+  @@index([organizationId, isActive])
+  @@index([expiresAt])
+  @@map("notices")
+}
+
+model NoticeRead {
+  id       String   @id @default(cuid())
+  noticeId String
+  userId   String
+  readAt   DateTime @default(now())
+
+  notice Notice @relation(fields: [noticeId], references: [id], onDelete: Cascade)
+
+  @@unique([noticeId, userId])
+  @@index([userId])
+  @@map("notice_reads")
+}

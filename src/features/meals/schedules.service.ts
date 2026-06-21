@@ -282,8 +282,35 @@ export class SchedulesService {
     organizationId: string,
     adminId: string,
     requestId?: string,
+    dto?: UpdateScheduleDto,
   ) {
-    const schedule = await this.schedulesRepo.publish(id, organizationId);
+    // Issue 2: when the publish request carries entries (admin edited a
+    // previously-published week), atomically REPLACE the entries AND publish in
+    // one transaction so students keep seeing the last published version until
+    // the swap commits — no draft / master-config gap. Without entries this is
+    // the original idempotent flag-flip publish.
+    let schedule;
+    if (dto?.entries !== undefined) {
+      const existing = await this.schedulesRepo.findById(id, organizationId);
+      if (!existing) {
+        throw new NotFoundException({
+          message: 'Schedule not found',
+          errors: { id: 'Schedule does not exist in your organization' },
+        });
+      }
+      const entries = await this.buildEntryData(
+        existing.groupId,
+        organizationId,
+        dto.entries,
+      );
+      schedule = await this.schedulesRepo.replaceAndPublish(
+        id,
+        organizationId,
+        entries,
+      );
+    } else {
+      schedule = await this.schedulesRepo.publish(id, organizationId);
+    }
 
     this.audit.log({
       organizationId,

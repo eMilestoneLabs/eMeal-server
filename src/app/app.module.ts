@@ -23,6 +23,7 @@ import { RequestIdMiddleware } from '../common/middleware/request-id.middleware'
 import { AuthModule } from '../features/auth/auth.module';
 import { UsersModule } from '../features/users/users.module';
 import { NotificationsModule } from '../features/notifications/notifications.module';
+import { NoticesModule } from '../features/notices/notices.module';
 import { OrganizationsModule } from '../features/organizations/organizations.module';
 import { GroupsModule } from '../features/groups/groups.module';
 import { MealsModule } from '../features/meals/meals.module';
@@ -72,6 +73,7 @@ import { HealthController } from './health.controller';
     GroupsModule,
     // Phase B3
     MealsModule,
+    NoticesModule,
     // Phase B4
     AttendanceModule,
     RealtimeModule,

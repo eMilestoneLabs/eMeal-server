@@ -630,6 +630,7 @@ export class AttendanceService {
       presentCount: counts.presentCount,
       absentCount: counts.absentCount,
       skippedCount: counts.skippedCount,
+      snapshotPrice: counts.snapshotPrice,
       preferenceBreakdown: counts.preferenceBreakdown,
     });
 

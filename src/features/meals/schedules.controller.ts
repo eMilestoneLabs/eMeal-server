@@ -139,12 +139,17 @@ export class SchedulesController {
     @Param('id') id: string,
     @CurrentUser() user: JwtPayload,
     @Req() req: Request,
+    @Body() body: UpdateScheduleDto,
   ) {
+    // Issue 2: an optional body carrying entries triggers an atomic
+    // replace-and-publish (no student-visible draft gap). An empty body keeps
+    // the original idempotent publish behaviour — fully backward compatible.
     return this.schedulesService.publishSchedule(
       id,
       user.organizationId!,
       user.sub,
       req.requestId,
+      body,
     );
   }
 

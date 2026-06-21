@@ -150,6 +150,17 @@ export interface GuestUpdatedPayload {
 
 // ── Service ───────────────────────────────────────────────────────────────────
 
+/** Phase B: notice board — a new notice was posted. */
+export interface NoticeCreatedPayload {
+  organizationId: string;
+  groupId: string | null;
+  noticeId: string;
+  title: string;
+  priority: string;
+  pinned: boolean;
+  publishedAt: string; // ISO-8601
+}
+
 @Injectable()
 export class RealtimeEventsService {
   private readonly logger = new Logger(RealtimeEventsService.name);
@@ -333,5 +344,27 @@ export class RealtimeEventsService {
     if (!this.isReady) return;
     this.gateway!.emitToAdmin(organizationId, 'guest.updated.v1', payload);
     this.logger.debug(`guest.updated.v1 → admin:${organizationId} event:${payload.eventId} action=${payload.action}`);
+  }
+
+  // ── Notice board (Phase B) ────────────────────────────────────────────────
+
+  /**
+   * notice.created.v1 — a new notice was posted. Group-scoped notices go to the
+   * group room; org-wide notices (groupId null) go to the org room. Admin room
+   * always receives it so admin bells update live. Additive + versioned.
+   */
+  emitNoticeCreated(
+    organizationId: string,
+    groupId: string | null,
+    payload: NoticeCreatedPayload,
+  ): void {
+    if (!this.isReady) return;
+    if (groupId) {
+      this.gateway!.emitToGroup(groupId, 'notice.created.v1', payload);
+    } else {
+      this.gateway!.emitToOrg(organizationId, 'notice.created.v1', payload);
+    }
+    this.gateway!.emitToAdmin(organizationId, 'notice.created.v1', payload);
+    this.logger.debug(`notice.created.v1 → org:${organizationId} group:${groupId ?? 'ALL'}`);
   }
 }

@@ -153,6 +153,7 @@ export class MealAttendanceSummarySerializer {
       presentDays: summary.presentCount,
       absentDays: summary.absentCount,
       skippedDays: summary.skippedCount,
+      snapshotPrice: summary.snapshotPrice ?? null,
       preferenceBreakdown: summary.preferenceBreakdown ?? {},
     };
   }

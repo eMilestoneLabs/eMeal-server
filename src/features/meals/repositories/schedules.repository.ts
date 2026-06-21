@@ -396,6 +396,64 @@ export class SchedulesRepository {
     return this.findById(id, organizationId) as Promise<MealScheduleEntity>;
   }
 
+  /**
+   * Issue 2: atomically REPLACE a schedule's entries AND publish it in one
+   * transaction. The previously published version stays live for students until
+   * this commit swaps in the new entries with isPublished=true — so editing a
+   * previously-published week never strands students on the master meal config.
+   */
+  async replaceAndPublish(
+    id: string,
+    organizationId: string,
+    entries: Array<{
+      mealId: string;
+      dayOfWeek: number;
+      date: Date;
+      mealName?: string | null;
+      notes?: string | null;
+      openTime?: string | null;
+      closeTime?: string | null;
+      preferencesEnabled?: boolean | null;
+      enabledPreferences?: string[] | null;
+      menuItems?: string[] | null;
+      price?: number | null;
+    }>,
+  ): Promise<MealScheduleEntity> {
+    await this.prisma.$transaction(async (tx) => {
+      const owned = await tx.mealSchedule.findFirst({
+        where: { id, organizationId },
+        select: { id: true },
+      });
+      if (!owned) throw new NotFoundException('Schedule not found');
+
+      await tx.scheduleEntry.deleteMany({ where: { scheduleId: id } });
+      if (entries.length > 0) {
+        await tx.scheduleEntry.createMany({
+          data: entries.map((e) => ({
+            scheduleId: id,
+            mealId: e.mealId,
+            dayOfWeek: e.dayOfWeek,
+            date: e.date,
+            mealName: e.mealName ?? null,
+            notes: e.notes ?? null,
+            openTime: e.openTime ?? null,
+            closeTime: e.closeTime ?? null,
+            preferencesEnabled: e.preferencesEnabled ?? null,
+            enabledPreferences: e.enabledPreferences ?? [],
+            menuItems: e.menuItems ?? [],
+            price: e.price ?? null,
+          })),
+        });
+      }
+
+      await tx.mealSchedule.updateMany({
+        where: { id, organizationId },
+        data: { isPublished: true, publishedAt: new Date() },
+      });
+    });
+    return this.findById(id, organizationId) as Promise<MealScheduleEntity>;
+  }
+
   // Issue 2: revert a published schedule back to draft (inverse of publish).
   // Additive — mirrors publish(); idempotent and org-isolated.
   async revert(id: string, organizationId: string): Promise<MealScheduleEntity> {
