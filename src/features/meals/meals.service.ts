@@ -238,12 +238,13 @@ export class MealsService {
                   return next;
                 })
             : [];
-        // Regression fix (Issue 5/6): planner mode (Weekly / Day-Wise) is
-        // PUBLISHED-driven. Students must see ONLY the published schedule for
-        // today. When nothing is published (admin editing a draft, or not yet
-        // published) the overlay is empty — return an EMPTY list, NEVER the full
-        // master meal catalogue. This stops master meals leaking to students
-        // whenever a schedule is in draft / unpublished.
+        // Issue 1 — planner mode (Weekly / Day-Wise) is PUBLISHED-driven. Students
+        // read the PUBLISHED snapshot ONLY (findTodayOverlay reads
+        // publishedSnapshot, which is PRESERVED while the admin edits a draft — so
+        // students keep seeing the last published schedule during a draft). An
+        // empty overlay means the published schedule has no meal for today
+        // (off-day) or nothing has ever been published → show NO meals. Never
+        // master meals, never draft data.
         return PaginatedResponseDto.of(overlaid, overlaid.length, 1, 50);
       }
       return result;

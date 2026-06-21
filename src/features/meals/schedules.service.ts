@@ -187,21 +187,29 @@ export class SchedulesService {
     organizationId: string,
     role: string,
   ) {
+    const isAdmin = ['messManager', 'hostelManager', 'hostelAdmin', 'organizationManager'].includes(role);
+
+    if (!isAdmin) {
+      // Students read the PUBLISHED SNAPSHOT (preserved across draft edits),
+      // never the live draft entries.
+      const published = await this.schedulesRepo.findPublishedById(
+        id,
+        organizationId,
+      );
+      if (!published) {
+        throw new NotFoundException({
+          message: 'Schedule not found',
+          errors: { id: 'Schedule is not yet published' },
+        });
+      }
+      return ScheduleSerializer.toResponse(published);
+    }
+
     const schedule = await this.schedulesRepo.findById(id, organizationId);
     if (!schedule) {
       throw new NotFoundException({
         message: 'Schedule not found',
         errors: { id: 'Schedule does not exist in your organization' },
-      });
-    }
-
-    const isAdmin = ['messManager', 'hostelManager', 'hostelAdmin', 'organizationManager'].includes(role);
-
-    // Students can only view published schedules
-    if (!isAdmin && !schedule.isPublished) {
-      throw new NotFoundException({
-        message: 'Schedule not found',
-        errors: { id: 'Schedule is not yet published' },
       });
     }
 
@@ -225,12 +233,9 @@ export class SchedulesService {
       });
     }
 
-    if (existing.isPublished) {
-      throw new BadRequestException({
-        message: 'Cannot edit a published schedule',
-        errors: { id: 'Unpublish the schedule before making changes' },
-      });
-    }
+    // Issue 1: editing a PUBLISHED week is allowed — it updates the live draft
+    // entries only. The published snapshot students read stays frozen until the
+    // admin re-publishes, so students never see the in-progress draft.
 
     let newWeekStart: Date | undefined;
     if (dto.weekStartDate !== undefined) {

@@ -85,6 +85,80 @@ export class SchedulesRepository {
     });
   }
 
+  // ── Issue 1: published snapshot helpers ───────────────────────────────────
+
+  /** Serialize live entries (with meal join) into the frozen published snapshot. */
+  private snapshotFromEntries(entries: ScheduleEntryEntity[]): any[] {
+    return entries.map((e) => ({
+      id: e.id,
+      scheduleId: e.scheduleId,
+      mealId: e.mealId,
+      dayOfWeek: e.dayOfWeek,
+      date: e.date instanceof Date ? e.date.toISOString() : e.date,
+      openTime: e.openTime ?? null,
+      closeTime: e.closeTime ?? null,
+      mealName: e.mealName ?? null,
+      notes: e.notes ?? null,
+      preferencesEnabled: e.preferencesEnabled ?? null,
+      enabledPreferences: e.enabledPreferences ?? [],
+      menuItems: e.menuItems ?? [],
+      price: e.price ?? null,
+      meal: e.meal
+        ? {
+            slotKey: e.meal.slotKey,
+            name: e.meal.name,
+            displayName: e.meal.displayName ?? null,
+            order: e.meal.order ?? 0,
+            menuItems: e.meal.menuItems ?? [],
+            imageUrl: e.meal.imageUrl ?? null,
+            price: e.meal.price ?? null,
+          }
+        : undefined,
+    }));
+  }
+
+  /**
+   * Rebuild a schedule entity whose entries come from the published snapshot.
+   * Legacy rows published before this column existed have a null snapshot — for
+   * them we fall back to the live entries (safe: before this change a published
+   * row could not also hold an unsynced draft, so live == published).
+   */
+  private scheduleFromSnapshot(raw: any): MealScheduleEntity {
+    const snap = raw.publishedSnapshot;
+    if (Array.isArray(snap) && snap.length > 0) {
+      const entries = snap.map((e: any) =>
+        this.buildEntryEntity({
+          ...e,
+          date: e.date ? new Date(e.date) : new Date(),
+        }),
+      );
+      return new MealScheduleEntity({
+        id: raw.id,
+        organizationId: raw.organizationId,
+        groupId: raw.groupId,
+        weekStart: raw.weekStart,
+        // From a student's perspective this snapshot IS the published schedule,
+        // even if the admin has reverted the row to draft to edit it.
+        isPublished: true,
+        publishedAt: raw.publishedAt ?? null,
+        entries,
+        createdAt: raw.createdAt,
+        updatedAt: raw.updatedAt,
+      });
+    }
+    return this.buildScheduleEntity(raw);
+  }
+
+  /** Persist the published snapshot for a schedule from its current live entries. */
+  private async captureSnapshot(id: string, organizationId: string): Promise<void> {
+    const full = await this.findById(id, organizationId);
+    const snapshot = full ? this.snapshotFromEntries(full.entries) : [];
+    await this.prisma.mealSchedule.updateMany({
+      where: { id, organizationId },
+      data: { publishedSnapshot: snapshot } as any,
+    });
+  }
+
   // ── Queries ───────────────────────────────────────────────────────────────
 
   async findById(id: string, organizationId: string): Promise<MealScheduleEntity | null> {
@@ -105,10 +179,13 @@ export class SchedulesRepository {
     organizationId: string,
     opts: { page: number; limit: number; publishedOnly?: boolean },
   ): Promise<{ data: MealScheduleEntity[]; total: number; page: number; limit: number }> {
-    const where = {
+    // Students (publishedOnly) read the PUBLISHED SNAPSHOT, gated on
+    // publishedAt != null so a row reverted to draft still serves its last
+    // published version. Admins read the live draft entries.
+    const where: any = {
       groupId,
       organizationId,
-      ...(opts.publishedOnly ? { isPublished: true } : {}),
+      ...(opts.publishedOnly ? { publishedAt: { not: null } } : {}),
     };
     const skip = (opts.page - 1) * opts.limit;
     const [schedules, total] = await Promise.all([
@@ -126,12 +203,24 @@ export class SchedulesRepository {
       }),
       this.prisma.mealSchedule.count({ where }),
     ]);
-    return { data: schedules.map((s) => this.buildScheduleEntity(s)), total, page: opts.page, limit: opts.limit };
+    return {
+      data: schedules.map((row) =>
+        opts.publishedOnly
+          ? this.scheduleFromSnapshot(row)
+          : this.buildScheduleEntity(row),
+      ),
+      total,
+      page: opts.page,
+      limit: opts.limit,
+    };
   }
 
   async findPublishedForWeek(groupId: string, organizationId: string, weekStart: Date): Promise<MealScheduleEntity | null> {
+    // Students read the PUBLISHED SNAPSHOT (preserved across draft edits), gated
+    // on publishedAt != null ("has ever been published"). isPublished is the
+    // admin-UI draft flag and is intentionally NOT used for student visibility.
     const schedule = await this.prisma.mealSchedule.findFirst({
-      where: { groupId, organizationId, weekStart, isPublished: true },
+      where: { groupId, organizationId, weekStart, publishedAt: { not: null } },
       include: {
         entries: {
           ...this.entryInclude,
@@ -139,7 +228,21 @@ export class SchedulesRepository {
         },
       },
     });
-    return schedule ? this.buildScheduleEntity(schedule) : null;
+    return schedule ? this.scheduleFromSnapshot(schedule) : null;
+  }
+
+  /** Student-facing single schedule read — from the published snapshot. */
+  async findPublishedById(id: string, organizationId: string): Promise<MealScheduleEntity | null> {
+    const schedule = await this.prisma.mealSchedule.findFirst({
+      where: { id, organizationId, publishedAt: { not: null } },
+      include: {
+        entries: {
+          ...this.entryInclude,
+          orderBy: [{ dayOfWeek: 'asc' }, { mealId: 'asc' }],
+        },
+      },
+    });
+    return schedule ? this.scheduleFromSnapshot(schedule) : null;
   }
 
   /**
@@ -388,9 +491,16 @@ export class SchedulesRepository {
   }
 
   async publish(id: string, organizationId: string): Promise<MealScheduleEntity> {
+    // Freeze the current live entries as the published snapshot students read.
+    const current = await this.findById(id, organizationId);
+    const snapshot = current ? this.snapshotFromEntries(current.entries) : [];
     const result = await this.prisma.mealSchedule.updateMany({
       where: { id, organizationId },
-      data: { isPublished: true, publishedAt: new Date() },
+      data: {
+        isPublished: true,
+        publishedAt: new Date(),
+        publishedSnapshot: snapshot,
+      } as any,
     });
     if (result.count === 0) throw new NotFoundException('Schedule not found');
     return this.findById(id, organizationId) as Promise<MealScheduleEntity>;
@@ -469,15 +579,21 @@ export class SchedulesRepository {
         },
       });
     });
+    // Freeze the just-published entries as the snapshot students read.
+    await this.captureSnapshot(id, organizationId);
     return this.findById(id, organizationId) as Promise<MealScheduleEntity>;
   }
 
   // Issue 2: revert a published schedule back to draft (inverse of publish).
   // Additive — mirrors publish(); idempotent and org-isolated.
   async revert(id: string, organizationId: string): Promise<MealScheduleEntity> {
+    // Issue 1: reverting to draft must NOT erase what students see. Keep
+    // publishedAt + publishedSnapshot intact (students keep reading the last
+    // published version); only clear the admin-UI isPublished flag so the admin
+    // can edit the live draft entries and re-publish.
     const result = await this.prisma.mealSchedule.updateMany({
       where: { id, organizationId },
-      data: { isPublished: false, publishedAt: null },
+      data: { isPublished: false },
     });
     if (result.count === 0) throw new NotFoundException('Schedule not found');
     return this.findById(id, organizationId) as Promise<MealScheduleEntity>;

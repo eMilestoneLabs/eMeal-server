@@ -343,6 +343,11 @@ model MealSchedule {
   groupId        String
   weekStart      DateTime // Monday of the week (UTC midnight). Serialized as YYYY-MM-DD date string.
   isPublished    Boolean  @default(false)
+  // Issue 1 — frozen copy of the entries as of the last publish. Students ALWAYS
+  // read this snapshot (gated on publishedAt != null), so editing/reverting to a
+  // draft never changes what students see until the next publish. Admin reads the
+  // live `entries` (the draft). Additive, nullable.
+  publishedSnapshot Json?
   publishedAt    DateTime?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -616,4 +621,32 @@ model NoticeRead {
   @@unique([noticeId, userId])
   @@index([userId])
   @@map("notice_reads")
+}
+
+
+/// Issue 3 — vacation approval workflow. Self-contained, scalar-only (no Prisma
+/// relations) so it is purely additive and never alters User/Group/Org models.
+/// status: pending | approved | rejected | cancelled.
+model VacationRequest {
+  id             String    @id @default(cuid())
+  organizationId String    // tenant isolation (from JWT, never client)
+  groupId        String?   // optional group scope; null = org-level request
+  userId         String    // requesting member
+  userName       String?   // denormalised display name (additive, optional)
+  startDate      DateTime  // inclusive
+  endDate        DateTime  // inclusive
+  reason         String?
+  status         String    @default("pending")
+  reviewedBy     String?   // admin userId who approved/rejected
+  reviewedAt     DateTime?
+  reviewNote     String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  @@index([organizationId])
+  @@index([userId])
+  @@index([groupId])
+  @@index([organizationId, status])
+  @@map("vacation_requests")
 }
