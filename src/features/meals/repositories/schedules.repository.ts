@@ -446,9 +446,27 @@ export class SchedulesRepository {
         });
       }
 
+      // Realign weekStart to the week these entries belong to. The client always
+      // (re)writes entries for the CURRENT week on publish, so without this the
+      // row keeps a stale weekStart and week-scoped reads (weekly menu,
+      // findPublishedForWeek) can't find the published schedule — which made
+      // edits appear to "vanish" and toggles revert OFF right after publishing.
+      let weekStartUpdate: Date | undefined;
+      if (entries.length > 0) {
+        const earliest = entries.reduce(
+          (a, b) => (a.date.getTime() <= b.date.getTime() ? a : b),
+        ).date;
+        const dow = (earliest.getUTCDay() + 6) % 7;
+        weekStartUpdate = new Date(earliest.getTime() - dow * 86400000);
+      }
+
       await tx.mealSchedule.updateMany({
         where: { id, organizationId },
-        data: { isPublished: true, publishedAt: new Date() },
+        data: {
+          isPublished: true,
+          publishedAt: new Date(),
+          ...(weekStartUpdate ? { weekStart: weekStartUpdate } : {}),
+        },
       });
     });
     return this.findById(id, organizationId) as Promise<MealScheduleEntity>;

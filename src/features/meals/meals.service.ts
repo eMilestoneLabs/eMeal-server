@@ -208,38 +208,43 @@ export class MealsService {
           groupId,
           organizationId,
         );
-        if (overlay.size > 0) {
-          const overlaid = result.data
-            .filter((m: any) => overlay.has(m.id))
-            .map((m: any) => {
-              const o = overlay.get(m.id)!;
-              const next: any = { ...m };
-              if (o.openTime) {
-                next.attendanceWindow = {
-                  openTime: o.openTime,
-                  closeTime: o.closeTime ?? null,
-                };
-              }
-              if (o.preferencesEnabled !== null) {
-                next.preferencesEnabled = o.preferencesEnabled;
-                if (o.enabledPreferences.length > 0) {
-                  next.enabledPreferences = o.enabledPreferences;
-                }
-              }
-              // Issue 3: per-day menu shown on the meal card + detail screen.
-              if (o.menuItems && o.menuItems.length > 0) {
-                next.menuItems = o.menuItems;
-              }
-              // Additive: per-day price override (null = inherit master price).
-              if (o.price != null) {
-                next.price = o.price;
-              }
-              return next;
-            });
-          if (overlaid.length > 0) {
-            return PaginatedResponseDto.of(overlaid, overlaid.length, 1, 50);
-          }
-        }
+        const overlaid =
+          overlay.size > 0
+            ? result.data
+                .filter((m: any) => overlay.has(m.id))
+                .map((m: any) => {
+                  const o = overlay.get(m.id)!;
+                  const next: any = { ...m };
+                  if (o.openTime) {
+                    next.attendanceWindow = {
+                      openTime: o.openTime,
+                      closeTime: o.closeTime ?? null,
+                    };
+                  }
+                  if (o.preferencesEnabled !== null) {
+                    next.preferencesEnabled = o.preferencesEnabled;
+                    if (o.enabledPreferences.length > 0) {
+                      next.enabledPreferences = o.enabledPreferences;
+                    }
+                  }
+                  // Issue 3: per-day menu shown on the meal card + detail screen.
+                  if (o.menuItems && o.menuItems.length > 0) {
+                    next.menuItems = o.menuItems;
+                  }
+                  // Additive: per-day price override (null = inherit master).
+                  if (o.price != null) {
+                    next.price = o.price;
+                  }
+                  return next;
+                })
+            : [];
+        // Regression fix (Issue 5/6): planner mode (Weekly / Day-Wise) is
+        // PUBLISHED-driven. Students must see ONLY the published schedule for
+        // today. When nothing is published (admin editing a draft, or not yet
+        // published) the overlay is empty — return an EMPTY list, NEVER the full
+        // master meal catalogue. This stops master meals leaking to students
+        // whenever a schedule is in draft / unpublished.
+        return PaginatedResponseDto.of(overlaid, overlaid.length, 1, 50);
       }
       return result;
     }
