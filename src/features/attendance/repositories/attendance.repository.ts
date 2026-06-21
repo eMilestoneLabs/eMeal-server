@@ -433,4 +433,89 @@ export class AttendanceRepository {
 
     return results.map((r) => this.toEntity(r));
   }
+
+  // ── Billing aggregation data (Member Billing V2) ──────────────────────────
+
+  /**
+   * Raw data for group-wide billing aggregation: active members (with role)
+   * plus every attendance record in [fromDate, toDate]. The service aggregates
+   * these into summary / meal breakdown / per-member figures. Org-scoped and
+   * NOT capped (accurate for any group size). Revenue is computed from the
+   * per-record price SNAPSHOT, so historical bills never recalculate.
+   */
+  async getBillingData(
+    groupId: string,
+    organizationId: string,
+    fromDate: Date,
+    toDate: Date,
+  ): Promise<{
+    members: Array<{
+      userId: string;
+      name: string;
+      role: string;
+      email: string | null;
+      phone: string | null;
+    }>;
+    records: Array<{
+      userId: string;
+      mealId: string;
+      mealName: string;
+      status: string;
+      price: number | null;
+      markedAt: Date | null;
+      attendanceDate: Date;
+    }>;
+  }> {
+    const [members, records] = await Promise.all([
+      this.prisma.groupMember.findMany({
+        where: { groupId, status: 'active' },
+        include: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              role: true,
+              email: true,
+              phone: true,
+            },
+          },
+        },
+      }),
+      this.prisma.attendanceRecord.findMany({
+        where: {
+          groupId,
+          organizationId,
+          attendanceDate: { gte: fromDate, lte: toDate },
+        },
+        select: {
+          userId: true,
+          mealId: true,
+          status: true,
+          price: true,
+          markedAt: true,
+          attendanceDate: true,
+          meal: { select: { name: true, displayName: true } },
+        },
+      }),
+    ]);
+
+    return {
+      members: members.map((m) => ({
+        userId: m.userId,
+        name: m.user?.name ?? m.userId,
+        role: (m.functionalRole ?? m.user?.role ?? 'member') as string,
+        email: m.user?.email ?? null,
+        phone: m.user?.phone ?? null,
+      })),
+      records: records.map((r) => ({
+        userId: r.userId,
+        mealId: r.mealId,
+        mealName: r.meal?.displayName ?? r.meal?.name ?? '—',
+        status: r.status as string,
+        price: r.price ?? null,
+        markedAt: r.markedAt ?? null,
+        attendanceDate: r.attendanceDate,
+      })),
+    };
+  }
 }

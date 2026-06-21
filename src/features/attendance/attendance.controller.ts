@@ -23,6 +23,8 @@ import {
   QueryAttendanceDto,
   QuerySummaryDto,
   QueryMealSummaryDto,
+  QueryBillingDto,
+  QueryBillingSeriesDto,
 } from './dto/query-attendance.dto';
 
 const ADMIN_ROLES = [
@@ -175,6 +177,31 @@ export class AttendanceController {
     @Query() query: QueryMealSummaryDto,
   ) {
     return this.attendanceService.getMealSummary(user.organizationId!, query);
+  }
+
+  // ── GET /attendance/billing-summary (admin) — MUST be before /:id ─────────
+  // Member Billing V2: group-wide revenue/member/meal aggregation.
+
+  @Get('billing-summary')
+  @UseGuards(RolesGuard)
+  @Roles(...ADMIN_ROLES)
+  async getBillingSummary(
+    @CurrentUser() user: { sub: string; organizationId: string; role: string },
+    @Query() query: QueryBillingDto,
+  ) {
+    return this.attendanceService.getBillingSummary(user.organizationId!, query);
+  }
+
+  // ── GET /attendance/billing-series (admin) — analytics time-series ────────
+
+  @Get('billing-series')
+  @UseGuards(RolesGuard)
+  @Roles(...ADMIN_ROLES)
+  async getBillingSeries(
+    @CurrentUser() user: { sub: string; organizationId: string; role: string },
+    @Query() query: QueryBillingSeriesDto,
+  ) {
+    return this.attendanceService.getBillingSeries(user.organizationId!, query);
   }
 
   // ── GET /attendance — paginated history (Flutter: list = '/attendance') ────

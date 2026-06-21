@@ -339,17 +339,26 @@ export class MealsService {
     if (
       dto.price !== undefined &&
       (dto.price ?? null) !== (existing.price ?? null) &&
-      existing.attendanceWindowOpen
+      existing.attendanceWindowOpen &&
+      existing.attendanceWindowClose
     ) {
       const timezone = await this.mealsRepo.getOrganizationTimezone(
         organizationId,
       );
       const nowHHmm = getCurrentTimeInTimezone(timezone);
-      if (nowHHmm >= existing.attendanceWindowOpen) {
+      // Lock the price ONLY while today's attendance window is currently open
+      // (open <= now <= close). Before it opens or after it closes the price is
+      // editable again and the change applies to future occurrences; historical
+      // records always keep their per-record price snapshot.
+      if (
+        nowHHmm >= existing.attendanceWindowOpen &&
+        nowHHmm <= existing.attendanceWindowClose
+      ) {
         throw new BadRequestException({
-          message: 'Meal price cannot be changed after attendance has started.',
+          message:
+            'Meal price cannot be changed while attendance is open for this meal.',
           errors: {
-            price: `Locked since attendance opened at ${existing.attendanceWindowOpen}`,
+            price: `Locked until the window closes at ${existing.attendanceWindowClose}`,
           },
         });
       }

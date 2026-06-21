@@ -35,6 +35,8 @@ import {
   QueryAttendanceDto,
   QuerySummaryDto,
   QueryMealSummaryDto,
+  QueryBillingDto,
+  QueryBillingSeriesDto,
 } from './dto/query-attendance.dto';
 
 /** Admin role names — same set as used in groups + meals guards. */
@@ -637,6 +639,202 @@ export class AttendanceService {
     await this.redis.set(cacheKey, JSON.stringify(response), CACHE_TTL);
 
     return response;
+  }
+
+  // ── Billing summary (Member Billing V2, admin) ────────────────────────────
+
+  /**
+   * Group-wide billing aggregation for the Member Billing V2 dashboard.
+   * Returns accurate (uncapped) revenue / member / meal figures computed from
+   * the per-record price SNAPSHOT (present-only revenue). Day-wise override
+   * prices already live in the snapshot, so this needs no special handling.
+   */
+  async getBillingSummary(organizationId: string, query: QueryBillingDto) {
+    if (!query.groupId) {
+      throw new BadRequestException({
+        message: 'groupId is required',
+        errors: { groupId: 'Provide a groupId query parameter' },
+      });
+    }
+
+    const toDate = query.toDate ? toUtcMidnight(query.toDate) : new Date();
+    const fromDate = query.fromDate
+      ? toUtcMidnight(query.fromDate)
+      : new Date(toDate.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+    const { members, records } = await this.attendanceRepo.getBillingData(
+      query.groupId,
+      organizationId,
+      fromDate,
+      toDate,
+    );
+
+    const byUser = new Map<
+      string,
+      {
+        present: number;
+        skipped: number;
+        absent: number;
+        totalBill: number;
+        lastActivity: Date | null;
+      }
+    >();
+    const byMeal = new Map<
+      string,
+      { mealName: string; revenue: number; presentCount: number }
+    >();
+
+    let revenue = 0;
+    let presentMeals = 0;
+    let skippedMeals = 0;
+    let absentMeals = 0;
+
+    for (const r of records) {
+      const u =
+        byUser.get(r.userId) ??
+        { present: 0, skipped: 0, absent: 0, totalBill: 0, lastActivity: null };
+
+      if (r.status === 'present') {
+        const p = r.price ?? 0;
+        u.present += 1;
+        u.totalBill += p;
+        presentMeals += 1;
+        revenue += p;
+        const mb =
+          byMeal.get(r.mealId) ??
+          { mealName: r.mealName, revenue: 0, presentCount: 0 };
+        mb.revenue += p;
+        mb.presentCount += 1;
+        mb.mealName = r.mealName;
+        byMeal.set(r.mealId, mb);
+      } else if (r.status === 'skipped') {
+        u.skipped += 1;
+        skippedMeals += 1;
+      } else if (r.status === 'absent') {
+        u.absent += 1;
+        absentMeals += 1;
+      }
+
+      if (r.markedAt && (!u.lastActivity || r.markedAt > u.lastActivity)) {
+        u.lastActivity = r.markedAt;
+      }
+      byUser.set(r.userId, u);
+    }
+
+    const memberMeta = new Map(members.map((m) => [m.userId, m]));
+    const allUserIds = new Set<string>([
+      ...members.map((m) => m.userId),
+      ...byUser.keys(),
+    ]);
+
+    const memberList = [...allUserIds]
+      .map((uid) => {
+        const agg =
+          byUser.get(uid) ??
+          { present: 0, skipped: 0, absent: 0, totalBill: 0, lastActivity: null };
+        const meta = memberMeta.get(uid);
+        return {
+          userId: uid,
+          userName: meta?.name ?? uid,
+          role: meta?.role ?? 'member',
+          email: meta?.email ?? null,
+          phone: meta?.phone ?? null,
+          totalBill: agg.totalBill,
+          presentCount: agg.present,
+          skippedCount: agg.skipped,
+          absentCount: agg.absent,
+          lastActivity: agg.lastActivity ? agg.lastActivity.toISOString() : null,
+        };
+      })
+      .sort((a, b) => b.totalBill - a.totalBill);
+
+    const memberCount = members.length;
+    const averageBill = memberCount > 0 ? Math.round(revenue / memberCount) : 0;
+
+    const mealBreakdown = [...byMeal.entries()]
+      .map(([mealId, v]) => ({
+        mealId,
+        mealName: v.mealName,
+        revenue: v.revenue,
+        presentCount: v.presentCount,
+      }))
+      .sort((a, b) => b.revenue - a.revenue);
+
+    return {
+      summary: {
+        revenue,
+        memberCount,
+        presentMeals,
+        skippedMeals,
+        absentMeals,
+        averageBill,
+      },
+      mealBreakdown,
+      members: memberList,
+    };
+  }
+
+  // ── Billing series (analytics charts, admin) ──────────────────────────────
+
+  /**
+   * Bucketed billing time-series for the Member Billing analytics charts:
+   * revenue + present-meal counts per day / week / month. Reuses
+   * getBillingData (present-only, price snapshot). Additive — no contract change.
+   */
+  async getBillingSeries(organizationId: string, query: QueryBillingSeriesDto) {
+    if (!query.groupId) {
+      throw new BadRequestException({
+        message: 'groupId is required',
+        errors: { groupId: 'Provide a groupId query parameter' },
+      });
+    }
+    const bucket = query.bucket ?? 'day';
+    const toDate = query.toDate ? toUtcMidnight(query.toDate) : new Date();
+    const fromDate = query.fromDate
+      ? toUtcMidnight(query.fromDate)
+      : new Date(toDate.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+    const { records } = await this.attendanceRepo.getBillingData(
+      query.groupId,
+      organizationId,
+      fromDate,
+      toDate,
+    );
+
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const keyOf = (d: Date): string => {
+      const y = d.getUTCFullYear();
+      const m = pad(d.getUTCMonth() + 1);
+      const day = pad(d.getUTCDate());
+      if (bucket === 'month') return `${y}-${m}`;
+      if (bucket === 'week') {
+        const dow = (d.getUTCDay() + 6) % 7; // 0=Mon
+        const monday = new Date(d);
+        monday.setUTCDate(d.getUTCDate() - dow);
+        return `${monday.getUTCFullYear()}-${pad(monday.getUTCMonth() + 1)}-${pad(monday.getUTCDate())}`;
+      }
+      return `${y}-${m}-${day}`;
+    };
+
+    const byKey = new Map<string, { revenue: number; presentMeals: number }>();
+    for (const r of records) {
+      if (r.status !== 'present') continue;
+      const k = keyOf(r.attendanceDate);
+      const agg = byKey.get(k) ?? { revenue: 0, presentMeals: 0 };
+      agg.revenue += r.price ?? 0;
+      agg.presentMeals += 1;
+      byKey.set(k, agg);
+    }
+
+    const series = [...byKey.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([label, v]) => ({
+        label,
+        revenue: v.revenue,
+        presentMeals: v.presentMeals,
+      }));
+
+    return { bucket, series };
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────

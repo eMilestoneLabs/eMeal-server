@@ -89,3 +89,45 @@ export class QueryMealSummaryDto {
   @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'date must be YYYY-MM-DD' })
   date: string;
 }
+
+
+/**
+ * Query DTO for GET /attendance/billing-summary — group-wide billing
+ * aggregation for the Member Billing V2 dashboard (admin only). Accurate at
+ * any scale (server-side aggregation, no client record cap).
+ */
+export class QueryBillingDto {
+  @IsString()
+  groupId: string;
+
+  /** Start of billing period — YYYY-MM-DD */
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'fromDate must be YYYY-MM-DD' })
+  fromDate?: string;
+
+  /** End of billing period — YYYY-MM-DD */
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'toDate must be YYYY-MM-DD' })
+  toDate?: string;
+}
+
+/**
+ * Query DTO for GET /attendance/billing-series — bucketed time-series for the
+ * Member Billing analytics charts (admin only). bucket = day | week | month.
+ */
+export class QueryBillingSeriesDto {
+  @IsString()
+  groupId: string;
+
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'fromDate must be YYYY-MM-DD' })
+  fromDate?: string;
+
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'toDate must be YYYY-MM-DD' })
+  toDate?: string;
+
+  @IsOptional()
+  @IsIn(['day', 'week', 'month'])
+  bucket?: string = 'day';
+}
