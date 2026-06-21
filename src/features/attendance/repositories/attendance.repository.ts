@@ -115,7 +115,13 @@ export class AttendanceRepository {
       },
       update: {
         status: data.status as any,
-        preference: data.preference ?? null,
+        // Issue 1 (preference preservation): a status-only re-mark or an admin
+        // override that omits `preference` must NOT erase a previously recorded
+        // preference. Without this guard, toggling status or overriding a member
+        // nulled their stored preference, so it vanished from the dashboard
+        // preference breakdown. A genuine new preference still overwrites; a
+        // null/undefined value leaves the existing one intact.
+        ...(data.preference != null ? { preference: data.preference } : {}),
         note: data.note ?? null,
         markedAt: data.markedAt ?? new Date(),
         markedBy: data.markedBy ?? null,
