@@ -2,12 +2,52 @@ import { Injectable, NotFoundException, ConflictException } from '@nestjs/common
 import { UsersRepository } from './repositories/users.repository';
 import { UserSerializer } from './serializers/user.serializer';
 import { UpdateUserDto } from './dto/update-user.dto';
+import { StorageService } from '../../storage/storage.service';
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly usersRepo: UsersRepository) {}
+  constructor(
+    private readonly usersRepo: UsersRepository,
+    private readonly storage: StorageService,
+  ) {}
+
+  /**
+   * Additive: when an avatar arrives as a base64 data URI, upload it to object
+   * storage (MinIO) and return the public URL, deleting the previous avatar
+   * object (single current file per user). A value that is already a URL, or
+   * null/undefined, passes through unchanged. Falls back to the previous avatar
+   * if storage is unconfigured/unavailable so a profile edit never hard-fails.
+   */
+  private async resolveAvatarUrl(
+    userId: string,
+    organizationId: string | null,
+    incoming: string | undefined,
+    previous: string | null,
+  ): Promise<string | undefined> {
+    if (!incoming || !incoming.startsWith('data:image')) return incoming;
+    const m = /^data:(image\/(?:jpeg|png));base64,(.+)$/s.exec(incoming);
+    if (!m) return incoming;
+    try {
+      const mime = m[1] as 'image/jpeg' | 'image/png';
+      const buffer = Buffer.from(m[2], 'base64');
+      const url = await this.storage.uploadAvatar(
+        organizationId ?? 'org',
+        userId,
+        buffer,
+        mime,
+      );
+      const prevKey = this.storage.keyFromUrl(previous);
+      if (prevKey) await this.storage.deleteImage(prevKey);
+      return url;
+    } catch {
+      return previous ?? undefined;
+    }
+  }
 
   async getMe(userId: string) {
+    // Additive: auto-deactivate vacation mode if the approved vacation has
+    // ended (expiry) — so the flag flips OFF on next load, no restart/cron.
+    await this.usersRepo.syncVacationExpiry(userId);
     const user = await this.usersRepo.findById(userId);
     if (!user) throw new NotFoundException('User not found');
     return UserSerializer.toResponse(user);
@@ -37,11 +77,21 @@ export class UsersService {
       }
     }
 
+    // Additive: a base64 data-URI avatar is uploaded to MinIO and stored as a
+    // URL (single current file per user; previous object deleted). Already-URL
+    // or null values pass through unchanged.
+    const resolvedAvatarUrl = await this.resolveAvatarUrl(
+      userId,
+      (user as { organizationId?: string | null }).organizationId ?? null,
+      dto.avatarUrl,
+      user.avatarUrl,
+    );
+
     const updated = await this.usersRepo.update(userId, {
       ...(dto.name !== undefined && { name: dto.name }),
       ...(dto.email !== undefined && { email: dto.email }),
       ...(dto.phone !== undefined && { phone: dto.phone }),
-      ...(dto.avatarUrl !== undefined && { avatarUrl: dto.avatarUrl }),
+      ...(dto.avatarUrl !== undefined && { avatarUrl: resolvedAvatarUrl }),
       ...(dto.gender !== undefined && { gender: dto.gender }),
       ...(dto.age !== undefined && { age: dto.age }),
       ...(dto.isVacationMode !== undefined && { isVacationMode: dto.isVacationMode }),

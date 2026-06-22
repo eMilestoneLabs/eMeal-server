@@ -32,6 +32,7 @@ export class SchedulesRepository {
             order: true,
             menuItems: true,
             imageUrl: true,
+            description: true,
             price: true,
           },
         },
@@ -56,6 +57,8 @@ export class SchedulesRepository {
       price: raw.price ?? null,
       mealName: raw.mealName ?? null,
       notes: raw.notes ?? null,
+      description: raw.description ?? null,
+      imageUrl: raw.imageUrl ?? null,
       meal: raw.meal
         ? {
             slotKey: raw.meal.slotKey,
@@ -64,6 +67,7 @@ export class SchedulesRepository {
             order: raw.meal.order ?? 0,
             menuItems: raw.meal.menuItems ?? [],
             imageUrl: raw.meal.imageUrl ?? null,
+            description: raw.meal.description ?? null,
             price: raw.meal.price ?? null,
           }
         : undefined,
@@ -99,6 +103,8 @@ export class SchedulesRepository {
       closeTime: e.closeTime ?? null,
       mealName: e.mealName ?? null,
       notes: e.notes ?? null,
+      description: e.description ?? null,
+      imageUrl: e.imageUrl ?? null,
       preferencesEnabled: e.preferencesEnabled ?? null,
       enabledPreferences: e.enabledPreferences ?? [],
       menuItems: e.menuItems ?? [],
@@ -111,6 +117,7 @@ export class SchedulesRepository {
             order: e.meal.order ?? 0,
             menuItems: e.meal.menuItems ?? [],
             imageUrl: e.meal.imageUrl ?? null,
+            description: e.meal.description ?? null,
             price: e.meal.price ?? null,
           }
         : undefined,
@@ -261,6 +268,8 @@ export class SchedulesRepository {
         openTime: string | null;
         closeTime: string | null;
         mealName: string | null;
+        description: string | null;
+        imageUrl: string | null;
         preferencesEnabled: boolean | null;
         enabledPreferences: string[];
         menuItems: string[];
@@ -274,6 +283,8 @@ export class SchedulesRepository {
         openTime: string | null;
         closeTime: string | null;
         mealName: string | null;
+        description: string | null;
+        imageUrl: string | null;
         preferencesEnabled: boolean | null;
         enabledPreferences: string[];
         menuItems: string[];
@@ -330,6 +341,8 @@ export class SchedulesRepository {
         openTime: e.openTime ?? null,
         closeTime: e.closeTime ?? null,
         mealName: e.mealName ?? null,
+        description: e.description ?? null,
+        imageUrl: e.imageUrl ?? null,
         preferencesEnabled: e.preferencesEnabled ?? null,
         enabledPreferences: e.enabledPreferences ?? [],
         menuItems: e.menuItems ?? [],
@@ -349,6 +362,8 @@ export class SchedulesRepository {
       date: Date;
       mealName?: string | null;
       notes?: string | null;
+      description?: string | null;
+      imageUrl?: string | null;
       openTime?: string | null;
       closeTime?: string | null;
       preferencesEnabled?: boolean | null;
@@ -371,6 +386,8 @@ export class SchedulesRepository {
                 date: e.date,
                 mealName: e.mealName ?? null,
                 notes: e.notes ?? null,
+                description: e.description ?? null,
+                imageUrl: e.imageUrl ?? null,
                 openTime: e.openTime ?? null,
                 closeTime: e.closeTime ?? null,
                 preferencesEnabled: e.preferencesEnabled ?? null,
@@ -403,6 +420,8 @@ export class SchedulesRepository {
         date: Date;
         mealName?: string | null;
         notes?: string | null;
+        description?: string | null;
+        imageUrl?: string | null;
         openTime?: string | null;
         closeTime?: string | null;
         preferencesEnabled?: boolean | null;
@@ -437,6 +456,8 @@ export class SchedulesRepository {
                 date: e.date,
                 mealName: e.mealName ?? null,
                 notes: e.notes ?? null,
+                description: e.description ?? null,
+                imageUrl: e.imageUrl ?? null,
                 openTime: e.openTime ?? null,
                 closeTime: e.closeTime ?? null,
                 preferencesEnabled: e.preferencesEnabled ?? null,
@@ -457,6 +478,8 @@ export class SchedulesRepository {
                   date: entry.date,
                   mealName: entry.mealName ?? null,
                   notes: entry.notes ?? null,
+                  description: entry.description ?? null,
+                  imageUrl: entry.imageUrl ?? null,
                   openTime: entry.openTime ?? null,
                   closeTime: entry.closeTime ?? null,
                   preferencesEnabled: entry.preferencesEnabled ?? null,
@@ -474,6 +497,8 @@ export class SchedulesRepository {
                   date: entry.date,
                   mealName: entry.mealName ?? null,
                   notes: entry.notes ?? null,
+                  description: entry.description ?? null,
+                  imageUrl: entry.imageUrl ?? null,
                   openTime: entry.openTime ?? null,
                   closeTime: entry.closeTime ?? null,
                   preferencesEnabled: entry.preferencesEnabled ?? null,

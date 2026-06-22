@@ -432,6 +432,8 @@ export class SchedulesService {
       date: string;
       mealName?: string | null;
       notes?: string | null;
+      description?: string | null;
+      imageUrl?: string | null;
       attendanceWindow?: { openTime: string; closeTime: string } | null;
       preferencesEnabled?: boolean | null;
       enabledPreferences?: string[] | null;
@@ -446,6 +448,8 @@ export class SchedulesService {
       date: Date;
       mealName: string | null;
       notes: string | null;
+      description: string | null;
+      imageUrl: string | null;
       openTime: string | null;
       closeTime: string | null;
       preferencesEnabled: boolean | null;
@@ -476,6 +480,8 @@ export class SchedulesService {
         date,
         mealName: entry.mealName ?? null,
         notes: entry.notes ?? null,
+        description: entry.description ?? null,
+        imageUrl: entry.imageUrl ?? null,
         openTime: entry.attendanceWindow?.openTime ?? null,
         closeTime: entry.attendanceWindow?.closeTime ?? null,
         preferencesEnabled: entry.preferencesEnabled ?? null,

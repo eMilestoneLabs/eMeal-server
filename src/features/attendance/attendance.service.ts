@@ -581,6 +581,28 @@ export class AttendanceService {
 
     const response = AttendanceSummarySerializer.toResponse(summary);
 
+    // Additive: excused vacation days in [from,to] from approved vacation
+    // requests, counted SEPARATELY (never in the present/absent/skipped
+    // denominator). Lets the dashboard show a "Vacation: N" stat without
+    // recording per-day onVacation rows. New field — additive, contract-safe.
+    const approvedVacations = await this.prisma.vacationRequest.findMany({
+      where: {
+        userId,
+        status: 'approved',
+        startDate: { lte: toDate },
+        endDate: { gte: fromDate },
+      },
+      select: { startDate: true, endDate: true },
+    });
+    let vacationDays = 0;
+    for (const v of approvedVacations) {
+      const s = v.startDate.getTime() > fromDate.getTime() ? v.startDate : fromDate;
+      const e = v.endDate.getTime() < toDate.getTime() ? v.endDate : toDate;
+      const days = Math.floor((e.getTime() - s.getTime()) / 86400000) + 1;
+      if (days > 0) vacationDays += days;
+    }
+    (response as Record<string, unknown>).vacationDays = vacationDays;
+
     // Cache result
     await this.redis.set(cacheKey, JSON.stringify(response), CACHE_TTL);
 

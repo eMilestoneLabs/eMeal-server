@@ -43,6 +43,37 @@ export class UsersRepository {
     return this.buildEntityFromInclude(user);
   }
 
+  /**
+   * Additive: auto-deactivate vacation mode when no approved request still
+   * covers today (the vacation has expired). Called on read (e.g. GET /auth/me)
+   * so the flag turns OFF without an app restart or a scheduled job. No-op when
+   * vacation is already off or an approved request still covers today (inclusive).
+   */
+  async syncVacationExpiry(userId: string): Promise<void> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, isVacationMode: true },
+    });
+    if (!user || !user.isVacationMode) return;
+
+    const now = new Date();
+    const todayUtc = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+    );
+    // endDate is inclusive (stored at UTC midnight) — still covered while
+    // endDate >= today.
+    const active = await this.prisma.vacationRequest.findFirst({
+      where: { userId, status: 'approved', endDate: { gte: todayUtc } },
+      select: { id: true },
+    });
+    if (!active) {
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: { isVacationMode: false },
+      });
+    }
+  }
+
   async findByEmail(email: string, organizationId?: string): Promise<UserEntity | null> {
     const user = await this.prisma.user.findFirst({
       where: { email, ...(organizationId ? { organizationId } : {}) },

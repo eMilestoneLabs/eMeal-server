@@ -378,6 +378,11 @@ model ScheduleEntry {
   closeTime  String?  // per-day override (null = use meal template attendanceWindowClose)
   mealName   String?  // what's being served on this day (e.g. "Poha", "Dal Rice")
   notes      String?  // optional notes shown to students (e.g. "Extra fruits today")
+  // Additive: per-day meal description override (null = inherit master meal description).
+  description String?
+  // Additive: per-day meal image override (base64 data URI or URL; null = inherit
+  // master meal image). One image per entry — replaced on re-upload, cleared on delete.
+  imageUrl   String?
   // Additive (#6): per-day meal preference override. null = inherit from meal.
   preferencesEnabled Boolean?
   enabledPreferences String[] @default([])

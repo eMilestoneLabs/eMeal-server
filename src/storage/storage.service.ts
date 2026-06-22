@@ -81,6 +81,50 @@ export class StorageService {
     return url;
   }
 
+  /**
+   * Upload a user avatar and return its absolute public URL.
+   * Key: org/{orgId}/avatars/{userId}/{timestamp}.{jpg|png} — one current file
+   * per user; callers delete the previous object on replace (see keyFromUrl).
+   */
+  async uploadAvatar(
+    organizationId: string,
+    userId: string,
+    buffer: Buffer,
+    mimeType: 'image/jpeg' | 'image/png',
+  ): Promise<string> {
+    const ext = mimeType === 'image/jpeg' ? 'jpg' : 'png';
+    const key = `org/${organizationId}/avatars/${userId}/${Date.now()}.${ext}`;
+
+    await this.getClient().send(
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        Body: buffer,
+        ContentType: mimeType,
+      }),
+    );
+
+    const base =
+      this.cdnUrl || `${this.config.get<string>('MINIO_ENDPOINT')}/${this.bucket}`;
+    this.logger.log(`Uploaded avatar org=${organizationId} user=${userId}`);
+    return `${base}/${key}`;
+  }
+
+  /**
+   * Derive the storage object key from a previously-returned public URL, so the
+   * old object can be deleted on replace. Returns null for non-storage URLs
+   * (e.g. an external URL or a base64 data URI) — those are left untouched.
+   */
+  keyFromUrl(url: string | null | undefined): string | null {
+    if (!url) return null;
+    const base =
+      this.cdnUrl || `${this.config.get<string>('MINIO_ENDPOINT')}/${this.bucket}`;
+    if (base && url.startsWith(base + '/')) {
+      return url.slice(base.length + 1);
+    }
+    return null;
+  }
+
   /** Delete an object by its storage key (best-effort). */
   async deleteImage(key: string): Promise<void> {
     try {

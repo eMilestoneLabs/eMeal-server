@@ -51,6 +51,17 @@ export class UpdateScheduleEntryDto {
   @MaxLength(512)
   notes?: string;
 
+  /** Additive: per-day meal description override. null/absent = inherit master meal description. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(1024)
+  description?: string;
+
+  /** Additive: per-day meal image override (base64 data URI or URL). null/absent = inherit master image. */
+  @IsOptional()
+  @IsString()
+  imageUrl?: string;
+
   @IsOptional()
   @ValidateNested()
   @Type(() => ScheduleEntryWindowDto)

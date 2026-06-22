@@ -29,6 +29,12 @@ export class ScheduleEntryEntity {
   // Optional notes shown to students (e.g. "Extra fruits today")
   notes: string | null;
 
+  // Additive: per-day meal description override (null = inherit master meal description).
+  description: string | null;
+
+  // Additive: per-day meal image override (null = inherit master meal image).
+  imageUrl: string | null;
+
   // Per-day meal preference override (#6). null = inherit from the meal.
   preferencesEnabled: boolean | null;
   enabledPreferences: string[];
@@ -44,6 +50,7 @@ export class ScheduleEntryEntity {
     order: number;
     menuItems: string[];
     imageUrl: string | null;
+    description: string | null;
     price: number | null;
   };
 
@@ -57,6 +64,8 @@ export class ScheduleEntryEntity {
     this.closeTime = partial.closeTime ?? null;
     this.mealName = partial.mealName ?? null;
     this.notes = partial.notes ?? null;
+    this.description = partial.description ?? null;
+    this.imageUrl = partial.imageUrl ?? null;
     this.preferencesEnabled = partial.preferencesEnabled ?? null;
     this.enabledPreferences = partial.enabledPreferences ?? [];
     this.menuItems = partial.menuItems ?? [];

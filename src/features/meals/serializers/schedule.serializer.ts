@@ -85,7 +85,10 @@ export class ScheduleSerializer {
         entry.menuItems && entry.menuItems.length > 0
           ? entry.menuItems
           : entry.meal?.menuItems ?? [],
-      imageUrl: entry.meal?.imageUrl ?? null,
+      // Additive: per-day meal image override (fallback to master meal image).
+      imageUrl: entry.imageUrl ?? entry.meal?.imageUrl ?? null,
+      // Additive: per-day meal description (fallback to master meal description).
+      description: entry.description ?? entry.meal?.description ?? null,
       // Flat fields — per-day override (null = Flutter uses meal template timing)
       openTime: entry.openTime ?? null,
       closeTime: entry.closeTime ?? null,

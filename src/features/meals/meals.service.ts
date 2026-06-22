@@ -231,6 +231,14 @@ export class MealsService {
                   if (o.menuItems && o.menuItems.length > 0) {
                     next.menuItems = o.menuItems;
                   }
+                  // Additive: per-day description override (null = inherit master).
+                  if (o.description != null && o.description !== '') {
+                    next.description = o.description;
+                  }
+                  // Additive: per-day image override (null = inherit master image).
+                  if (o.imageUrl != null && o.imageUrl !== '') {
+                    next.imageUrl = o.imageUrl;
+                  }
                   // Additive: per-day price override (null = inherit master).
                   if (o.price != null) {
                     next.price = o.price;
