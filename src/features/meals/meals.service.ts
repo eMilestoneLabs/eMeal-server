@@ -22,6 +22,14 @@ import { ADMIN_ROLES } from '../../common/decorators/roles.decorator';
 import { PaginatedResponseDto } from '../../common/dto/paginated-response.dto';
 import { GroupsRepository } from '../groups/repositories/groups.repository';
 import { getCurrentTimeInTimezone } from '../../common/utils/date.utils';
+import { StorageService } from '../../storage/storage.service';
+
+/**
+ * Matches a base64 image data URI (jpeg/png) so the meal photo can be uploaded
+ * to MinIO and stored as a URL instead of inline base64 — keeping `GET /meals`
+ * responses small (performance). Identical pattern to the working avatar flow.
+ */
+const MEAL_IMAGE_DATA_URI_RE = /^data:(image\/(?:jpeg|png));base64,(.+)$/s;
 
 /**
  * MealsService — business logic for meal CRUD and ordering.
@@ -45,9 +53,44 @@ export class MealsService {
     private readonly groupsRepo: GroupsRepository,
     private readonly schedulesRepo: SchedulesRepository,
     private readonly audit: AuditService,
+    private readonly storage: StorageService,
     @Optional() @Inject('REALTIME_GATEWAY')
     private readonly realtime: RealtimeEventsService | null = null,
   ) {}
+
+  /**
+   * Performance fix: when a meal image arrives as a base64 data URI, upload it
+   * to MinIO and return the public URL (deleting the previous object on
+   * replace). A value that is already a URL, or null/undefined, passes through
+   * UNCHANGED — so existing behaviour is preserved; only inline base64 (which
+   * bloats every `GET /meals` response) is converted to a small URL. If MinIO is
+   * somehow unavailable it falls back to the original value, never hard-failing.
+   */
+  private async resolveMealImageUrl(
+    organizationId: string,
+    mealId: string,
+    incoming: string | null | undefined,
+    previous: string | null,
+  ): Promise<string | null | undefined> {
+    if (!incoming || !incoming.startsWith('data:image')) return incoming;
+    const m = MEAL_IMAGE_DATA_URI_RE.exec(incoming);
+    if (!m) return incoming;
+    try {
+      const mime = m[1] as 'image/jpeg' | 'image/png';
+      const buffer = Buffer.from(m[2], 'base64');
+      const url = await this.storage.uploadMealImage(
+        organizationId,
+        mealId,
+        buffer,
+        mime,
+      );
+      const prevKey = this.storage.keyFromUrl(previous);
+      if (prevKey) await this.storage.deleteImage(prevKey);
+      return url;
+    } catch {
+      return incoming;
+    }
+  }
 
   // ── CREATE ────────────────────────────────────────────────────────────────
 
@@ -74,6 +117,11 @@ export class MealsService {
       });
     }
 
+    // A base64 data-URI image is uploaded to MinIO AFTER the row exists (the
+    // meal id keys the object); store null first, then patch the resolved URL —
+    // keeps base64 out of the DB. A plain URL / null passes straight through.
+    const imageIsDataUri = !!dto.imageUrl?.startsWith('data:image');
+
     const meal = await this.mealsRepo.create({
       organizationId,
       groupId: dto.groupId,
@@ -84,13 +132,28 @@ export class MealsService {
       attendanceEnabled: dto.attendanceEnabled ?? true,
       description: dto.description ?? null,
       menuItems: dto.menuItems ?? [],
-      imageUrl: dto.imageUrl ?? null,
+      imageUrl: imageIsDataUri ? null : (dto.imageUrl ?? null),
       preferencesEnabled: dto.preferencesEnabled ?? false,
       enabledPreferences: dto.enabledPreferences ?? [],
       attendanceWindowOpen: dto.attendanceWindow?.openTime ?? null,
       attendanceWindowClose: dto.attendanceWindow?.closeTime ?? null,
       price: dto.price ?? null,
     });
+
+    if (imageIsDataUri) {
+      const url = await this.resolveMealImageUrl(
+        organizationId,
+        meal.id,
+        dto.imageUrl,
+        null,
+      );
+      if (url) {
+        const patched = await this.mealsRepo.update(meal.id, organizationId, {
+          imageUrl: url,
+        });
+        meal.imageUrl = patched.imageUrl;
+      }
+    }
 
     // Fire-and-forget audit log
     this.audit.log({
@@ -389,7 +452,7 @@ export class MealsService {
     if (dto.attendanceEnabled !== undefined) updateData.attendanceEnabled = dto.attendanceEnabled;
     if ('description' in dto)         updateData.description = dto.description ?? null;
     if (dto.menuItems !== undefined)  updateData.menuItems = dto.menuItems;
-    if ('imageUrl' in dto)            updateData.imageUrl = dto.imageUrl ?? null;
+    if ('imageUrl' in dto)            updateData.imageUrl = await this.resolveMealImageUrl(organizationId, id, dto.imageUrl, existing.imageUrl) ?? null;
     if (dto.preferencesEnabled !== undefined) updateData.preferencesEnabled = dto.preferencesEnabled;
     if (dto.enabledPreferences !== undefined) updateData.enabledPreferences = dto.enabledPreferences;
     if (dto.price !== undefined) updateData.price = dto.price;
