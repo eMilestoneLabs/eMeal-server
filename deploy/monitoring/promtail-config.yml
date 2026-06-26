@@ -1,0 +1,33 @@
+# Promtail — ships container + PM2 logs into Loki.
+# Runs on the monitoring bridge network, so it reaches Loki by service name.
+server:
+  http_listen_address: 0.0.0.0
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # All Docker container logs (postgres, redis, minio, exporters, grafana, …)
+  - job_name: docker
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: docker
+          host: emeal
+          __path__: /var/lib/docker/containers/*/*-json.log
+    pipeline_stages:
+      - docker: {}
+
+  # PM2 / NestJS application logs
+  - job_name: pm2-app
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: pm2-app
+          host: emeal
+          __path__: /pm2logs/*.log

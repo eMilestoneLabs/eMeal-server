@@ -102,6 +102,8 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - grafana_data:/var/lib/grafana
+      # auto-provision Prometheus + Loki data sources (no UI clicking needed)
+      - ./grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
 
   uptime-kuma:
     image: louislam/uptime-kuma:1
@@ -113,7 +115,34 @@ services:
       - uptime_kuma_data:/app/data
     ports: ['127.0.0.1:3001:3001']
 
+  # ── Centralized logs: Loki (store) + Promtail (shipper) ────────────────────
+  loki:
+    image: grafana/loki:latest
+    container_name: emeal_loki
+    restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 512m
+    command: ['-config.file=/etc/loki/local-config.yaml']
+    volumes:
+      - loki_data:/loki
+    ports: ['127.0.0.1:3100:3100']   # Grafana (host net) reaches it here
+
+  promtail:
+    image: grafana/promtail:latest
+    container_name: emeal_promtail
+    restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 256m
+    command: ['-config.file=/etc/promtail/config.yml']
+    volumes:
+      - ./promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro   # all container logs
+      - ../../logs:/pm2logs:ro                                     # PM2 app logs
+      - promtail_positions:/tmp
+
 volumes:
   prometheus_data:
   grafana_data:
   uptime_kuma_data:
+  loki_data:
+  promtail_positions:
