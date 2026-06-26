@@ -22,6 +22,13 @@
 #   PG_CONTAINER      default: emeal_postgres
 #   VERIFY_RESTORE    default: 1    (0 disables restore verification)
 #   BACKUP_REMOTE     default: ""   (rclone remote:path, e.g. gdrive:eMeal-Backups)
+#   BACKUP_GPG_PASSPHRASE  default: "" (set in .env to AES256-encrypt sensitive
+#                          backups before offsite — only .gpg leaves the server;
+#                          plaintext stays LOCAL for fast restore)
+#
+# Restore an ENCRYPTED dump:
+#   gpg --batch --pinentry-mode loopback --passphrase "$BACKUP_GPG_PASSPHRASE" \
+#       -d emeal_<ts>.sql.gz.gpg | gunzip | docker exec -i emeal_postgres psql -U emeal -d emeal_db
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -49,6 +56,23 @@ if [ -f "$ENVFILE" ]; then set -a; . "$ENVFILE"; set +a; fi
 POSTGRES_USER="${POSTGRES_USER:-emeal}"
 POSTGRES_DB="${POSTGRES_DB:-emeal_db}"
 MINIO_BUCKET="${MINIO_BUCKET:-emeal-images}"
+
+# Optional GPG symmetric (AES256) encryption of sensitive backups before offsite.
+# Enable by setting BACKUP_GPG_PASSPHRASE in .env. When on, only encrypted .gpg
+# copies are pushed offsite; plaintext stays local for fast restore.
+GPG_PASS="${BACKUP_GPG_PASSPHRASE:-}"
+ENCRYPT=0
+if [ -n "$GPG_PASS" ] && command -v gpg >/dev/null 2>&1; then ENCRYPT=1; fi
+encrypt() {  # $1 = plaintext file → writes $1.gpg (best-effort)
+  [ "$ENCRYPT" = "1" ] || return 0
+  if gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASS" \
+       --cipher-algo AES256 --symmetric -o "$1.gpg" "$1"; then
+    chmod 600 "$1.gpg" 2>/dev/null || true
+    logline "encrypted $(basename "$1").gpg"
+  else
+    logline "WARN gpg encryption failed for $(basename "$1")"
+  fi
+}
 
 logline "backup start"
 DUMP="$BACKUP_DIR/db/emeal_${TS}.sql.gz"
@@ -79,6 +103,9 @@ if [ "$VERIFY_RESTORE" = "1" ]; then
   logline "restore verification OK ($TBLS tables)"
 fi
 
+# ── 3.5) Encrypt the verified dump for offsite (no-op if encryption disabled) ─
+encrypt "$DUMP"
+
 # ── 4) MinIO object mirror (bucket -> local; removes deleted objects) ────────
 docker run --rm --network host --entrypoint /bin/sh \
   -v "$BACKUP_DIR/minio:/backup" minio/mc -c "\
@@ -97,30 +124,40 @@ tar -czf "$CONF_TAR" -C "$APP_DIR" \
   .env .env.production ecosystem.config.js docker-compose.prod.yml nginx 2>/dev/null || true
 [ -f "$APP_DIR/.env" ] && { crontab -l 2>/dev/null > "$BACKUP_DIR/config/crontab_${TS}.txt" || true; }
 chmod 600 "$CONF_TAR" 2>/dev/null || true
+encrypt "$CONF_TAR"
 logline "config backup $CONF_TAR"
 
 # ── 6) Tiered copies (weekly on Sunday, monthly on the 1st) ──────────────────
-[ "$(date +%u)" = "7" ] && cp "$DUMP" "$BACKUP_DIR/weekly/"  && logline "weekly copy taken"
-[ "$(date +%d)" = "01" ] && cp "$DUMP" "$BACKUP_DIR/monthly/" && logline "monthly copy taken"
+# Copy the ENCRYPTED dump into the tiers when encryption is on, so weekly/monthly
+# offsite copies are encrypted too.
+if [ "$ENCRYPT" = "1" ]; then TIER_SRC="$DUMP.gpg"; else TIER_SRC="$DUMP"; fi
+[ "$(date +%u)" = "7" ] && cp "$TIER_SRC" "$BACKUP_DIR/weekly/"  && logline "weekly copy taken"
+[ "$(date +%d)" = "01" ] && cp "$TIER_SRC" "$BACKUP_DIR/monthly/" && logline "monthly copy taken"
 
-# ── 7) Retention pruning (local) ─────────────────────────────────────────────
-find "$BACKUP_DIR/db"      -name 'emeal_*.sql.gz'  -mtime +"$RETENTION_DAYS"          -delete
-find "$BACKUP_DIR/config"  -name 'config_*.tar.gz' -mtime +"$RETENTION_DAYS"          -delete
-find "$BACKUP_DIR/config"  -name 'crontab_*.txt'   -mtime +"$RETENTION_DAYS"          -delete
-find "$BACKUP_DIR/weekly"  -name 'emeal_*.sql.gz'  -mtime +"$((RETENTION_WEEKS*7))"   -delete
-find "$BACKUP_DIR/monthly" -name 'emeal_*.sql.gz'  -mtime +"$((RETENTION_MONTHS*31))" -delete
+# ── 7) Retention pruning (local) — globs end in * to catch .gpg too ──────────
+find "$BACKUP_DIR/db"      -name 'emeal_*.sql.gz*'  -mtime +"$RETENTION_DAYS"          -delete
+find "$BACKUP_DIR/config"  -name 'config_*.tar.gz*' -mtime +"$RETENTION_DAYS"          -delete
+find "$BACKUP_DIR/config"  -name 'crontab_*.txt'    -mtime +"$RETENTION_DAYS"          -delete
+find "$BACKUP_DIR/weekly"  -name 'emeal_*.sql.gz*'  -mtime +"$((RETENTION_WEEKS*7))"   -delete
+find "$BACKUP_DIR/monthly" -name 'emeal_*.sql.gz*'  -mtime +"$((RETENTION_MONTHS*31))" -delete
 
 # ── 8) Offsite push (rclone copy = keeps full remote history, never deletes) ─
+# When encryption is ON, exclude ALL plaintext sensitive files so ONLY .gpg (+ the
+# public MinIO images) ever leave the server.
 if [ -n "$BACKUP_REMOTE" ] && command -v rclone >/dev/null 2>&1; then
+  RCLONE_EXCL=(--exclude 'cron.log' --exclude 'backup.log' --exclude 'offsite.log')
+  if [ "$ENCRYPT" = "1" ]; then
+    RCLONE_EXCL+=(--exclude '*.sql.gz' --exclude 'config_*.tar.gz' --exclude 'crontab_*.txt')
+  fi
   if rclone copy "$BACKUP_DIR" "$BACKUP_REMOTE" --transfers 4 --checkers 8 \
-       --exclude 'cron.log' --exclude 'backup.log' --exclude 'offsite.log' \
+       "${RCLONE_EXCL[@]}" \
        --log-file "$BACKUP_DIR/offsite.log" --log-level INFO; then
-    logline "offsite copy OK -> $BACKUP_REMOTE"
+    logline "offsite copy OK -> $BACKUP_REMOTE (encrypted=${ENCRYPT})"
   else
     logline "WARN offsite copy failed -> $BACKUP_REMOTE"
   fi
 fi
 
 SIZE="$(du -h "$DUMP" | cut -f1)"
-logline "backup OK  db=emeal_${TS}.sql.gz ($SIZE)  verified=${VERIFY_RESTORE}"
-echo "Backup OK: $DUMP ($SIZE)  restore-verified=${VERIFY_RESTORE}${BACKUP_REMOTE:+  +offsite:$BACKUP_REMOTE}"
+logline "backup OK  db=emeal_${TS}.sql.gz ($SIZE)  verified=${VERIFY_RESTORE}  encrypted=${ENCRYPT}"
+echo "Backup OK: $DUMP ($SIZE)  restore-verified=${VERIFY_RESTORE}  encrypted=${ENCRYPT}${BACKUP_REMOTE:+  +offsite:$BACKUP_REMOTE}"
