@@ -65,9 +65,9 @@ services:
     restart: unless-stopped
     logging: *default-logging
     network_mode: host
+    command: ['--web.listen-address=127.0.0.1:9187']   # loopback-only (UFW also blocks it)
     environment:
       DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}?sslmode=disable"
-      PG_EXPORTER_WEB_LISTEN_ADDRESS: "127.0.0.1:9187"
 
   redis-exporter:
     image: oliver006/redis_exporter:latest
