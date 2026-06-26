@@ -89,12 +89,15 @@ run "$SUDO systemctl enable --now fail2ban"
 if [ "$DRY_RUN" != "1" ]; then $SUDO fail2ban-client status sshd >/dev/null 2>&1 && log "sshd jail active" || log "WARN: sshd jail not reporting active — check 'sudo fail2ban-client status'"; fi
 
 # ── 5. SSH hardening (GUARDED) ───────────────────────────────────────────────
-# ROLLBACK: sudo rm /etc/ssh/sshd_config.d/99-emeal-hardening.conf && sudo systemctl reload ssh
+# ROLLBACK: sudo rm /etc/ssh/sshd_config.d/00-emeal-hardening.conf && sudo systemctl reload ssh
+# NOTE: filename is 00- so it sorts BEFORE cloud-init's 50-cloud-init.conf (which sets
+# PasswordAuthentication yes). sshd uses the FIRST value it reads, so ours must come first.
 step "5/6 SSH hardening (key-only, no root)"
 KEYS_OK=0
 if [ -s "$HOME/.ssh/authorized_keys" ]; then KEYS_OK=1; fi
-DROPIN=/etc/ssh/sshd_config.d/99-emeal-hardening.conf
+DROPIN=/etc/ssh/sshd_config.d/00-emeal-hardening.conf
 do_harden() {
+  run "$SUDO rm -f /etc/ssh/sshd_config.d/99-emeal-hardening.conf"   # clean up any older-named copy
   run "printf '%s\n' 'PasswordAuthentication no' 'PermitRootLogin no' 'PubkeyAuthentication yes' 'ChallengeResponseAuthentication no' 'MaxAuthTries 4' 'X11Forwarding no' | $SUDO tee ${DROPIN} >/dev/null"
   if [ "$DRY_RUN" != "1" ]; then
     if $SUDO sshd -t; then $SUDO systemctl reload ssh && log "SSH hardened (key-only, root disabled)"; else
