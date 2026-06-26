@@ -128,6 +128,8 @@ if [ -f "$APP_DIR/nginx/emilestone.conf" ]; then
   $SUDO cp "$APP_DIR/nginx/emilestone.conf" /etc/nginx/sites-available/emilestone
   $SUDO ln -sf /etc/nginx/sites-available/emilestone /etc/nginx/sites-enabled/emilestone
   $SUDO rm -f /etc/nginx/sites-enabled/default
+  # Tighten system-wide TLS — drop deprecated TLSv1/TLSv1.1 (idempotent; vhosts already enforce 1.2/1.3)
+  $SUDO sed -i 's/ssl_protocols TLSv1 TLSv1.1 TLSv1.2 TLSv1.3;/ssl_protocols TLSv1.2 TLSv1.3;/' /etc/nginx/nginx.conf 2>/dev/null || true
   if $SUDO nginx -t; then $SUDO systemctl reload nginx; else
     log "WARN: nginx -t failed (often because SSL certs not issued yet — run certbot first)."; fi
 fi
