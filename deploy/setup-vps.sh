@@ -143,6 +143,14 @@ else
   ( crontab -l 2>/dev/null; echo "$CRON_LINE" ) | crontab -
   log "Installed: $CRON_LINE"
 fi
+# Health/cert alerter every 5 min (needs TELEGRAM_BOT_TOKEN/CHAT_ID in .env)
+ALERT_LINE="*/5 * * * * $APP_DIR/deploy/healthcheck-alert.sh >> $HOME/backups/alert.log 2>&1"
+if crontab -l 2>/dev/null | grep -qF "$APP_DIR/deploy/healthcheck-alert.sh"; then
+  log "alert cron already present — skipping"
+else
+  ( crontab -l 2>/dev/null; echo "$ALERT_LINE" ) | crontab -
+  log "Installed: $ALERT_LINE"
+fi
 
 # ── 12. Next steps ───────────────────────────────────────────────────────────
 step "12/12 Done — remaining MANUAL steps"
