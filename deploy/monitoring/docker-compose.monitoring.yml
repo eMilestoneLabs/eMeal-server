@@ -1,15 +1,17 @@
 # eMeal — OPTIONAL observability stack (Track C). 100% open-source, zero license.
-# Fully ADDITIVE: separate compose project, separate volumes, NO app code change,
-# NO change to the data-services compose. Remove anytime with:  docker compose
-# -f docker-compose.monitoring.yml down   (data volumes persist unless -v).
+# Fully ADDITIVE: separate compose project, separate volumes, NO app change.
+# Remove anytime:  docker compose -f docker-compose.monitoring.yml down
 #
-# SECURITY: every UI/metrics port is bound to 127.0.0.1 only (UFW also blocks
-# 9090/9100/9121/9187/8080/3001/3002 from the public). Reach the UIs via SSH tunnel:
+# NETWORKING: Postgres/Redis are published on the host's 127.0.0.1 ONLY, which a
+# bridge container cannot reach (and UFW drops the gateway path). So the components
+# that must reach them — Prometheus + node/pg/redis exporters + Grafana — run on
+# HOST networking and talk over 127.0.0.1 (loopback is never filtered by UFW).
+# Each daemon binds 127.0.0.1 explicitly; UFW also blocks these ports externally.
+# cAdvisor + Uptime-Kuma stay on the bridge with loopback-published ports.
+#
+# Reach the UIs via SSH tunnel:
 #   ssh -L 3002:127.0.0.1:3002 -L 3001:127.0.0.1:3001 emeal@<server>
-#   then open http://localhost:3002 (Grafana) and http://localhost:3001 (Uptime Kuma)
-#
-# Setup:  cp .env.monitoring.example .env  &&  edit creds  &&  docker compose -f docker-compose.monitoring.yml up -d
-version: '3.9'
+# Setup:  ln -s ../../.env.production .env  &&  docker compose -f docker-compose.monitoring.yml up -d
 
 x-logging: &default-logging
   driver: json-file
@@ -21,26 +23,25 @@ services:
     container_name: emeal_prometheus
     restart: unless-stopped
     logging: *default-logging
+    network_mode: host
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.retention.time=30d'
-      - '--web.listen-address=0.0.0.0:9090'
+      - '--web.listen-address=127.0.0.1:9090'
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
-    extra_hosts: ['host.docker.internal:host-gateway']
-    ports: ['127.0.0.1:9090:9090']
 
   node-exporter:
     image: prom/node-exporter:latest
     container_name: emeal_node_exporter
     restart: unless-stopped
     logging: *default-logging
-    network_mode: host           # needs host namespace for true host CPU/RAM/disk
+    network_mode: host
     pid: host
     command:
       - '--path.rootfs=/host'
-      - '--web.listen-address=:9100'   # UFW blocks 9100 publicly; Prometheus scrapes via host-gateway
+      - '--web.listen-address=127.0.0.1:9100'
     volumes:
       - '/:/host:ro,rslave'
 
@@ -63,36 +64,36 @@ services:
     container_name: emeal_postgres_exporter
     restart: unless-stopped
     logging: *default-logging
+    network_mode: host
     environment:
-      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@host.docker.internal:5432/${POSTGRES_DB}?sslmode=disable"
-    extra_hosts: ['host.docker.internal:host-gateway']
-    ports: ['127.0.0.1:9187:9187']
+      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}?sslmode=disable"
+      PG_EXPORTER_WEB_LISTEN_ADDRESS: "127.0.0.1:9187"
 
   redis-exporter:
     image: oliver006/redis_exporter:latest
     container_name: emeal_redis_exporter
     restart: unless-stopped
     logging: *default-logging
+    network_mode: host
     environment:
-      REDIS_ADDR: "redis://host.docker.internal:6379"
+      REDIS_ADDR: "redis://127.0.0.1:6379"
       REDIS_PASSWORD: "${REDIS_PASSWORD}"
-    extra_hosts: ['host.docker.internal:host-gateway']
-    ports: ['127.0.0.1:9121:9121']
+      REDIS_EXPORTER_WEB_LISTEN_ADDRESS: "127.0.0.1:9121"
 
   grafana:
     image: grafana/grafana-oss:latest
     container_name: emeal_grafana
     restart: unless-stopped
     logging: *default-logging
+    network_mode: host
     environment:
       GF_SECURITY_ADMIN_USER: "${GRAFANA_USER:-admin}"
       GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:?set GRAFANA_PASSWORD in .env}"
-      GF_SERVER_HTTP_PORT: '3000'
-      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_SERVER_HTTP_ADDR: "127.0.0.1"
+      GF_SERVER_HTTP_PORT: "3002"
+      GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - grafana_data:/var/lib/grafana
-    extra_hosts: ['host.docker.internal:host-gateway']
-    ports: ['127.0.0.1:3002:3000']
 
   uptime-kuma:
     image: louislam/uptime-kuma:1

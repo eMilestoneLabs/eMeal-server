@@ -1,6 +1,6 @@
 # Prometheus scrape config for the eMeal observability stack.
-# Targets are reached on the monitoring compose network (service names) except
-# node-exporter, which runs in the host namespace and is reached via host-gateway.
+# Prometheus runs on HOST networking, so every target is reached over 127.0.0.1
+# (loopback — never filtered by UFW). cAdvisor is bridge but publishes on 127.0.0.1.
 global:
   scrape_interval: 15s
   scrape_timeout: 10s
@@ -12,29 +12,22 @@ scrape_configs:
     static_configs:
       - targets: ['127.0.0.1:9090']
 
-  - job_name: node          # host CPU / RAM / disk / network (UFW-protected port)
+  - job_name: node          # host CPU / RAM / disk / network
     static_configs:
-      - targets: ['host.docker.internal:9100']
+      - targets: ['127.0.0.1:9100']
 
-  - job_name: cadvisor      # per-container CPU / mem / IO (postgres, redis, minio, app-adjacent)
+  - job_name: cadvisor      # per-container CPU / mem / IO
     static_configs:
-      - targets: ['cadvisor:8080']
+      - targets: ['127.0.0.1:8080']
 
   - job_name: postgres
     static_configs:
-      - targets: ['postgres-exporter:9187']
+      - targets: ['127.0.0.1:9187']
 
   - job_name: redis
     static_configs:
-      - targets: ['redis-exporter:9121']
+      - targets: ['127.0.0.1:9121']
 
-  # MinIO exposes native Prometheus metrics. Enable later (needs a metrics token):
-  #   set MINIO_PROMETHEUS_AUTH_TYPE=public on the minio service, then add:
-  # - job_name: minio
-  #   metrics_path: /minio/v2/metrics/cluster
-  #   static_configs:
-  #     - targets: ['host.docker.internal:9000']
-
-  # App-level /metrics is intentionally NOT scraped: the backend is FROZEN and has
-  # no prom-client endpoint. Host + container + DB + Redis exporters above already
-  # cover the infrastructure. An app /metrics endpoint is a post-launch additive option.
+  # MinIO native metrics (optional, later): set MINIO_PROMETHEUS_AUTH_TYPE=public on
+  # the minio service, then add a job for 127.0.0.1:9000 /minio/v2/metrics/cluster.
+  # App-level /metrics intentionally not scraped (backend is FROZEN, no prom-client).
