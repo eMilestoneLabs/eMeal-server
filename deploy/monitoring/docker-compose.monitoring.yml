@@ -9,6 +9,8 @@
 # Each daemon binds 127.0.0.1 explicitly; UFW also blocks these ports externally.
 # cAdvisor + Uptime-Kuma stay on the bridge with loopback-published ports.
 #
+# mem_limit on every service bounds the observability stack (caps ~3-5x observed use).
+#
 # Reach the UIs via SSH tunnel:
 #   ssh -L 3002:127.0.0.1:3002 -L 3001:127.0.0.1:3001 emeal@<server>
 # Setup:  ln -s ../../.env.production .env  &&  docker compose -f docker-compose.monitoring.yml up -d
@@ -23,6 +25,7 @@ services:
     container_name: emeal_prometheus
     restart: unless-stopped
     logging: *default-logging
+    mem_limit: 512m
     network_mode: host
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -37,6 +40,7 @@ services:
     container_name: emeal_node_exporter
     restart: unless-stopped
     logging: *default-logging
+    mem_limit: 128m
     network_mode: host
     pid: host
     command:
@@ -50,6 +54,7 @@ services:
     container_name: emeal_cadvisor
     restart: unless-stopped
     logging: *default-logging
+    mem_limit: 512m
     privileged: true
     volumes:
       - /:/rootfs:ro
@@ -64,6 +69,7 @@ services:
     container_name: emeal_postgres_exporter
     restart: unless-stopped
     logging: *default-logging
+    mem_limit: 128m
     network_mode: host
     command: ['--web.listen-address=127.0.0.1:9187']   # loopback-only (UFW also blocks it)
     environment:
@@ -74,6 +80,7 @@ services:
     container_name: emeal_redis_exporter
     restart: unless-stopped
     logging: *default-logging
+    mem_limit: 128m
     network_mode: host
     environment:
       REDIS_ADDR: "redis://127.0.0.1:6379"
@@ -85,6 +92,7 @@ services:
     container_name: emeal_grafana
     restart: unless-stopped
     logging: *default-logging
+    mem_limit: 512m
     network_mode: host
     environment:
       GF_SECURITY_ADMIN_USER: "${GRAFANA_USER:-admin}"
@@ -100,6 +108,7 @@ services:
     container_name: emeal_uptime_kuma
     restart: unless-stopped
     logging: *default-logging
+    mem_limit: 384m
     volumes:
       - uptime_kuma_data:/app/data
     ports: ['127.0.0.1:3001:3001']
