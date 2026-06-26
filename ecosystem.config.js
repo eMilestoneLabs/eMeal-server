@@ -36,8 +36,10 @@ module.exports = {
       max_memory_restart: '512M',  // Restart instance if RSS exceeds 512MB
 
       // ── Logging ───────────────────────────────────────────────────────
-      output: './logs/pm2-out.log',
-      error: './logs/pm2-error.log',
+      // NOTE: PM2 reads `out_file`/`error_file` (NOT `output`/`error`). Using the
+      // correct keys ensures logs land here (and pm2-logrotate caps them at 100M/30d).
+      out_file: './logs/pm2-out.log',
+      error_file: './logs/pm2-error.log',
       log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
       merge_logs: true,        // Merge cluster instance logs into one file
       log_type: 'json',        // Structured JSON logging for log aggregators
@@ -85,18 +87,18 @@ module.exports = {
     },
   ],
 
-  // ── Deployment configuration (pm2 deploy) ──────────────────────────────
+  // ── Deployment ─────────────────────────────────────────────────────────
+  // NOTE: production releases are driven by deploy/deploy.sh on the server
+  // (pre-deploy backup → pull → build → migrate → reload → health + rollback),
+  // NOT `pm2 deploy`. Values below are kept only as accurate reference.
   deploy: {
     production: {
-      user: 'deploy',
-      host: ['<contabo-vps-ip>'],
-      ref: 'origin/main',
-      repo: 'git@github.com:<org>/emeal-server.git',
-      path: '/var/www/emeal-server',
-      'pre-deploy-local': '',
-      'post-deploy':
-        'npm ci --production=false && npx prisma migrate deploy && npm run build && pm2 reload ecosystem.config.js --env production',
-      'pre-setup': 'apt-get install -y git',
+      user: 'emeal',
+      host: ['5.189.153.205'],
+      ref: 'origin/eMeal-server',
+      repo: 'git@github.com:eMilestoneLabs/eMeal-server.git',
+      path: '/home/emeal/eMeal-server',
+      'post-deploy': 'bash deploy/deploy.sh',
       env: {
         NODE_ENV: 'production',
       },

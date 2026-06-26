@@ -1,0 +1,3 @@
+# Shell scripts MUST stay LF — a CRLF shebang line breaks execution on Ubuntu.
+*.sh   text eol=lf
+deploy/** text=auto eol=lf

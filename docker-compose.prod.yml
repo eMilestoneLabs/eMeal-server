@@ -1,13 +1,34 @@
 # Production data services for emilestone.com (Contabo VPS 10).
 # App itself runs via PM2 cluster (ecosystem.config.js) on the host, NOT here.
 # All ports bound to 127.0.0.1 — never exposed publicly; Nginx is the only ingress.
+#
+# Additive hardening (B-track, no behavioral change to a healthy stack):
+#   • logging caps  — prevent container logs filling the disk.
+#   • resource limits — generous BACKSTOPS well above observed usage
+#       (live: pg 77M / redis 12M / minio 213M) so a runaway can't starve PM2;
+#       they will not bite at current scale.
+#   • image pinning via ${*_IMAGE} env — pin MinIO to the EXACT running release
+#       for reproducibility. Capture it first:  docker exec emeal_minio minio --version
+#       then set MINIO_IMAGE=minio/minio:RELEASE.<that-tag> in .env. Default keeps
+#       today's behavior (latest) so nothing changes until you opt in.
+#   • REDIS_EXTRA_ARGS — optional opt-in (e.g. "--maxmemory 400mb --maxmemory-policy noeviction").
+#       Empty by default → Redis behavior is unchanged.
+# NOTE: applying this file (docker compose up -d) RECREATES the containers — a
+#       brief restart of PG/Redis/MinIO. Data persists in the named volumes.
 version: '3.9'
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: '20m'
+    max-file: '5'
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
     container_name: emeal_postgres
     restart: unless-stopped
+    logging: *default-logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -16,6 +37,10 @@ services:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - '127.0.0.1:5432:5432'
+    deploy:
+      resources:
+        limits:
+          memory: 2g
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
       interval: 10s
@@ -23,14 +48,19 @@ services:
       retries: 5
 
   redis:
-    image: redis:7.2-alpine
+    image: ${REDIS_IMAGE:-redis:7.2-alpine}
     container_name: emeal_redis
     restart: unless-stopped
-    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
+    logging: *default-logging
+    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes ${REDIS_EXTRA_ARGS:-}
     volumes:
       - redis_data:/data
     ports:
       - '127.0.0.1:6379:6379'
+    deploy:
+      resources:
+        limits:
+          memory: 768m
     healthcheck:
       test: ['CMD', 'redis-cli', '--no-auth-warning', '-a', '${REDIS_PASSWORD}', 'ping']
       interval: 10s
@@ -38,9 +68,10 @@ services:
       retries: 5
 
   minio:
-    image: minio/minio:latest
+    image: ${MINIO_IMAGE:-minio/minio:latest}
     container_name: emeal_minio
     restart: unless-stopped
+    logging: *default-logging
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
@@ -50,6 +81,10 @@ services:
     ports:
       - '127.0.0.1:9000:9000'   # S3 API  (proxied as cdn.emilestone.com)
       - '127.0.0.1:9001:9001'   # console (optional; tunnel over SSH to reach)
+    deploy:
+      resources:
+        limits:
+          memory: 1536m
     healthcheck:
       test: ['CMD', 'mc', 'ready', 'local']
       interval: 15s
