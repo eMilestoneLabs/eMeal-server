@@ -129,21 +129,23 @@ asserted **19 tables / 9 users / 4 orgs** → dropped it. Prod untouched. ✅ **
 | Meals (list) | 36 ms | 27–28 ms | — | ✅ |
 | Notices | 30 ms | 23–30 ms | — | ✅ |
 | Avatar / Meal image (CDN) | 168 ms cold | **72–97 ms** | < 100 ms | ✅ |
-| `/health` (full stack) | — | 26–103 ms | API p95 < 200 ms | ✅ (68 ms p95 @1000 VU prior) |
+| `/health` (full stack, single request) | — | 26–103 ms | API p95 < 200 ms | ✅ single-request; ⚠️ true p95 *under concurrent load* NOT validly measured — single-host k6 was per‑IP‑throttle‑bound (§14) |
 
-**Conclusion: the server side meets every SLO with large margin.** Cache confirmed live
-(`dashboard:* → 1`, `attendance:* → 1` keys appear after traffic; warm calls drop to ~13 ms).
+**Conclusion: the server side meets every SLO with large margin for single requests.** Cache confirmed
+live (`dashboard:* → 1`, `attendance:* → 1` keys appear after traffic; warm calls drop to ~13 ms).
+*Caveat:* a valid **p95‑under‑load** number still requires a distributed (multi‑IP / external) load test
+— see §14.
 
-### 7. "Feels slow" — root cause is NOT the server
-Because server‑local responses are 13–97 ms, the app feeling slow must come from **outside the
-backend**: (a) **Flutter client** (widget rebuilds, image decode, state management, first‑frame), or
-(b) **network distance** — these timings are measured *on the box*; a real user adds round‑trip
-latency. If users are in India and the VPS is in the EU, that RTT (~120–180 ms each way) dominates and
-turns a 13 ms response into a ~200–350 ms wall‑clock — *while the server did nothing wrong*.
-**Confirm with:** `curl -w '%{time_total}\n' -o /dev/null https://api.emilestone.com/api/v1/health`
-from a user's network, and check the VPS region. **Fixes if network‑bound:** put Cloudflare in front
-of the API (edge TLS termination near users) and/or host in a region closer to users. **Fixes if
-Flutter‑bound:** client‑side profiling (out of infra scope).
+### 7. "Feels slow" — root cause CONFIRMED (measured): network distance, NOT the server
+**Measured 2026‑06‑27:** the VPS is in **Lauterbourg, France** (Contabo, via `ipinfo.io`); users are in
+**India** (SSH client `49.37.36.78`, org timezone Asia/Kolkata). A `/health` call **from a user laptop in
+India** measured **total 1.96 s · tcp_connect 0.54 s · tls 1.55 s** — versus ~13 ms of server time. So
+~99% of the wall‑clock is the India↔France round‑trip (a fresh HTTPS connection pays it ~3–4×: TCP +
+TLS + request) — *while the server did nothing wrong*.
+**Fix (free, additive — not yet applied):** **Cloudflare (Mumbai edge)** in front of `cdn` first
+(caches the immutable images at the Indian edge → near‑instant) then `api` (TLS terminates near users).
+Alt: host closer to users (e.g. Contabo Singapore ~60–80 ms vs ~150 ms). This is a **proximity
+optimization, not an infrastructure defect** — the infra and backend are blameless for it.
 
 ---
 

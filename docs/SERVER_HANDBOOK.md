@@ -414,6 +414,18 @@ pm2 delete emeal-server && pm2 start ecosystem.config.js --env production
 curl -s http://localhost:3000/api/v1/health; echo     # expect status:ok
 ```
 
+## Clean‑slate reset before Play‑Store launch (⚠️ DESTRUCTIVE)
+`deploy/reset-for-launch.sh` erases ALL test data (accounts, orgs, groups, meals, attendance,
+events, notices, tokens) + all MinIO images + Redis, while **preserving the schema/migrations** —
+so the first real signup creates the first org from scratch. Run it **once, right before publishing**,
+never during normal operation. Safeguards: dry‑run by default · takes a verified backup first (refuses
+to wipe if it fails) · needs `--confirm` **and** a typed phrase.
+```bash
+bash deploy/reset-for-launch.sh            # PREVIEW — shows what would be erased, changes nothing
+bash deploy/reset-for-launch.sh --confirm  # EXECUTE — backs up, then wipes (type: ERASE ALL DATA FOR LAUNCH)
+```
+The erased test data is recoverable from `~/backups/db` (restore = PART 6).
+
 ## Known limitations (honest — what is NOT done)
 | Area | Status | Note |
 |---|---|---|
