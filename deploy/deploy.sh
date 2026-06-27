@@ -77,7 +77,10 @@ echo "==> 7/8 Apply migrations (prisma migrate deploy)"
 npx prisma migrate deploy || rollback "prisma migrate deploy"
 
 echo "==> 8/8 Reload app (PM2 cluster, zero-downtime)"
-pm2 reload ecosystem.config.js --update-env || pm2 start ecosystem.config.js --env production || rollback "pm2 reload"
+# --env production is REQUIRED: without it, pm2 reload falls back to the default
+# `env` block (NODE_ENV=development), which leaks _devOtp in responses + weakens
+# security. Keep production env on reload.
+pm2 reload ecosystem.config.js --update-env --env production || pm2 start ecosystem.config.js --env production || rollback "pm2 reload"
 pm2 save || true
 
 echo "==> Health check (retry up to 10x)"
