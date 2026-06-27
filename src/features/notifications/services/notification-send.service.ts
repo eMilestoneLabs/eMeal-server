@@ -1,25 +1,23 @@
 /**
- * notification-send.service.ts — B6 Phase
+ * notification-send.service.ts — FCM delivery.
  *
- * Handles actual FCM delivery (MVP: log-only; B7: firebase-admin send).
+ * Phase 2 (B7): real Firebase Cloud Messaging send. Activates automatically when
+ * FIREBASE_PROJECT_ID / FIREBASE_CLIENT_EMAIL / FIREBASE_PRIVATE_KEY are set;
+ * otherwise it degrades to MVP log-only (so dev/unconfigured envs still work).
  *
- * Current Flutter state:
- *   Flutter uses flutter_local_notifications for reminders.
- *   Backend push is NOT active. FCM tokens are stored but not used yet.
+ * firebase-admin is lazy-`require`d inside init so the project still builds before
+ * the package is installed — it is only needed at runtime once FCM is configured.
+ *   Setup: npm install firebase-admin  +  set the 3 FIREBASE_* env vars.
  *
- * B7 migration path:
- *   1. Install firebase-admin: npm install firebase-admin
- *   2. Set FIREBASE_CREDENTIALS_JSON env var
- *   3. Replace logNotification() call below with actualFcmSend()
- *   Zero changes to QueueService, workers, or payload shapes.
- *
- * Security:
- *   - fcmToken validated before send attempt
- *   - delivery failures are caught and logged — never thrown to caller
- *   - invalid token errors trigger token cleanup job
+ * Security / robustness:
+ *   - fcmToken validated before send.
+ *   - delivery failures are caught + returned (never thrown) — the queue job stays clean.
+ *   - invalid-token errors return an errorCode the worker uses to enqueue token cleanup.
+ *   - FCM `data` values are coerced to strings (FCM requirement).
  */
 
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import type { NotificationPayload } from './notification-payload.service';
 
 export interface NotificationDeliveryResult {
@@ -30,16 +28,49 @@ export interface NotificationDeliveryResult {
 }
 
 @Injectable()
-export class NotificationSendService {
+export class NotificationSendService implements OnModuleInit {
   private readonly logger = new Logger(NotificationSendService.name);
 
-  /** True when firebase-admin is initialized (B7 gate) */
-  private readonly fcmEnabled: boolean = false;
+  /** True once firebase-admin is initialized from env. */
+  private fcmEnabled = false;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private messaging: any = null;
+
+  constructor(private readonly config: ConfigService) {}
+
+  onModuleInit(): void {
+    const projectId = this.config.get<string>('FIREBASE_PROJECT_ID');
+    const clientEmail = this.config.get<string>('FIREBASE_CLIENT_EMAIL');
+    let privateKey = this.config.get<string>('FIREBASE_PRIVATE_KEY');
+
+    if (!projectId || !clientEmail || !privateKey) {
+      this.logger.log('FCM disabled (FIREBASE_* not set) — notifications are log-only');
+      return;
+    }
+    // env stores the key with literal "\n"; convert to real newlines
+    privateKey = privateKey.replace(/\\n/g, '\n');
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const admin = require('firebase-admin');
+      if (!admin.apps.length) {
+        admin.initializeApp({
+          credential: admin.credential.cert({ projectId, clientEmail, privateKey }),
+        });
+      }
+      this.messaging = admin.messaging();
+      this.fcmEnabled = true;
+      this.logger.log(`FCM enabled (project=${projectId})`);
+    } catch (err) {
+      this.logger.error(
+        `FCM init failed — falling back to log-only: ${(err as Error).message}`,
+      );
+      this.fcmEnabled = false;
+    }
+  }
 
   /**
    * Send a single notification to one FCM token.
-   * MVP: logs the payload instead of FCM-sending.
-   * B7: swap the log call for actualFcmSend().
    */
   async send(
     fcmToken: string,
@@ -49,59 +80,78 @@ export class NotificationSendService {
     if (!fcmToken) {
       return { success: false, errorCode: 'no_token', error: 'No FCM token registered' };
     }
-
     if (!this.fcmEnabled) {
-      // MVP: log only — Flutter handles local notifications client-side
       return this.logNotification(fcmToken, payload, userId);
     }
-
-    // B7: Replace below with:
-    // return this.actualFcmSend(fcmToken, payload, userId);
-    return this.logNotification(fcmToken, payload, userId);
+    return this.actualFcmSend(fcmToken, payload, userId);
   }
 
   /**
-   * Send to multiple tokens (batch) with concurrency capping.
-   * Returns per-token results — failed tokens are returned for cleanup.
-   *
-   * FIX: Added chunk-based concurrency limiter (BATCH_CHUNK_SIZE = 50).
-   * Without this, a group with 10,000 members would fire 10,000 simultaneous
-   * HTTP requests when FCM is enabled in B8, overwhelming the process and Firebase rate limits.
-   * Chunks of 50 are processed sequentially — each chunk is fully settled before the next begins.
+   * Send to multiple tokens (batch) with concurrency capping (chunks of 50) so a
+   * large group can't fire thousands of simultaneous FCM requests.
    */
   async sendBatch(
     recipients: Array<{ userId: string; fcmToken: string }>,
     payload: NotificationPayload,
   ): Promise<{ successful: string[]; failed: string[] }> {
-    const BATCH_CHUNK_SIZE = 50; // max concurrent FCM requests per flush
-
+    const BATCH_CHUNK_SIZE = 50;
     const successful: string[] = [];
     const failed: string[] = [];
 
-    // Process in chunks to cap concurrent outgoing connections
     for (let i = 0; i < recipients.length; i += BATCH_CHUNK_SIZE) {
       const chunk = recipients.slice(i, i + BATCH_CHUNK_SIZE);
-
       const results = await Promise.allSettled(
         chunk.map((r) => this.send(r.fcmToken, payload, r.userId)),
       );
-
       results.forEach((result, j) => {
         if (result.status === 'fulfilled' && result.value.success) {
           successful.push(chunk[j].userId);
         } else {
           failed.push(chunk[j].userId);
-          this.logger.warn(
-            `[NotificationSend] Batch send failed for user=${chunk[j].userId}`,
-          );
+          this.logger.warn(`[NotificationSend] Batch send failed for user=${chunk[j].userId}`);
         }
       });
     }
-
     return { successful, failed };
   }
 
-  // ── Private: MVP log-only path ─────────────────────────────────────────────
+  // ── Real FCM send (Phase 2) ──────────────────────────────────────────────────
+
+  private async actualFcmSend(
+    fcmToken: string,
+    payload: NotificationPayload,
+    userId: string,
+  ): Promise<NotificationDeliveryResult> {
+    try {
+      const message = {
+        token: fcmToken,
+        notification: { title: payload.title, body: payload.body },
+        data: this.stringifyData({ route: payload.route, ...(payload.data ?? {}) }),
+        android: { priority: 'high' as const },
+        apns: { headers: { 'apns-priority': '10' } },
+      };
+      const messageId: string = await this.messaging.send(message);
+      return { success: true, messageId };
+    } catch (err) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const e = err as any;
+      const errorCode = e?.errorInfo?.code ?? e?.code ?? 'unknown';
+      // Invalid/expired token → worker enqueues cleanup based on errorCode
+      this.logger.warn(`[FCM] send failed user=${userId} code=${errorCode}`);
+      return { success: false, errorCode, error: e?.message };
+    }
+  }
+
+  /** FCM `data` payload values MUST be strings. */
+  private stringifyData(obj: Record<string, unknown>): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (v !== undefined && v !== null) out[k] = String(v);
+    }
+    return out;
+  }
+
+  // ── MVP log-only path (used when FCM not configured) ─────────────────────────
 
   private logNotification(
     fcmToken: string,
@@ -109,49 +159,9 @@ export class NotificationSendService {
     userId: string,
   ): NotificationDeliveryResult {
     const maskedToken = `${fcmToken.slice(0, 8)}...${fcmToken.slice(-4)}`;
-
     this.logger.log(
-      `[FCM:MVP-LOG] userId=${userId} token=${maskedToken} ` +
-      `title="${payload.title}" route="${payload.route}"`,
+      `[FCM:LOG] userId=${userId} token=${maskedToken} title="${payload.title}" route="${payload.route}"`,
     );
-
-    this.logger.debug(
-      `[FCM:MVP-LOG] Full payload: ${JSON.stringify({
-        to: maskedToken,
-        notification: { title: payload.title, body: payload.body },
-        data: { route: payload.route, ...(payload.data ?? {}) },
-      })}`,
-    );
-
-    // Return success so the queue job completes cleanly
-    return { success: true, messageId: `mvp-log-${Date.now()}` };
+    return { success: true, messageId: `log-${Date.now()}` };
   }
-
-  // ── Private: B7 actual FCM send (replace logNotification call above) ────────
-
-  /**
-   * Actual FCM send via firebase-admin.
-   * Uncomment and call this in B7.
-   *
-   * private async actualFcmSend(
-   *   fcmToken: string,
-   *   payload: NotificationPayload,
-   *   userId: string,
-   * ): Promise<NotificationDeliveryResult> {
-   *   try {
-   *     const admin = require('firebase-admin');
-   *     const message = {
-   *       token: fcmToken,
-   *       notification: { title: payload.title, body: payload.body },
-   *       data: { route: payload.route, ...(payload.data ?? {}) },
-   *     };
-   *     const messageId = await admin.messaging().send(message);
-   *     return { success: true, messageId };
-   *   } catch (err: any) {
-   *     const errorCode = err.errorInfo?.code ?? 'unknown';
-   *     // Invalid token → signal worker to enqueue cleanup job
-   *     return { success: false, errorCode, error: err.message };
-   *   }
-   * }
-   */
 }

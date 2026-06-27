@@ -11,6 +11,7 @@
  * Exported so WorkersModule can inject NotificationSendService.
  */
 import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
 import { QueueModule } from '../../queue/queue.module';
 import { NotificationsController } from './notifications.controller';
 import { NotificationsService } from './notifications.service';
@@ -18,7 +19,7 @@ import { NotificationPayloadService } from './services/notification-payload.serv
 import { NotificationSendService } from './services/notification-send.service';
 
 @Module({
-  imports: [QueueModule],
+  imports: [QueueModule, ConfigModule],
   controllers: [NotificationsController],
   providers: [NotificationsService, NotificationPayloadService, NotificationSendService],
   exports: [NotificationsService, NotificationPayloadService, NotificationSendService],

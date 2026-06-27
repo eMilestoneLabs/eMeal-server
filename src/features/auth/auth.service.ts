@@ -21,6 +21,8 @@ import { UserEntity } from '../users/entities/user.entity';
 import { StudentSignupDto, AdminSignupDto, EventAdminSignupDto } from './dto/signup.dto';
 import { LoginDto, OtpRequestDto, OtpVerifyDto } from './dto/login.dto';
 import { PrismaService } from '../../prisma/prisma.service';
+import { MailerService } from '../../shared/mailer/mailer.service';
+import { SmsService } from '../../shared/sms/sms.service';
 
 @Injectable()
 export class AuthService {
@@ -34,6 +36,8 @@ export class AuthService {
     private readonly configService: ConfigService,
     private readonly redis: RedisService,
     private readonly audit: AuditService,
+    private readonly mailer: MailerService,
+    private readonly sms: SmsService,
   ) {}
 
   // ── SIGNUP ────────────────────────────────────────────────────────────────
@@ -295,6 +299,27 @@ export class AuthService {
       expiresAt,
       userId: user?.id,
     });
+
+    // Delivery (Phase 1): email identifiers get the code emailed (best-effort —
+    // the OTP is already stored, so a mail failure must not break the flow). Phone
+    // identifiers fall through to Phase 3 (SMS) — see docs/NOTIFICATION_OTP_PLAN.md.
+    const isEmail = dto.identifier.includes('@');
+    if (isEmail) {
+      const sent = await this.mailer.sendOtp(dto.identifier, otp, dto.purpose ?? 'login');
+      if (!sent) {
+        this.logger.warn(
+          `OTP email not delivered for ${dto.identifier} (SMTP disabled or send failed) — code still valid`,
+        );
+      }
+    } else {
+      // Phone identifier → SMS OTP (Phase 3). Disabled until an SMS provider is set.
+      const sent = await this.sms.sendOtp(dto.identifier, otp);
+      if (!sent) {
+        this.logger.warn(
+          `OTP SMS not delivered for ${dto.identifier} (SMS disabled or send failed) — code still valid`,
+        );
+      }
+    }
 
     if (process.env.NODE_ENV === 'development') {
       this.logger.debug(

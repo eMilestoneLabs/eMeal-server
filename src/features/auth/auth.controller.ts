@@ -107,8 +107,13 @@ export class AuthController {
         statusCode: 422,
       });
     }
-    // Reuses OTP request flow — sends OTP to identifier for password reset
-    return this.authService.requestOtp({ identifier: body.identifier }, req.requestId);
+    // Reuses OTP request flow — delivers the code via email (or SMS for a phone
+    // identifier). purpose:'reset' makes the email read "password reset code" and
+    // must match the verify step in resetPassword below.
+    return this.authService.requestOtp(
+      { identifier: body.identifier, purpose: 'reset' },
+      req.requestId,
+    );
   }
 
   @Public()
@@ -131,7 +136,7 @@ export class AuthController {
     }
     // Verify OTP, then update password
     const verified = await this.authService.verifyOtp(
-      { identifier: body.identifier, otp: body.otp },
+      { identifier: body.identifier, otp: body.otp, purpose: 'reset' },
       { requestId: req.requestId },
     );
     if ('accessToken' in verified) {
