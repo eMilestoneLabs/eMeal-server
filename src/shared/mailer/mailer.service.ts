@@ -28,11 +28,14 @@ export class MailerService {
   private readonly authUser: string;
   private readonly from: string;
   private readonly replyTo?: string;
+  /** Public-facing brand shown in emails (Play-Store app name). Internal code stays "eMeal". */
+  private readonly brand: string;
 
   constructor(private readonly config: ConfigService) {
     this.authUser = this.config.get<string>('SMTP_USER', '') ?? '';
     this.from = this.config.get<string>('MAIL_FROM') || this.authUser;
     this.replyTo = this.config.get<string>('MAIL_REPLY_TO') || undefined;
+    this.brand = this.config.get<string>('MAIL_BRAND') || 'MealAttend';
   }
 
   private getTransport(): nodemailer.Transporter | null {
@@ -86,14 +89,14 @@ export class MailerService {
   /** OTP / verification / password-reset code email. */
   async sendOtp(to: string, code: string, purpose = 'verification'): Promise<boolean> {
     const label = purpose === 'reset' ? 'password reset' : purpose === 'signup' ? 'sign-up' : 'login';
-    const subject = `Your eMeal ${label} code: ${code}`;
+    const subject = `Your ${this.brand} ${label} code: ${code}`;
     const text =
-      `Your eMeal ${label} code is ${code}.\n` +
+      `Your ${this.brand} ${label} code is ${code}.\n` +
       `It expires in 10 minutes.\n\n` +
       `If you didn't request this, you can safely ignore this email.`;
     const html =
       `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:480px">` +
-      `<p>Your eMeal ${label} code is:</p>` +
+      `<p>Your ${this.brand} ${label} code is:</p>` +
       `<p style="font-size:28px;font-weight:700;letter-spacing:4px;margin:8px 0">${code}</p>` +
       `<p style="color:#555">It expires in 10 minutes.</p>` +
       `<p style="color:#999;font-size:12px">If you didn't request this, you can safely ignore this email.</p>` +

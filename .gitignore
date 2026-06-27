@@ -4,6 +4,10 @@ dist/
 .env.local
 .env.*.local
 .env.production
+# timestamped env backups created by rotate-secrets.sh / manual edits — never commit,
+# and keep them from tripping deploy.sh's clean-tree gate
+.env*.bak.*
+.env.bak.*
 prisma/migrations/*.sql
 logs/
 *.log
