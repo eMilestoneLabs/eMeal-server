@@ -15,7 +15,7 @@
 #       Empty by default → Redis behavior is unchanged.
 # NOTE: applying this file (docker compose up -d) RECREATES the containers — a
 #       brief restart of PG/Redis/MinIO. Data persists in the named volumes.
-version: '3.9'
+# (no top-level `version:` — it is obsolete in Compose v2 and only prints a warning.)
 
 x-logging: &default-logging
   driver: json-file
