@@ -243,6 +243,19 @@ commit, rebuilds, reloads, and exits non-zero. Logs to `deploy/deploy.log`.
 **If a deploy also changes `.env` secrets** → after deploy run:
 `pm2 delete emeal-server && pm2 start ecosystem.config.js --env production` (PM2 caches env).
 
+> **deploy.sh update (2026-06 — the ONE approved frozen-file change):** step 8 now reloads
+> with `pm2 reload ecosystem.config.js --update-env --env production`. The `--env production`
+> flag is **required** — without it `pm2 reload` falls back to ecosystem's default `env` block
+> (`NODE_ENV=development`), which leaked the `_devOtp` field in OTP responses and weakened
+> security. This is an **additive one-line fix** (a flag), no architecture change. See the
+> comment block at `deploy/deploy.sh` step 8. **Verify after any deploy:**
+> ```bash
+> pm2 env 0 | grep NODE_ENV          # must print: NODE_ENV: production
+> curl -s -X POST https://api.emilestone.com/api/v1/auth/otp/request \
+>   -H 'Content-Type: application/json' \
+>   -d '{"identifier":"you@example.com","purpose":"login"}'; echo   # must NOT contain _devOtp
+> ```
+
 **Manual decision guide** (when not using deploy.sh):
 | Changed | Run |
 |---|---|
@@ -439,3 +452,147 @@ The erased test data is recoverable from `~/backups/db` (restore = PART 6).
 ## Two watch-items (not breaks)
 - **Redis (cache + queues + tokens) under a 768 MB cap, no `maxmemory` policy** — fine at current scale; watch `redis_memory_used_bytes` (redis-exporter). Do NOT add eviction (would drop queue/token keys).
 - **Prisma pool scales with PM2 workers** — `instances: 'max'` + a bigger VPS = more workers × pool. Keep `workers × connection_limit < 100` (or PgBouncer).
+
+---
+
+# PART 13 — NOTIFICATIONS & OTP (email · push · SMS)
+
+Three delivery channels, **all code-complete**. Each degrades gracefully: if its env is
+blank the channel is simply **disabled** — the OTP is still generated, stored, and verified,
+it just isn't *delivered* by that channel. **Activating any channel is ENV-ONLY — no code
+change, no rebuild.** Add keys to `.env.production`, then restart fresh (see §13.5).
+
+| Channel | Code | Live now | Provider | Activate by |
+|---|---|---|---|---|
+| **Email OTP** (login / reset / verify) | ✅ | ✅ verified (inbox) | Hostinger SMTP | `SMTP_*` + `MAIL_*` (set) |
+| **Push notifications** (FCM, backend→device) | ✅ | ✅ enabled | Firebase Cloud Messaging | `FIREBASE_*` (set) |
+| **SMS OTP** (phone) | ✅ | ⏳ disabled | MSG91 (paid) | `SMS_*` (unset — optional) |
+
+> **Branding:** emails/SMS say **“MealAttend”** (the Play-Store app name), driven by
+> `MAIL_BRAND`. **Internally — code, git, server, PM2 — the project stays “eMeal”.** Changing
+> the public name is one env var (`MAIL_BRAND`), zero code.
+
+## 13.1 What lives in code (the additive implementation)
+| File | Role |
+|---|---|
+| `src/shared/mailer/mailer.service.ts` + `mailer.module.ts` | nodemailer SMTP. Best-effort `send()` (never throws). Alias-safe: header `From=MAIL_FROM`, envelope/`sender=SMTP_USER`. `sendOtp()` builds the branded code email |
+| `src/shared/sms/sms.service.ts` + `sms.module.ts` | MSG91-default SMS OTP via global `fetch`. Env-gated — no-ops until `SMS_API_URL`/`SMS_API_KEY` set |
+| `src/features/notifications/services/notification-send.service.ts` | Real FCM via `firebase-admin` (lazy). `onModuleInit` reads `FIREBASE_*`; `fcmEnabled=true` when present, else log-only |
+| `src/features/auth/auth.service.ts` | `requestOtp` emails OTP for email identifiers, SMS for phone (both best-effort). `_devOtp` returned **only** when `NODE_ENV==='development'` |
+| `src/features/auth/auth.controller.ts` | forgot-password → `requestOtp({purpose:'reset'})`; reset-password → `verifyOtp({purpose:'reset'})` |
+
+Endpoints: `POST /api/v1/auth/otp/request` · `POST /api/v1/auth/otp/verify` ·
+forgot/reset password · `POST /api/v1/auth/fcm-token` (device registers its FCM token).
+
+## 13.2 EMAIL OTP — Hostinger SMTP
+**Accounts:** a Hostinger mailbox (`admin@emilestone.com`) that can send via
+`smtp.hostinger.com:465` (SSL). The public `no-reply@emilestone.com` is currently an **alias**
+of that mailbox — we authenticate as `admin@` but mail shows **From: no-reply@**. DNS SPF/DKIM/
+DMARC already set for `emilestone.com`.
+
+**Env (`.env.production`):**
+```bash
+SMTP_HOST=smtp.hostinger.com
+SMTP_PORT=465
+SMTP_SECURE=true
+SMTP_USER=admin@emilestone.com          # the REAL mailbox you authenticate as
+SMTP_PASS=<mailbox password>            # NEVER commit / paste in chat
+MAIL_BRAND=MealAttend                    # public app name in the email
+MAIL_FROM="MealAttend <no-reply@emilestone.com>"   # what users see
+MAIL_REPLY_TO=admin@emilestone.com
+```
+**Alias → dedicated mailbox migration (later, after ~10k installs) is ENV-ONLY:** create a real
+`no-reply@` mailbox, then change `SMTP_USER`/`SMTP_PASS` to it (drop `MAIL_FROM` if it now equals
+the auth user). No code change — that separation is by design.
+
+**Test SMTP credentials in isolation** before trusting a deploy:
+```bash
+node -e 'const n=require("nodemailer");n.createTransport({host:"smtp.hostinger.com",port:465,secure:true,auth:{user:process.env.SMTP_USER,pass:process.env.SMTP_PASS}}).verify().then(()=>console.log("✅ SMTP AUTH OK")).catch(e=>console.log("❌",e.message))'
+```
+
+## 13.3 PUSH — Firebase Cloud Messaging (FCM)
+**Accounts:** a Firebase project (`emeal-144d4`, project number/`FIREBASE_PROJECT_ID`).
+Generate a **service-account JSON** (Firebase console → Project settings → Service accounts →
+Generate new private key). FCM is **free, unlimited** for push.
+
+**Env (`.env.production`)** — three values pulled from the service-account JSON:
+```bash
+FIREBASE_PROJECT_ID=emeal-144d4
+FIREBASE_CLIENT_EMAIL=firebase-adminsdk-xxxxx@emeal-144d4.iam.gserviceaccount.com
+FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nMIIE...\n-----END PRIVATE KEY-----\n"
+```
+> The private key must keep its `\n` escapes (the code converts `\\n`→real newlines). Wrap it in
+> double quotes. **Never paste the full JSON / private key into chat** — it's a credential.
+> Safest way to add it on the server: open `.env.production` with `nano` and paste the one line.
+
+**Backend = SEND side only.** To make phones actually *receive* push, the **Flutter app** must:
+add `google-services.json` (Android) / `GoogleService-Info.plist` (iOS) for project `emeal-144d4`,
+request notification permission, and `POST /api/v1/auth/fcm-token` with the device token. That's
+an app-side task, not backend.
+
+**Verify FCM is enabled on the workers:**
+```bash
+pm2 logs emeal-server --lines 200 --nostream | grep -i "fcm\|firebase"   # expect "FCM enabled"
+```
+
+## 13.4 SMS OTP — MSG91 (optional, paid)
+There is **no free production SMS in India** (DLT-regulated). Code is ready; leave blank to keep
+SMS disabled. To activate later, **env-only**:
+```bash
+SMS_PROVIDER=msg91
+SMS_API_URL=https://control.msg91.com/api/v5/flow/   # from MSG91 dashboard
+SMS_API_KEY=<msg91 authkey>
+SMS_SENDER_ID=<6-char DLT sender id>
+SMS_TEMPLATE_ID=<DLT-approved template id>
+SMS_COUNTRY_CODE=91
+```
+Alternative with a free tier: **Firebase Phone Auth** (handled Flutter-side, bypasses the backend
+SMS path entirely). Either way, no backend code change.
+
+## 13.5 Activating / changing any channel (the ENV-ONLY procedure)
+Env changes need a **fresh PM2 start** — `pm2 reload` *caches* the old env:
+```bash
+cd ~/eMeal-server
+cp -L .env.production .env.production.bak.$(date +%s)   # backup (gitignored, won't trip deploy.sh)
+nano .env.production                                     # add/edit the channel's keys
+pm2 delete emeal-server && pm2 start ecosystem.config.js --env production
+pm2 save
+curl -s http://localhost:3000/api/v1/health; echo        # expect status:ok
+```
+
+## 13.6 Test commands
+```bash
+# Email OTP (lands in inbox as "Your MealAttend login code: ……", From: MealAttend <no-reply@…>)
+curl -s -X POST https://api.emilestone.com/api/v1/auth/otp/request \
+  -H 'Content-Type: application/json' \
+  -d '{"identifier":"you@example.com","purpose":"login"}'; echo
+# Expect: {"message":"OTP sent successfully","expiresIn":600}   — and NO _devOtp (proves prod mode)
+
+# Verify the code the user received
+curl -s -X POST https://api.emilestone.com/api/v1/auth/otp/verify \
+  -H 'Content-Type: application/json' \
+  -d '{"identifier":"you@example.com","purpose":"login","code":"123456"}'; echo
+
+# Forgot-password (sends a reset-code email)
+curl -s -X POST https://api.emilestone.com/api/v1/auth/forgot-password \
+  -H 'Content-Type: application/json' -d '{"identifier":"you@example.com"}'; echo
+```
+`purpose` ∈ `login` · `signup` · `reset` (changes the email subject/label). Phone identifiers go
+to SMS once `SMS_*` is set; email identifiers go to SMTP.
+
+## 13.7 Troubleshooting (lessons learned)
+| Symptom | Cause → Fix |
+|---|---|
+| OTP response contains `_devOtp` | App is in **dev mode**. `pm2 env 0 \| grep NODE_ENV` → must be `production`. Caused by `pm2 reload` without `--env production` — already fixed in deploy.sh (PART 3 note) |
+| SMTP `535 auth failed` | **Wrong mailbox password** (not an IP/Cloudflare issue — Hostinger has no SMTP IP-whitelist). Reset it in Hostinger → confirm via webmail → re-run the §13.2 `verify()` snippet |
+| Email "sent" but never arrives | Check SPF/DKIM/DMARC for `emilestone.com`; check spam; confirm `MAIL_FROM` domain matches the authenticated domain |
+| Env edit didn't take effect | You used `pm2 reload` (caches env). Use `pm2 delete && pm2 start --env production` (§13.5) |
+| Push not received on phone | Backend send is fine (logs show FCM enabled). Missing **Flutter** config / unregistered FCM token — app-side (§13.3) |
+| SMS never sends | Expected until `SMS_*` env is set (paid MSG91). Not a bug |
+
+## 13.8 Freeze compliance
+None of this touched frozen infra (compose / nginx / postgres / redis / minio / monitoring /
+backup / security / setup-vps.sh / backup.sh). All channels are **new app-layer modules**
+(`shared/mailer`, `shared/sms`, `notifications`) + env keys. The **only** frozen-file edit in the
+whole effort is the single approved `deploy.sh` `--env production` line (PART 3). Everything else
+is purely additive.
