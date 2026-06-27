@@ -71,8 +71,21 @@ else
   run "printf '%s\n' '* soft nofile ${NOFILE_LIMIT}' '* hard nofile ${NOFILE_LIMIT}' 'root soft nofile ${NOFILE_LIMIT}' 'root hard nofile ${NOFILE_LIMIT}' | $SUDO tee ${LIMITS_FILE} >/dev/null"
   run "printf '%s\n' 'fs.file-max=2097152' | $SUDO tee /etc/sysctl.d/99-emeal-limits.conf >/dev/null"
   run "$SUDO sysctl -p /etc/sysctl.d/99-emeal-limits.conf || true"
-  log "NOTE: PM2 process must be restarted to inherit the new limit (deploy.sh reload, or 'pm2 update')."
-  log "NOTE: also raise the systemd unit limit:  sudo systemctl edit pm2-\$USER  → add  [Service]\\nLimitNOFILE=${NOFILE_LIMIT}"
+  log "limits.d set (applies to login shells / new sessions)."
+fi
+# CRITICAL: /etc/security/limits.d does NOT apply to systemd-managed services —
+# PM2 runs under systemd (pm2-<user>.service), which uses the UNIT's LimitNOFILE.
+# Without this drop-in the WS server keeps systemd's default (~1024 soft fds).
+# Idempotent: writes a drop-in + daemon-reload; takes effect on next pm2 restart.
+PM2_SVC="pm2-$(id -un)"
+PM2_DROPIN_DIR="/etc/systemd/system/${PM2_SVC}.service.d"
+if [ -f "${PM2_DROPIN_DIR}/nofile.conf" ] && grep -q "LimitNOFILE=${NOFILE_LIMIT}" "${PM2_DROPIN_DIR}/nofile.conf" 2>/dev/null; then
+  log "PM2 systemd LimitNOFILE already set — skipping"
+else
+  run "$SUDO mkdir -p ${PM2_DROPIN_DIR}"
+  run "printf '%s\n' '[Service]' 'LimitNOFILE=${NOFILE_LIMIT}' | $SUDO tee ${PM2_DROPIN_DIR}/nofile.conf >/dev/null"
+  run "$SUDO systemctl daemon-reload || true"
+  log "PM2 systemd unit ${PM2_SVC} LimitNOFILE=${NOFILE_LIMIT} (restart pm2 to apply: 'pm2 kill && pm2 resurrect' or redeploy)."
 fi
 
 # ── 4. fail2ban ──────────────────────────────────────────────────────────────

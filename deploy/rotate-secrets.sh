@@ -32,7 +32,16 @@ OLD_PG="$(grep -E '^POSTGRES_PASSWORD=' "$ENVFILE" | cut -d= -f2-)"
 BAK="$ENVFILE.bak.$(date +%s)"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
-set_kv() { sed -i "s|^$1=.*|$1=$2|" "$ENVFILE"; }   # line-anchored; hex values = sed-safe
+# upsert KEY=VALUE — replace the line in place, or APPEND it if absent. Without the
+# append branch a missing key (e.g. BULL_BOARD_SECRET) would be silently skipped and
+# the rotation would "succeed" while leaving that secret unrotated/unset.
+set_kv() {   # $1=key $2=value (hex values are sed-safe)
+  if grep -q "^$1=" "$ENVFILE"; then
+    sed -i "s|^$1=.*|$1=$2|" "$ENVFILE"
+  else
+    printf '%s=%s\n' "$1" "$2" >> "$ENVFILE"
+  fi
+}
 
 echo "==> 1/9 Backup current env  ->  $BAK"
 cp -L "$ENVFILE" "$BAK" || die "could not back up env"

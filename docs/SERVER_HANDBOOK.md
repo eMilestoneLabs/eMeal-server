@@ -76,11 +76,26 @@ use). See `docs/LICENSES.md`.
 
 ---
 
-# PART 2 — BRAND-NEW SERVER MIGRATION (one script, fully automated)
+# PART 2 — BRAND-NEW SERVER MIGRATION (~95% one script)
 
-> Goal: a blank Ubuntu VPS → production-ready with **`bash deploy/setup-vps.sh`** +
-> filling `.env` + issuing SSL. No manual downloads — the script installs everything
-> (Docker, Node, PM2, rclone, fail2ban, etc.) from official sources.
+> Goal: a blank Ubuntu VPS → production-ready, driven almost entirely by
+> **`bash deploy/setup-vps.sh`**. No manual downloads — the script installs everything
+> (Docker, Node, PM2, rclone, fail2ban, Nginx, Certbot, etc.) from official sources,
+> AND auto-completes the data services, the MinIO bucket, and SSL once their
+> prerequisites exist.
+>
+> **The pattern is RE-RUN, not one-shot.** The script is idempotent, so:
+> 1. **Run it once** → installs + hardens everything; skips data/bucket/SSL (no `.env`/DNS yet).
+> 2. **You do the irreducible ~5%** (the only things a script *shouldn't* own — they need
+>    your credentials or one-time human consent): point **DNS**, fill the **`.env`** secret
+>    values, do `rclone config` (Google OAuth consent).
+> 3. **Re-run `setup-vps.sh`** → now it starts the data services, creates the MinIO bucket,
+>    and issues SSL automatically (the SSL block only fires once DNS resolves to this host).
+>
+> Why not 100%? DNS lives at your registrar, the secret values exist only in your vault,
+> and Google's OAuth consent needs a human click — putting those on the box would defeat
+> the security they provide (the "secret-zero" problem). Everything mechanical IS automated;
+> everything repeatable (deploy, rotate, backup, alert) is already one command.
 
 ### STEP 0 — provision + deploy user
 ```bash
@@ -128,7 +143,9 @@ docker compose -f docker-compose.prod.yml up -d
 docker compose -f docker-compose.prod.yml ps       # all (healthy)
 ```
 
-### STEP 6 — MinIO bucket (public-read for images)
+### STEP 6 — MinIO bucket (public-read for images) — **AUTOMATED**
+`setup-vps.sh` (step 10/14) creates the bucket + sets public-read automatically once
+`.env` is filled and MinIO is up. Just re-run `setup-vps.sh`. Manual fallback if needed:
 ```bash
 source ~/eMeal-server/.env
 docker run --rm --network host -e MINIO_ACCESS_KEY -e MINIO_SECRET_KEY -e MINIO_BUCKET \
@@ -146,7 +163,11 @@ pm2 startup systemd -u emeal --hp /home/emeal     # run the printed sudo line on
 curl -s http://localhost:3000/api/v1/health; echo  # {status:ok,...}
 ```
 
-### STEP 8 — Nginx + SSL
+### STEP 8 — Nginx + SSL — **AUTOMATED**
+`setup-vps.sh` installs the Nginx vhost (step 11/14) and issues SSL non-interactively
+(step 12/14) **as soon as `api.emilestone.com` resolves to this host** — so once DNS is
+set, just re-run `setup-vps.sh`. Override domains/email with `API_DOMAIN`, `CDN_DOMAIN`,
+`CERTBOT_EMAIL`. Manual fallback (e.g. DNS via a different provider):
 ```bash
 sudo cp nginx/emilestone.conf /etc/nginx/sites-available/emilestone
 sudo ln -sf /etc/nginx/sites-available/emilestone /etc/nginx/sites-enabled/
@@ -334,3 +355,39 @@ echo "── PUBLIC PORTS (only 22/80/443) ──"; sudo ss -tlnp | grep -vE '12
 - Never bump Redis past 7.2 without a license review (BSD → SSPL).
 - For `.env` changes use `pm2 delete && pm2 start`, not `pm2 reload`.
 - Never rotate `BACKUP_GPG_PASSPHRASE` casually (orphans old backups).
+
+---
+
+# PART 12 — ADDITIVE OPS TOOLS & KNOWN LIMITATIONS
+
+## New additive infra tooling (all optional, none touch app code)
+| Task | Command | What it does |
+|---|---|---|
+| **Slow-query visibility** | `bash deploy/enable-pg-stat-statements.sh` | recreates PG with `pg_stat_statements` preloaded + creates the extension. Report later: `…enable-pg-stat-statements.sh report` (top-20 slowest statements) |
+| **Storage orphan-sweep** | `bash deploy/minio-reconcile.sh` (dry-run) → `--apply` | lists/deletes bucket objects no DB row references AND older than `ORPHAN_MIN_AGE_DAYS` (7). Aborts if the DB ref list is empty (never wipes the bucket on a query error). Suggested monthly cron |
+| **Authenticated load test** | `… grafana/k6 run - < deploy/loadtest-auth.js` (see file header) | logs in, measures Dashboard/Analytics p95 vs SLOs. Run from a **separate** box for a trustworthy 5000-VU number |
+| **Pin DB pool** | edit `DATABASE_URL` in `.env.production` | append `&connection_limit=10&pool_timeout=20`, then `pm2 delete emeal-server && pm2 start ecosystem.config.js --env production` |
+
+Apply the `connection_limit` to the live server:
+```bash
+cp -L ~/eMeal-server/.env.production ~/eMeal-server/.env.production.bak.$(date +%s)
+# only if not already present:
+grep -q 'connection_limit=' ~/eMeal-server/.env.production || \
+  sed -i 's|\(^DATABASE_URL=.*emeal_db?schema=public\)|\1\&connection_limit=10\&pool_timeout=20|' ~/eMeal-server/.env.production
+pm2 delete emeal-server && pm2 start ecosystem.config.js --env production
+curl -s http://localhost:3000/api/v1/health; echo     # expect status:ok
+```
+
+## Known limitations (honest — what is NOT done)
+| Area | Status | Note |
+|---|---|---|
+| Weekly-Menu / Billing caching | not done | app-layer (frozen) — would need backend change |
+| App `/metrics` + cache-hit counter + tracing | not done | app-layer (frozen) |
+| 5000-VU + per-endpoint load proof | tooling ready | needs an external load generator (`loadtest-auth.js`) |
+| At-rest disk encryption (DB/MinIO volumes) | not done | LUKS if compliance requires; data is loopback + access-controlled |
+| App-level multi-tenant pen-test | not done | isolation is app-enforced + tested, not RLS |
+| High availability | single VPS (SPOF) | cost choice; auto-recovers on reboot; HA path in PART 1/SCALABILITY |
+
+## Two watch-items (not breaks)
+- **Redis (cache + queues + tokens) under a 768 MB cap, no `maxmemory` policy** — fine at current scale; watch `redis_memory_used_bytes` (redis-exporter). Do NOT add eviction (would drop queue/token keys).
+- **Prisma pool scales with PM2 workers** — `instances: 'max'` + a bigger VPS = more workers × pool. Keep `workers × connection_limit < 100` (or PgBouncer).

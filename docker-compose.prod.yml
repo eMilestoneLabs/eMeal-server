@@ -29,6 +29,18 @@ services:
     container_name: emeal_postgres
     restart: unless-stopped
     logging: *default-logging
+    # Additive observability: preload pg_stat_statements so slow queries can be
+    # inspected (negligible overhead, standard in production). Activate the view
+    # once with: CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+    # (deploy/enable-pg-stat-statements.sh does the recreate + extension + verify).
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_preload_libraries=pg_stat_statements"
+      - "-c"
+      - "pg_stat_statements.track=all"
+      - "-c"
+      - "pg_stat_statements.max=10000"
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
