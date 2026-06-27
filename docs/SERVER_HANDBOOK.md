@@ -30,6 +30,42 @@
  Alerts:  cron */5 → healthcheck-alert.sh → Telegram + Email on failure/cert-expiry
 ```
 
+### Verified connection map (every link tested live — 2026-06-27)
+```
+                        ┌──────────────────────────┐
+                        │       Flutter app        │   phone / web client
+                        └─────────────┬────────────┘
+                       HTTPS / WSS :443 │  ✓ login OK · 264-char JWT
+                        ┌─────────────▼────────────┐
+                        │    Nginx · TLS 1.2/1.3    │  sole ingress · HSTS
+                        │    ✓ TLS1.0 refused       │  server_tokens off
+                        └────┬─────────────────┬────┘
+      api.emilestone.com →   │                 │   → cdn.emilestone.com
+      ✓ endpoints 200        │                 │     ✓ image = 200 (Nginx bucket
+      13–196ms (warm 13ms)   │                 │       injection fix)
+                        ┌─────▼───────────┐     │
+                        │ PM2 · NestJS ×4 │     │
+                        │ 127.0.0.1:3000  │     │
+                        │ ✓ status:ok     │     │
+                        │   trust proxy   │     │
+                        └──┬──────┬──────┬┘     │
+              ┌────────────┘      │      └──────┼────────────┐
+              ▼                   ▼             ▼            │ (cdn)
+      ┌───────────────┐  ┌───────────────┐  ┌───────────────▼──┐
+      │  PostgreSQL   │  │    Redis 7.2  │  │     MinIO (S3)    │
+      │  :5432        │  │    :6379      │  │     :9000         │
+      │ ✓ connected   │  │ ✓ connected   │  │ ✓ URLs only       │
+      │ 83 idx·99.98% │  │ cache+queues  │  │ 0 orphans         │
+      │ query 3.43ms  │  │ +token family │  │ img 72–97ms       │
+      └───────────────┘  └───────────────┘  └───────────────────┘
+
+  Monitoring → Prometheus + Grafana + Loki   ✓ 5/5 targets up · alerts (Telegram+email)
+  Backups/DR → encrypted → Google Drive       ✓ DR drill PASSED (19 tables / 9 users / 4 orgs)
+  After reboot → app + 4 workers + all containers auto-recover · ✓ image still 200 · 0 manual steps
+```
+> Legend: ✓ = verified by a command run on the live server (see docs/PRODUCTION_READINESS_AUDIT.md).
+> All data ports (5432/6379/9000) are bound to 127.0.0.1; Nginx is the only public ingress (UFW: 22/80/443).
+
 ## How the backend codebase talks to the infrastructure
 The NestJS backend is **configuration-driven**: it reads `~/eMeal-server/.env` (a symlink
 to `.env.production`) at startup and connects to each service by env var. **Change a
