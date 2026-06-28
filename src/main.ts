@@ -3,6 +3,7 @@ import { ValidationPipe, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as compression from 'compression';
 import helmet from 'helmet';
+import { json, urlencoded } from 'express';
 import { AppModule } from './app/app.module';
 import { setupBullBoard } from './app/bull-board.setup';
 import { RedisIoAdapter } from './realtime/adapters/redis-io.adapter';
@@ -11,6 +12,9 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
     logger: ['log', 'warn', 'error'],
     bufferLogs: false,
+    // Disable the default 100kb body parser; a larger limit is set below so
+    // base64 image uploads (meal/schedule photos) aren't rejected with 413.
+    bodyParser: false,
   });
 
   const config = app.get(ConfigService);
@@ -25,6 +29,14 @@ async function bootstrap() {
     }),
   );
   app.use(compression());
+
+  // ── Body parsing (raised limit) ────────────────────────────────────────────
+  // Meal/schedule photos are sent as base64 in the JSON body; the Express
+  // default (100kb) rejected them with 413. Match Nginx's client_max_body_size
+  // (5M) so legitimate uploads succeed while oversized bodies stay capped at
+  // the proxy.
+  app.use(json({ limit: '5mb' }));
+  app.use(urlencoded({ extended: true, limit: '5mb' }));
 
   // Behind Nginx (the sole ingress) trust the first proxy hop so Express
   // derives the real client IP from X-Forwarded-For. Without this, every
