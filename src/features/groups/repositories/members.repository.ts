@@ -79,6 +79,30 @@ export class MembersRepository {
   }
 
   /**
+   * Batch variant of {@link findMembership}: fetch this user's memberships
+   * across many groups in ONE query, returned as a Map keyed by groupId.
+   *
+   * Eliminates the per-group N+1 in the group-list endpoint (was one
+   * findMembership() per returned group). Groups where the user is not a member
+   * simply have no entry. Org isolation is already guaranteed upstream because
+   * the caller only passes groupIds it fetched within the user's organization.
+   */
+  async findMembershipsForUserInGroups(
+    userId: string,
+    groupIds: string[],
+  ): Promise<Map<string, GroupMemberEntity>> {
+    if (groupIds.length === 0) return new Map();
+    const rows = await this.prisma.groupMember.findMany({
+      where: { userId, groupId: { in: groupIds } },
+    });
+    const byGroupId = new Map<string, GroupMemberEntity>();
+    for (const r of rows) {
+      byGroupId.set(r.groupId, this.toEntity(r));
+    }
+    return byGroupId;
+  }
+
+  /**
    * Create membership. Returns the created record.
    */
   async createMembership(data: {

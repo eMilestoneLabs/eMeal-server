@@ -122,13 +122,16 @@ export class GroupsService {
 
     // Additive (#8): attach the requester's per-group functional role so the
     // client can show "Hostel Admin" / "Mess Manager" per group (null = global).
-    const data = await Promise.all(
-      result.data.map(async (g) => {
-        const m = await this.membersRepo.findMembership(g.id, userId);
-        g.functionalRole = m?.functionalRole ?? null;
-        return GroupSerializer.toResponse(g);
-      }),
+    // Perf: one batched membership query instead of one findMembership() per
+    // group (was an N+1 on the list endpoint).
+    const memberships = await this.membersRepo.findMembershipsForUserInGroups(
+      userId,
+      result.data.map((g) => g.id),
     );
+    const data = result.data.map((g) => {
+      g.functionalRole = memberships.get(g.id)?.functionalRole ?? null;
+      return GroupSerializer.toResponse(g);
+    });
 
     return {
       data,

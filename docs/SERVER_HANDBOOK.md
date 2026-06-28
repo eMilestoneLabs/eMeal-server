@@ -596,3 +596,53 @@ backup / security / setup-vps.sh / backup.sh). All channels are **new app-layer 
 (`shared/mailer`, `shared/sms`, `notifications`) + env keys. The **only** frozen-file edit in the
 whole effort is the single approved `deploy.sh` `--env production` line (PART 3). Everything else
 is purely additive.
+
+---
+
+# PART 14 — PERFORMANCE & IMAGES (additive, app-layer)
+
+Backend is already fast (**7–13ms/endpoint**, measured). The "feels slow" is France↔India network
+distance, not code. These are the **additive app-layer** changes — no frozen infra touched.
+
+## 14.1 Image thumbnails (`sharp`)
+`storage.service.ts → uploadThumbnail()` generates a ~320px JPEG **alongside** each uploaded image
+at `<key>_thumb.jpg`, so list/grid views load ~15 KB instead of ~100 KB. The app derives the thumb
+URL by this naming convention (`useThumbnail` in the Flutter `CachedPhoto`).
+- **Degrade-safe:** `sharp` is **lazy-`require`d** in a try/catch — if it's missing or resize fails,
+  the thumbnail is **skipped** and the original (already uploaded) is unaffected. Only logs on failure.
+- **Dependency:** `sharp` is in `package.json`; `deploy.sh`'s `npm ci` installs it (native binary).
+- **Verify it works:** upload an image, then
+  ```bash
+  pm2 logs emeal-server --lines 100 --nostream | grep -i "thumbnail\|sharp"   # silence = success
+  # confirm the file exists (swap the real meal image URL, ending → _thumb.jpg):
+  curl -s -o /dev/null -w "%{http_code}\n" "https://cdn.emilestone.com/org/<...>/<ts>_thumb.jpg"  # 200
+  ```
+- **If a deploy ever fails on the sharp native install:** thumbnails are optional — the app falls back
+  to originals. You can unblock by removing `sharp` from `package.json` (uploads still work), then
+  reinstall the platform binary later.
+
+## 14.2 Upload body limit (413 fix)
+Meal/schedule photos are sent as **base64 in the JSON body**. NestJS used Express's default **100kb**
+limit → large uploads got **413 "request entity too large"**. `main.ts` now sets the body-parser
+limit to **5mb** (`app.use(json({ limit: '5mb' }))`), matching Nginx's existing `client_max_body_size 5M`.
+Oversized bodies are still capped at the proxy.
+
+## 14.3 Per-endpoint benchmark
+`deploy/benchmark-endpoints.sh` measures backend compute (localhost = no client network) for every hot
+endpoint. Run on the VPS:
+```bash
+TOKEN=$(curl -s -X POST http://localhost:3000/api/v1/auth/login -H 'Content-Type: application/json' \
+  -d '{"identifier":"you@example.com","password":"PASS"}' | jq -r .accessToken)
+BENCH_TOKEN="$TOKEN" bash deploy/benchmark-endpoints.sh      # expect tens-of-ms per endpoint
+```
+
+## 14.4 Dashboard micro-opts
+`dashboard.repository.ts`: the student 30-day summary query runs **in parallel** with the meals/records
+queries (saves ~1 round-trip on cache-miss), and the org **timezone is cached in-process** (5-min TTL)
+to skip a per-build PK lookup. Behavior identical; Redis dashboard caching unchanged.
+
+## 14.5 Frontend cache-first (context — app side, not backend)
+The app added a **stale-while-revalidate** cache (`ResponseCacheService`) so returning users see
+dashboards/menu/attendance/groups **instantly** while a fresh fetch runs. This is **client-side** — no
+backend change. The remaining gap is **cold-boot** (first-ever load = network-bound); the real fix is an
+**India edge / server region** (infra decision). Backend stays the single source of truth.

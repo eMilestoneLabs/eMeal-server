@@ -96,6 +96,7 @@ describe('GroupsService', () => {
           useValue: {
             findByGroupId: jest.fn(),
             findMembership: jest.fn(),
+            findMembershipsForUserInGroups: jest.fn().mockResolvedValue(new Map()),
             createMembership: jest.fn(),
             updateMembership: jest.fn(),
             isActiveMember: jest.fn(),
