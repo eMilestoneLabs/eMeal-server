@@ -29,6 +29,8 @@ describe('ScheduleSerializer', () => {
       order: 1,
       menuItems: ['Poha'],
       imageUrl: null,
+      description: null,
+      price: null,
     },
   });
 
@@ -49,6 +51,8 @@ describe('ScheduleSerializer', () => {
       order: 2,
       menuItems: [],
       imageUrl: null,
+      description: null,
+      price: null,
     },
   });
 
@@ -131,7 +135,7 @@ describe('ScheduleSerializer', () => {
       const entry = new ScheduleEntryEntity({
         ...breakfast,
         mealName: null,
-        meal: { slotKey: 'dinner', name: 'Evening Meal', displayName: null, order: 3, menuItems: [], imageUrl: null },
+        meal: { slotKey: 'dinner', name: 'Evening Meal', displayName: null, order: 3, menuItems: [], imageUrl: null, description: null, price: null },
       });
       expect((ScheduleSerializer.entryToMealItem(entry) as any).name).toBe('Evening Meal');
     });

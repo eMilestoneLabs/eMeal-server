@@ -24,6 +24,21 @@ import {
 export class DashboardRepository {
   constructor(private readonly prisma: PrismaService) {}
 
+  // PERF (additive): cache org timezone in-process (it effectively never
+  // changes) to skip a per-cache-miss PK lookup. 5-min TTL self-heals if an
+  // org timezone is ever changed. Per-worker cache (PM2 cluster) — fine.
+  private static readonly _tzCache = new Map<string, { tz: string; expires: number }>();
+  private static readonly _TZ_TTL_MS = 5 * 60 * 1000;
+
+  private async getOrgTimezone(organizationId: string): Promise<string> {
+    const now = Date.now();
+    const hit = DashboardRepository._tzCache.get(organizationId);
+    if (hit && hit.expires > now) return hit.tz;
+    const tz = await this.getOrgTimezone(organizationId);
+    DashboardRepository._tzCache.set(organizationId, { tz, expires: now + DashboardRepository._TZ_TTL_MS });
+    return tz;
+  }
+
   /**
    * Today's UTC-midnight bounds computed in the ORGANIZATION's timezone, so
    * "today" matches how attendance stores attendanceDate (org-local date).
@@ -58,6 +73,22 @@ export class DashboardRepository {
     organizationId: string,
   ): Promise<StudentDashboardEntity> {
     const { todayUtc } = await this.getTodayBoundsInOrgTz(organizationId);
+
+    // PERF (additive): the 30-day summary depends only on userId/org/date — not
+    // on meals or today-records — so kick it off now and await it later. It runs
+    // concurrently with the meal + records queries instead of after them (~1 RTT
+    // saved on a cache miss). Identical query, identical result.
+    const thirtyDaysAgo = new Date(todayUtc);
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    const attendanceSummaryPromise = this.prisma.attendanceRecord.groupBy({
+      by: ['status'],
+      where: {
+        userId,
+        organizationId,
+        attendanceDate: { gte: thirtyDaysAgo, lte: todayUtc },
+      },
+      _count: { status: true },
+    });
 
     // Fetch user preferences + group memberships in parallel
     const [user, groupMemberships] = await this.prisma.$transaction([
@@ -127,19 +158,8 @@ export class DashboardRepository {
       isAttended: recordMap.has(m.id) ? recordMap.get(m.id) === 'present' : null,
     }));
 
-    // 30-day attendance summary
-    const thirtyDaysAgo = new Date(todayUtc);
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-
-    const attendanceSummaryRaw = await this.prisma.attendanceRecord.groupBy({
-      by: ['status'],
-      where: {
-        userId,
-        organizationId,
-        attendanceDate: { gte: thirtyDaysAgo, lte: todayUtc },
-      },
-      _count: { status: true },
-    });
+    // 30-day attendance summary (started earlier; await its result now)
+    const attendanceSummaryRaw = await attendanceSummaryPromise;
 
     const summaryMap = new Map(
       attendanceSummaryRaw.map((r: any) => [r.status, r._count.status]),

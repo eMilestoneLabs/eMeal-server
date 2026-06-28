@@ -72,8 +72,13 @@ export class StorageService {
         Key: key,
         Body: buffer,
         ContentType: mimeType,
+        // Keys are timestamped + immutable (old object deleted on replace),
+        // so a long immutable cache is safe — lets the CDN + clients serve
+        // repeat loads instantly without revalidating the origin.
+        CacheControl: 'public, max-age=31536000, immutable',
       }),
     );
+    await this.uploadThumbnail(key, buffer);
 
     const base = this.cdnUrl || `${this.config.get<string>('MINIO_ENDPOINT')}/${this.bucket}`;
     const url = `${base}/${key}`;
@@ -101,13 +106,50 @@ export class StorageService {
         Key: key,
         Body: buffer,
         ContentType: mimeType,
+        // Keys are timestamped + immutable (old object deleted on replace),
+        // so a long immutable cache is safe — lets the CDN + clients serve
+        // repeat loads instantly without revalidating the origin.
+        CacheControl: 'public, max-age=31536000, immutable',
       }),
     );
+    await this.uploadThumbnail(key, buffer);
 
     const base =
       this.cdnUrl || `${this.config.get<string>('MINIO_ENDPOINT')}/${this.bucket}`;
     this.logger.log(`Uploaded avatar org=${organizationId} user=${userId}`);
     return `${base}/${key}`;
+  }
+
+  /**
+   * Best-effort thumbnail: a ~320px-wide JPEG stored alongside the original at
+   * `<key>_thumb.jpg`, so list/grid views can load ~15KB instead of the full
+   * image. ADDITIVE + degrade-safe — if `sharp` is not installed or resize
+   * fails, the thumbnail is skipped and the (already-uploaded) original is
+   * unaffected. No DB/contract change; the client derives the thumb URL by
+   * this naming convention.
+   */
+  private async uploadThumbnail(originalKey: string, buffer: Buffer): Promise<void> {
+    try {
+      // Lazy require so the app boots even if sharp is not yet installed.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const sharp = require('sharp');
+      const thumb = await sharp(buffer)
+        .resize({ width: 320, withoutEnlargement: true })
+        .jpeg({ quality: 70 })
+        .toBuffer();
+      const thumbKey = originalKey.replace(/\.\w+$/, '_thumb.jpg');
+      await this.getClient().send(
+        new PutObjectCommand({
+          Bucket: this.bucket,
+          Key: thumbKey,
+          Body: thumb,
+          ContentType: 'image/jpeg',
+          CacheControl: 'public, max-age=31536000, immutable',
+        }),
+      );
+    } catch (err: any) {
+      this.logger.warn(`thumbnail generation skipped: ${err?.message}`);
+    }
   }
 
   /**
