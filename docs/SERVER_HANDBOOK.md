@@ -478,11 +478,19 @@ change, no rebuild.** Add keys to `.env.production`, then restart fresh (see §1
 | `src/shared/mailer/mailer.service.ts` + `mailer.module.ts` | nodemailer SMTP. Best-effort `send()` (never throws). Alias-safe: header `From=MAIL_FROM`, envelope/`sender=SMTP_USER`. `sendOtp()` builds the branded code email |
 | `src/shared/sms/sms.service.ts` + `sms.module.ts` | MSG91-default SMS OTP via global `fetch`. Env-gated — no-ops until `SMS_API_URL`/`SMS_API_KEY` set |
 | `src/features/notifications/services/notification-send.service.ts` | Real FCM via `firebase-admin` (lazy). `onModuleInit` reads `FIREBASE_*`; `fcmEnabled=true` when present, else log-only |
-| `src/features/auth/auth.service.ts` | `requestOtp` emails OTP for email identifiers, SMS for phone (both best-effort). `_devOtp` returned **only** when `NODE_ENV==='development'` |
-| `src/features/auth/auth.controller.ts` | forgot-password → `requestOtp({purpose:'reset'})`; reset-password → `verifyOtp({purpose:'reset'})` |
+| `src/features/auth/auth.service.ts` | `requestOtp` emails the OTP (**email-only**; phone is rejected as *"Mobile OTP — Coming Soon"* unless `MOBILE_OTP_ENABLED=true`, SEC-008). Email/SMS send is **fire-and-forget** (never blocks the response). `verifyOtp` consumes a single-use code and, for an email identifier, stamps `users.emailVerifiedAt`. `resetPassword()` verifies the `reset` OTP, **persists** the new password hash, and (configurably) revokes all sessions. Signup emails a `signup` verification OTP (fire-and-forget). OTP TTL/length/attempts are configurable (§13.2). `_devOtp` returned **only** when `NODE_ENV==='development'` |
+| `src/features/auth/auth.controller.ts` | forgot-password → `requestOtp({purpose:'reset'})` (**email-only**, AUTH-017; non-enumerating generic success); reset-password → `resetPassword({identifier, otp, newPassword})` — verifies the `reset` OTP and **actually updates** the password (the prior flow returned success without changing it). Login returns a **generic** credential error (anti-enumeration, SEC-005) |
+| `src/config/auth.config.ts` (new) | Centralizes OTP config — `OTP_TTL_SECONDS` / `OTP_LENGTH` / `OTP_MAX_ATTEMPTS`, `RESET_PASSWORD_INVALIDATES_SESSIONS`, `MOBILE_OTP_ENABLED` — all env-overridable with safe defaults (no hardcoding) |
 
 Endpoints: `POST /api/v1/auth/otp/request` · `POST /api/v1/auth/otp/verify` ·
 forgot/reset password · `POST /api/v1/auth/fcm-token` (device registers its FCM token).
+
+**Email verification (SRS Module 01, AUTH-036/040):** a successful Email OTP stamps the
+additive nullable column `users.emailVerifiedAt` (migration `…_add_user_email_verified_at`).
+Responses expose `emailVerified` (boolean) on the User profile **and** on group-member records,
+which drives the verified/unverified badge in the app. Verification is **non-blocking** — login is
+not gated on it. Audit logs now record: login (success + failure), `email_verified`, and
+`password_reset` (reusing the existing `AuditAction` enum + `metadata`, no enum migration).
 
 ## 13.2 EMAIL OTP — Hostinger SMTP
 **Accounts:** a Hostinger mailbox (`admin@emilestone.com`) that can send via
@@ -504,6 +512,17 @@ MAIL_REPLY_TO=admin@emilestone.com
 **Alias → dedicated mailbox migration (later, after ~10k installs) is ENV-ONLY:** create a real
 `no-reply@` mailbox, then change `SMTP_USER`/`SMTP_PASS` to it (drop `MAIL_FROM` if it now equals
 the auth user). No code change — that separation is by design.
+
+**OTP behavior (optional — sane defaults; override only to tune):** these have built-in defaults
+in `src/config/auth.config.ts`, so an absent key uses the value shown — **nothing to add for a
+standard prod setup** (email delivers with just `SMTP_*`/`MAIL_*`).
+```bash
+OTP_TTL_SECONDS=600                        # code validity (default 10 min) — AUTH-038
+OTP_LENGTH=6                               # digits in the code
+OTP_MAX_ATTEMPTS=5                         # verify attempts before the code locks out
+RESET_PASSWORD_INVALIDATES_SESSIONS=true  # revoke all sessions on password reset
+MOBILE_OTP_ENABLED=false                  # keep false until SMS OTP ships ("Coming Soon", SEC-008)
+```
 
 **Test SMTP credentials in isolation** before trusting a deploy:
 ```bash
@@ -568,17 +587,23 @@ curl -s -X POST https://api.emilestone.com/api/v1/auth/otp/request \
   -d '{"identifier":"you@example.com","purpose":"login"}'; echo
 # Expect: {"message":"OTP sent successfully","expiresIn":600}   — and NO _devOtp (proves prod mode)
 
-# Verify the code the user received
+# Verify the code the user received (field is `otp`, not `code`; `purpose` must match the request)
 curl -s -X POST https://api.emilestone.com/api/v1/auth/otp/verify \
   -H 'Content-Type: application/json' \
-  -d '{"identifier":"you@example.com","purpose":"login","code":"123456"}'; echo
+  -d '{"identifier":"you@example.com","purpose":"login","otp":"123456"}'; echo
 
-# Forgot-password (sends a reset-code email)
+# Forgot-password (emails a reset code; always returns a generic success — no account enumeration)
 curl -s -X POST https://api.emilestone.com/api/v1/auth/forgot-password \
   -H 'Content-Type: application/json' -d '{"identifier":"you@example.com"}'; echo
+
+# Reset-password (verifies the `reset` OTP and persists the new password)
+curl -s -X POST https://api.emilestone.com/api/v1/auth/reset-password \
+  -H 'Content-Type: application/json' \
+  -d '{"identifier":"you@example.com","otp":"123456","newPassword":"NewPassw0rd"}'; echo
 ```
-`purpose` ∈ `login` · `signup` · `reset` (changes the email subject/label). Phone identifiers go
-to SMS once `SMS_*` is set; email identifiers go to SMTP.
+`purpose` ∈ `login` · `signup` · `reset` (changes the email subject/label). **OTP is email-only in
+this release** — a phone identifier is rejected as *"Mobile OTP — Coming Soon"* (SEC-008) until
+`MOBILE_OTP_ENABLED=true` **and** `SMS_*` are configured. Verify body uses `otp` (not `code`).
 
 ## 13.7 Troubleshooting (lessons learned)
 | Symptom | Cause → Fix |
