@@ -29,6 +29,8 @@ export class UserSerializer {
       isDefaultAttendance: user.isDefaultAttendance,
       remindersEnabled: user.remindersEnabled,
       loginPreference: user.loginPreference ?? 'email',
+      // SRS AUTH-036/040/041 — lets the client gate onboarding on email verification.
+      emailVerified: !!user.emailVerifiedAt,
       createdAt: user.createdAt.toISOString(),
     };
   }

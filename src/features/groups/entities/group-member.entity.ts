@@ -30,6 +30,7 @@ export class GroupMemberEntity {
     age: number | null;
     role: string;
     isVacationMode: boolean;
+    emailVerifiedAt?: Date | null; // SRS AUTH-036/040 — serialized as `emailVerified`
   } | null;
 
   constructor(partial: Partial<GroupMemberEntity>) {

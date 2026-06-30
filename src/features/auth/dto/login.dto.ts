@@ -39,6 +39,26 @@ export class OtpVerifyDto {
   purpose?: string;
 }
 
+export class ForgotPasswordDto {
+  @IsString()
+  @IsNotEmpty()
+  identifier: string; // email (AUTH-017: Email OTP only)
+}
+
+export class ResetPasswordDto {
+  @IsString()
+  @IsNotEmpty()
+  identifier: string;
+
+  @IsString()
+  @IsNotEmpty()
+  otp: string;
+
+  @IsString()
+  @MinLength(8, { message: 'password must be at least 8 characters' })
+  newPassword: string;
+}
+
 export class RefreshTokenDto {
   @IsString()
   @IsNotEmpty()

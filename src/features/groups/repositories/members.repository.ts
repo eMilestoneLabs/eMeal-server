@@ -53,6 +53,7 @@ export class MembersRepository {
               age: true,
               role: true,
               isVacationMode: true,
+              emailVerifiedAt: true, // SRS AUTH-036/040 — drives member verified badge
             },
           },
         },

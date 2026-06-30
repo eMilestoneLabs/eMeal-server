@@ -21,7 +21,15 @@ export class GroupMemberSerializer {
       removedAt: member.removedAt?.toISOString() ?? null,
       // B10 (ADDITIVE — never remove): joined user profile for member lists.
       // Flutter maps this to UserModel; legacy consumers ignore the extra key.
-      user: member.user ?? null,
+      // emailVerifiedAt (Date) is exposed as emailVerified (bool) for the badge.
+      user: member.user
+        ? (() => {
+            const { emailVerifiedAt, ...rest } = member.user as typeof member.user & {
+              emailVerifiedAt?: Date | null;
+            };
+            return { ...rest, emailVerified: !!emailVerifiedAt };
+          })()
+        : null,
     };
   }
 }

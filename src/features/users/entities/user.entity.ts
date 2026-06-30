@@ -22,6 +22,7 @@ export class UserEntity {
   remindersEnabled: boolean;
   loginPreference: string | null;
   fcmToken: string | null;
+  emailVerifiedAt: Date | null; // SRS AUTH-036/040 — null = email not yet verified
 
   // Computed from GroupMember table — not a DB column
   groupId: string | null;

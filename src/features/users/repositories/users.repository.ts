@@ -136,6 +136,7 @@ export class UsersRepository {
     lastLoginAt: Date;
     isActive: boolean;
     organizationId: string;
+    emailVerifiedAt: Date;
   }>): Promise<UserEntity> {
     const user = await this.prisma.user.update({
       where: { id },

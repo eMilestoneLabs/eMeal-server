@@ -135,6 +135,7 @@ model User {
   remindersEnabled    Boolean @default(true)
   loginPreference     String? @default("email") // "email" | "mobile"
   fcmToken            String? // Phase B6: Firebase FCM push token
+  emailVerifiedAt     DateTime? // SRS AUTH-036/040: set when Email OTP verification succeeds (null = unverified)
 
   isActive    Boolean   @default(true)
   lastLoginAt DateTime?

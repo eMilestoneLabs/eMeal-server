@@ -82,6 +82,9 @@ export class AuthService {
       requestId,
     });
 
+    // AUTH-031/036: send Email verification OTP after successful signup.
+    await this.sendSignupEmailVerification(user.email ?? undefined, user.id);
+
     return this.issueTokensAndRespond(user);
   }
 
@@ -156,6 +159,9 @@ export class AuthService {
       requestId,
     });
 
+    // AUTH-031/036: send Email verification OTP after successful signup.
+    await this.sendSignupEmailVerification(user.email ?? undefined, user.id);
+
     return this.issueTokensAndRespond(user);
   }
 
@@ -219,19 +225,43 @@ export class AuthService {
       requestId,
     });
 
+    // AUTH-031/036: send Email verification OTP after successful signup.
+    await this.sendSignupEmailVerification(user.email ?? undefined, user.id);
+
     return this.issueTokensAndRespond(user);
   }
 
   // ── LOGIN ─────────────────────────────────────────────────────────────────
 
   async login(dto: LoginDto, meta: { userAgent?: string; ip?: string; requestId?: string }) {
+    // SEC-005 / ERR-003: a single generic credential error for every "wrong
+    // email/mobile OR wrong password" case so the endpoint cannot be used to
+    // enumerate which accounts exist.
+    const invalidCredentials = () =>
+      new UnauthorizedException({
+        message: 'Invalid email/mobile or password',
+        errors: { identifier: 'Invalid email/mobile or password' },
+      });
+
+    if (!dto.password) {
+      throw new BadRequestException({
+        message: 'Validation failed',
+        errors: { password: 'Password is required' },
+      });
+    }
+
     const user = await this.usersRepo.findByIdentifier(dto.identifier);
 
     if (!user) {
-      throw new UnauthorizedException({
-        message: 'Invalid credentials',
-        errors: { identifier: 'No account found with this email or phone' },
+      // SEC-006: audit the failed attempt (no actor — account is unknown).
+      await this.audit.log({
+        targetType: 'User',
+        action: 'login',
+        metadata: { success: false, reason: 'no_account', identifier: this.maskIdentifier(dto.identifier) },
+        requestId: meta.requestId,
+        ipAddress: meta.ip,
       });
+      throw invalidCredentials();
     }
 
     if (!user.isActive) {
@@ -241,27 +271,25 @@ export class AuthService {
       });
     }
 
-    if (!dto.password) {
-      throw new BadRequestException({
-        message: 'Validation failed',
-        errors: { password: 'Password is required' },
-      });
-    }
-
     const rawUser = await this.prisma.user.findUnique({ where: { id: user.id } });
     if (!rawUser?.passwordHash) {
-      throw new UnauthorizedException({
-        message: 'Invalid credentials',
-        errors: { password: 'This account uses OTP login. Please use OTP instead.' },
-      });
+      // Account has no password (OTP-only). Stay generic to avoid enumeration.
+      throw invalidCredentials();
     }
 
     const passwordValid = await bcrypt.compare(dto.password, rawUser.passwordHash);
     if (!passwordValid) {
-      throw new UnauthorizedException({
-        message: 'Invalid credentials',
-        errors: { password: 'Incorrect password' },
+      await this.audit.log({
+        organizationId: user.organizationId ?? undefined,
+        actorId: user.id,
+        targetId: user.id,
+        targetType: 'User',
+        action: 'login',
+        metadata: { success: false, reason: 'bad_password' },
+        requestId: meta.requestId,
+        ipAddress: meta.ip,
       });
+      throw invalidCredentials();
     }
 
     // Update last login
@@ -273,7 +301,7 @@ export class AuthService {
       targetId: user.id,
       targetType: 'User',
       action: 'login',
-      metadata: { ip: meta.ip, userAgent: meta.userAgent },
+      metadata: { success: true, method: 'password', ip: meta.ip, userAgent: meta.userAgent },
       requestId: meta.requestId,
       ipAddress: meta.ip,
     });
@@ -284,41 +312,73 @@ export class AuthService {
   // ── OTP (Phase B1 placeholder — Firebase integration in Phase B7) ─────────
 
   async requestOtp(dto: OtpRequestDto, requestId?: string) {
-    // Phase B1: Generate a simple OTP and store hashed version
-    // In production Phase B7: delegate to Firebase Auth SMS
-    const otp = (100000 + randomInt(900000)).toString(); // 6-digit, cryptographically secure
+    const cfg = this.authConfig();
+    const isEmail = dto.identifier.includes('@');
+    const purpose = dto.purpose ?? 'login';
+
+    // SEC-008 / AUTH-016: Mobile OTP is a future feature and must not be callable.
+    // Email OTP login (AUTH-015) and Forgot Password (AUTH-017) are Email-only here.
+    if (!isEmail && !cfg.mobileOtpEnabled) {
+      throw new BadRequestException({
+        message: 'Mobile OTP is coming soon. Please use Email OTP.',
+        errors: { identifier: 'Mobile OTP — Coming Soon' },
+      });
+    }
+
+    const otp = this.generateOtp(cfg.otp.length); // cryptographically secure
     const otpHash = await bcrypt.hash(otp, 10);
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    const expiresAt = new Date(Date.now() + cfg.otp.ttlSeconds * 1000);
+    const ttlMinutes = Math.max(1, Math.round(cfg.otp.ttlSeconds / 60));
 
     const user = await this.usersRepo.findByIdentifier(dto.identifier);
+
+    // AUTH-037 + SEC-005: a password-reset OTP is delivered ONLY to a registered
+    // address. When the account is unknown we silently skip generation/delivery
+    // but still return an identical generic success so the endpoint can't be used
+    // to enumerate accounts.
+    if (purpose === 'reset' && !user) {
+      this.logger.warn('Password reset requested for an unknown identifier — generic success returned');
+      return { message: 'If an account exists, an OTP has been sent.', expiresIn: cfg.otp.ttlSeconds };
+    }
 
     await this.authRepo.createOtpRequest({
       identifier: dto.identifier,
       otpHash,
-      purpose: dto.purpose ?? 'login',
+      purpose,
       expiresAt,
       userId: user?.id,
     });
 
-    // Delivery (Phase 1): email identifiers get the code emailed (best-effort —
-    // the OTP is already stored, so a mail failure must not break the flow). Phone
-    // identifiers fall through to Phase 3 (SMS) — see docs/NOTIFICATION_OTP_PLAN.md.
-    const isEmail = dto.identifier.includes('@');
+    // Delivery is best-effort AND fire-and-forget — the OTP is already stored and
+    // the response is identical regardless of send outcome, so we never block the
+    // request on the SMTP/SMS round-trip (keeps the endpoint ultra-fast).
     if (isEmail) {
-      const sent = await this.mailer.sendOtp(dto.identifier, otp, dto.purpose ?? 'login');
-      if (!sent) {
-        this.logger.warn(
-          `OTP email not delivered for ${dto.identifier} (SMTP disabled or send failed) — code still valid`,
+      void this.mailer
+        .sendOtp(dto.identifier, otp, purpose, ttlMinutes)
+        .then((sent) => {
+          if (!sent) {
+            this.logger.warn(
+              `OTP email not delivered for ${dto.identifier} (SMTP disabled or send failed) — code still valid`,
+            );
+          }
+        })
+        .catch((err) =>
+          this.logger.warn(`OTP email error for ${dto.identifier}: ${(err as Error).message}`),
         );
-      }
     } else {
-      // Phone identifier → SMS OTP (Phase 3). Disabled until an SMS provider is set.
-      const sent = await this.sms.sendOtp(dto.identifier, otp);
-      if (!sent) {
-        this.logger.warn(
-          `OTP SMS not delivered for ${dto.identifier} (SMS disabled or send failed) — code still valid`,
+      // Reachable only when MOBILE_OTP_ENABLED=true (future release).
+      void this.sms
+        .sendOtp(dto.identifier, otp)
+        .then((sent) => {
+          if (!sent) {
+            this.logger.warn(
+              `OTP SMS not delivered for ${dto.identifier} (SMS disabled or send failed) — code still valid`,
+            );
+          }
+        })
+        .catch((err) =>
+          this.logger.warn(`OTP SMS error for ${dto.identifier}: ${(err as Error).message}`),
         );
-      }
     }
 
     if (process.env.NODE_ENV === 'development') {
@@ -327,18 +387,24 @@ export class AuthService {
       );
     }
 
+    // For reset, keep the message identical to the unknown-account branch above
+    // (anti-enumeration). For login/signup a normal confirmation is fine.
+    const message = purpose === 'reset' ? 'If an account exists, an OTP has been sent.' : 'OTP sent successfully';
+
     return {
-      message: 'OTP sent successfully',
-      expiresIn: 600,
+      message,
+      expiresIn: cfg.otp.ttlSeconds,
       // In development: return OTP for testing. REMOVE IN PRODUCTION.
       ...(process.env.NODE_ENV === 'development' ? { _devOtp: otp } : {}),
     };
   }
 
   async verifyOtp(dto: OtpVerifyDto, meta: { userAgent?: string; ip?: string; requestId?: string }) {
+    const cfg = this.authConfig();
     const otpRecord = await this.authRepo.findValidOtpRequest(
       dto.identifier,
       dto.purpose ?? 'login',
+      cfg.otp.maxAttempts,
     );
 
     if (!otpRecord) {
@@ -357,13 +423,13 @@ export class AuthService {
       });
     }
 
-    await this.authRepo.markOtpUsed(otpRecord.id);
+    await this.authRepo.markOtpUsed(otpRecord.id); // SEC-007: single-use OTP
 
     // Find or auto-create user for OTP login
+    const isEmail = dto.identifier.includes('@');
     let user = await this.usersRepo.findByIdentifier(dto.identifier);
     if (!user) {
       // Auto-create minimal user for OTP signup flow
-      const isEmail = dto.identifier.includes('@');
       user = await this.usersRepo.create({
         name: 'User',
         email: isEmail ? dto.identifier : undefined,
@@ -373,9 +439,120 @@ export class AuthService {
       });
     }
 
+    // SRS AUTH-036/040: a successful Email OTP proves ownership → mark verified.
+    if (isEmail && !user.emailVerifiedAt) {
+      const verifiedAt = new Date();
+      await this.usersRepo.update(user.id, { emailVerifiedAt: verifiedAt });
+      user.emailVerifiedAt = verifiedAt;
+      await this.audit.log({
+        organizationId: user.organizationId ?? undefined,
+        actorId: user.id,
+        targetId: user.id,
+        targetType: 'User',
+        action: 'update',
+        metadata: { event: 'email_verified' },
+        requestId: meta.requestId,
+        ipAddress: meta.ip,
+      });
+    }
+
     await this.usersRepo.update(user.id, { lastLoginAt: new Date() });
 
+    // SEC-006: audit successful OTP login.
+    await this.audit.log({
+      organizationId: user.organizationId ?? undefined,
+      actorId: user.id,
+      targetId: user.id,
+      targetType: 'User',
+      action: 'login',
+      metadata: { success: true, method: 'otp', ip: meta.ip, userAgent: meta.userAgent },
+      requestId: meta.requestId,
+      ipAddress: meta.ip,
+    });
+
     return this.issueTokensAndRespond(user, meta);
+  }
+
+  // ── PASSWORD RESET (AUTH-017, Part 4 §3) ────────────────────────────────────
+
+  /**
+   * Reset a password using an Email OTP. Verifies the single-use OTP, hashes and
+   * stores the new password, and (configurably) revokes all existing sessions so
+   * the previous password becomes invalid immediately (Part 7 §2). Email-only —
+   * Mobile OTP recovery is a future feature (SEC-008).
+   */
+  async resetPassword(
+    identifier: string,
+    otp: string,
+    newPassword: string,
+    meta: { userAgent?: string; ip?: string; requestId?: string } = {},
+  ): Promise<{ message: string }> {
+    // AUTH-017: Forgot/Reset Password is Email OTP only in the current release.
+    if (!identifier.includes('@')) {
+      throw new BadRequestException({
+        message: 'Password reset is available via email only.',
+        errors: { identifier: 'Use your registered email address' },
+      });
+    }
+
+    const cfg = this.authConfig();
+    const otpRecord = await this.authRepo.findValidOtpRequest(identifier, 'reset', cfg.otp.maxAttempts);
+    if (!otpRecord) {
+      throw new UnauthorizedException({
+        message: 'Invalid or expired OTP',
+        errors: { otp: 'OTP is invalid, expired, or already used' },
+      });
+    }
+
+    const otpValid = await bcrypt.compare(otp, otpRecord.otpHash);
+    if (!otpValid) {
+      await this.authRepo.incrementOtpAttempts(otpRecord.id);
+      throw new UnauthorizedException({
+        message: 'Invalid OTP',
+        errors: { otp: 'Incorrect OTP code' },
+      });
+    }
+
+    await this.authRepo.markOtpUsed(otpRecord.id); // single-use
+
+    const user = await this.usersRepo.findByIdentifier(identifier);
+    if (!user) {
+      // OTP validated against an identifier with no account — stay generic.
+      throw new BadRequestException({
+        message: 'Unable to reset password.',
+        errors: { identifier: 'Unable to reset password' },
+      });
+    }
+
+    const passwordHash = await bcrypt.hash(
+      newPassword,
+      this.configService.get<number>('app.bcryptRounds') ?? 12,
+    );
+
+    // A successful reset also proves email ownership → mark verified if it wasn't.
+    await this.usersRepo.update(user.id, {
+      passwordHash,
+      ...(user.emailVerifiedAt ? {} : { emailVerifiedAt: new Date() }),
+    });
+
+    // Part 4 §3 / Part 7 §2: previous password invalid immediately; optionally
+    // invalidate every existing session.
+    if (cfg.resetPasswordInvalidatesSessions) {
+      await this.authRepo.revokeAllTokensByUser(user.id);
+    }
+
+    await this.audit.log({
+      organizationId: user.organizationId ?? undefined,
+      actorId: user.id,
+      targetId: user.id,
+      targetType: 'User',
+      action: 'update',
+      metadata: { event: 'password_reset' },
+      requestId: meta.requestId,
+      ipAddress: meta.ip,
+    });
+
+    return { message: 'Password reset successful. Please log in again.' };
   }
 
   // ── REFRESH TOKEN ROTATION ─────────────────────────────────────────────────
@@ -583,6 +760,86 @@ export class AuthService {
           statusCode: 409,
         });
       }
+    }
+  }
+
+  // ── OTP / AUTH config + small helpers ───────────────────────────────────────
+
+  /** Read the centralized auth config with safe fallbacks (no hardcoded values). */
+  private authConfig() {
+    return {
+      otp: {
+        ttlSeconds: this.configService.get<number>('auth.otp.ttlSeconds') ?? 600,
+        length: this.configService.get<number>('auth.otp.length') ?? 6,
+        maxAttempts: this.configService.get<number>('auth.otp.maxAttempts') ?? 5,
+      },
+      resetPasswordInvalidatesSessions:
+        this.configService.get<boolean>('auth.resetPasswordInvalidatesSessions') ?? true,
+      mobileOtpEnabled: this.configService.get<boolean>('auth.mobileOtpEnabled') ?? false,
+    };
+  }
+
+  /** Cryptographically secure numeric OTP of the configured length. */
+  private generateOtp(length: number): string {
+    const len = Math.max(4, Math.min(10, length || 6));
+    const min = 10 ** (len - 1);
+    const span = 10 ** len - min;
+    return (min + randomInt(span)).toString();
+  }
+
+  /** Mask an email/phone for audit metadata (avoid storing full PII). */
+  private maskIdentifier(identifier: string): string {
+    if (identifier.includes('@')) {
+      const [local, domain] = identifier.split('@');
+      const head = local.slice(0, 2);
+      return `${head}${'*'.repeat(Math.max(1, local.length - 2))}@${domain ?? ''}`;
+    }
+    return identifier.length > 4
+      ? `${identifier.slice(0, 2)}***${identifier.slice(-2)}`
+      : '***';
+  }
+
+  /**
+   * SRS AUTH-031/036: send an Email verification OTP after a successful signup.
+   * Best-effort — the account already exists, so a mail/transport failure must
+   * never fail signup. The code is verifiable later via /auth/otp/verify.
+   */
+  private async sendSignupEmailVerification(email?: string, userId?: string): Promise<void> {
+    if (!email) return;
+    try {
+      const cfg = this.authConfig();
+      const otp = this.generateOtp(cfg.otp.length);
+      const otpHash = await bcrypt.hash(otp, 10);
+      const expiresAt = new Date(Date.now() + cfg.otp.ttlSeconds * 1000);
+      const ttlMinutes = Math.max(1, Math.round(cfg.otp.ttlSeconds / 60));
+
+      await this.authRepo.createOtpRequest({
+        identifier: email,
+        otpHash,
+        purpose: 'signup',
+        expiresAt,
+        userId,
+      });
+
+      if (process.env.NODE_ENV === 'development') {
+        this.logger.debug(`[DEV ONLY] signup verification OTP for ${email}: ${otp}`);
+      }
+
+      // Fire-and-forget the SMTP send so signup token issuance is NOT blocked on
+      // the mail round-trip (ultra-fast auth). The OTP row is already persisted,
+      // so verification works the moment the email arrives.
+      void this.mailer
+        .sendOtp(email, otp, 'signup', ttlMinutes)
+        .then((sent) => {
+          if (!sent) {
+            this.logger.warn(`Signup verification OTP not delivered to ${email} — code still valid`);
+          }
+        })
+        .catch((err) =>
+          this.logger.warn(`Signup verification email failed for ${email}: ${(err as Error).message}`),
+        );
+    } catch (err) {
+      this.logger.warn(`Signup verification OTP failed for ${email}: ${(err as Error).message}`);
     }
   }
 }

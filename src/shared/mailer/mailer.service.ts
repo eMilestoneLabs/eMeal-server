@@ -86,19 +86,23 @@ export class MailerService {
     }
   }
 
-  /** OTP / verification / password-reset code email. */
-  async sendOtp(to: string, code: string, purpose = 'verification'): Promise<boolean> {
+  /**
+   * OTP / verification / password-reset code email.
+   * @param ttlMinutes validity shown to the user — must match the configured OTP TTL (AUTH-038).
+   */
+  async sendOtp(to: string, code: string, purpose = 'verification', ttlMinutes = 10): Promise<boolean> {
     const label = purpose === 'reset' ? 'password reset' : purpose === 'signup' ? 'sign-up' : 'login';
+    const expiry = `${ttlMinutes} minute${ttlMinutes === 1 ? '' : 's'}`;
     const subject = `Your ${this.brand} ${label} code: ${code}`;
     const text =
       `Your ${this.brand} ${label} code is ${code}.\n` +
-      `It expires in 10 minutes.\n\n` +
+      `It expires in ${expiry}.\n\n` +
       `If you didn't request this, you can safely ignore this email.`;
     const html =
       `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:480px">` +
       `<p>Your ${this.brand} ${label} code is:</p>` +
       `<p style="font-size:28px;font-weight:700;letter-spacing:4px;margin:8px 0">${code}</p>` +
-      `<p style="color:#555">It expires in 10 minutes.</p>` +
+      `<p style="color:#555">It expires in ${expiry}.</p>` +
       `<p style="color:#999;font-size:12px">If you didn't request this, you can safely ignore this email.</p>` +
       `</div>`;
     return this.send(to, subject, text, html);

@@ -62,14 +62,14 @@ export class AuthRepository {
     return this.prisma.otpRequest.create({ data });
   }
 
-  async findValidOtpRequest(identifier: string, purpose: string) {
+  async findValidOtpRequest(identifier: string, purpose: string, maxAttempts = 5) {
     return this.prisma.otpRequest.findFirst({
       where: {
         identifier,
         purpose,
         isUsed: false,
         expiresAt: { gt: new Date() },
-        attempts: { lt: 5 },
+        attempts: { lt: maxAttempts },
       },
       orderBy: { createdAt: 'desc' },
     });

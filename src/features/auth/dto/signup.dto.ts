@@ -44,10 +44,11 @@ export class StudentSignupDto {
   @IsIn(['email', 'mobile'])
   loginPreference?: 'email' | 'mobile';
 
+  // SRS AUTH-018 / Part 3 business rule: ages 13–99 only; under 13 is blocked.
   @IsOptional()
   @IsInt()
-  @Min(5)
-  @Max(120)
+  @Min(13, { message: 'You must be at least 13 years old to register' })
+  @Max(99, { message: 'age must be 99 or below' })
   age?: number;
 
   @IsOptional()
@@ -85,10 +86,11 @@ export class AdminSignupDto {
   @IsIn(['email', 'mobile'])
   loginPreference?: 'email' | 'mobile';
 
+  // Admins are adults; upper bound aligned with the SRS age range (max 99).
   @IsOptional()
   @IsInt()
-  @Min(18)
-  @Max(80)
+  @Min(18, { message: 'Admins must be at least 18 years old' })
+  @Max(99, { message: 'age must be 99 or below' })
   age?: number;
 
   @IsOptional()

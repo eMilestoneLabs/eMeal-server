@@ -7,6 +7,7 @@ import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import appConfig from '../config/app.config';
 import jwtConfig from '../config/jwt.config';
 import redisConfig from '../config/redis.config';
+import authConfig from '../config/auth.config';
 
 // Infrastructure
 import { PrismaModule } from '../prisma/prisma.module';
@@ -47,7 +48,7 @@ import { HealthController } from './health.controller';
     // Config — global, loaded first
     ConfigModule.forRoot({
       isGlobal: true,
-      load: [appConfig, jwtConfig, redisConfig],
+      load: [appConfig, jwtConfig, redisConfig, authConfig],
       envFilePath: ['.env'],
     }),
 

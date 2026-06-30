@@ -13,7 +13,15 @@ import { Request } from 'express';
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { StudentSignupDto, AdminSignupDto, EventAdminSignupDto } from './dto/signup.dto';
-import { LoginDto, OtpRequestDto, OtpVerifyDto, RefreshTokenDto, FcmTokenDto } from './dto/login.dto';
+import {
+  LoginDto,
+  OtpRequestDto,
+  OtpVerifyDto,
+  RefreshTokenDto,
+  FcmTokenDto,
+  ForgotPasswordDto,
+  ResetPasswordDto,
+} from './dto/login.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser, JwtPayload } from '../../common/decorators/current-user.decorator';
 import { Public } from '../../common/decorators/public.decorator';
@@ -99,19 +107,13 @@ export class AuthController {
   @Post('forgot-password')
   @HttpCode(HttpStatus.OK)
   @Throttle({ default: { limit: 5, ttl: 60000 } })
-  async forgotPassword(@Body() body: { identifier: string }, @Req() req: Request) {
-    if (!body?.identifier) {
-      throw new BadRequestException({
-        message: 'Validation failed',
-        errors: { identifier: 'Email or mobile number is required' },
-        statusCode: 422,
-      });
-    }
-    // Reuses OTP request flow — delivers the code via email (or SMS for a phone
-    // identifier). purpose:'reset' makes the email read "password reset code" and
-    // must match the verify step in resetPassword below.
+  async forgotPassword(@Body() dto: ForgotPasswordDto, @Req() req: Request) {
+    // AUTH-017: Forgot Password is Email OTP only. requestOtp enforces email-only
+    // (Mobile OTP → Coming Soon) and returns a non-enumerating generic success.
+    // purpose:'reset' makes the email read "password reset code" and matches the
+    // verify step in resetPassword below.
     return this.authService.requestOtp(
-      { identifier: body.identifier, purpose: 'reset' },
+      { identifier: dto.identifier, purpose: 'reset' },
       req.requestId,
     );
   }
@@ -119,35 +121,16 @@ export class AuthController {
   @Public()
   @Post('reset-password')
   @HttpCode(HttpStatus.OK)
-  async resetPassword(
-    @Body() body: { identifier: string; otp: string; newPassword: string },
-    @Req() req: Request,
-  ) {
-    if (!body?.identifier || !body?.otp || !body?.newPassword) {
-      throw new BadRequestException({
-        message: 'Validation failed',
-        errors: {
-          identifier: !body?.identifier ? 'Required' : undefined,
-          otp: !body?.otp ? 'Required' : undefined,
-          newPassword: !body?.newPassword ? 'Required' : undefined,
-        },
-        statusCode: 422,
-      });
-    }
-    // Verify OTP, then update password
-    const verified = await this.authService.verifyOtp(
-      { identifier: body.identifier, otp: body.otp, purpose: 'reset' },
-      { requestId: req.requestId },
-    );
-    if ('accessToken' in verified) {
-      // OTP verified — update password via service
-      return this.authService.login(
-        { identifier: body.identifier, password: body.newPassword } as any,
-        { requestId: req.requestId },
-      ).then(() => ({ message: 'Password reset successful. Please log in again.' }))
-        .catch(() => ({ message: 'Password reset successful.' }));
-    }
-    return { message: 'Password reset successful.' };
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  async resetPassword(@Body() dto: ResetPasswordDto, @Req() req: Request) {
+    // Verifies the single-use Email OTP, persists the new password hash, and
+    // invalidates existing sessions (configurable). Replaces the prior flow which
+    // never actually updated the password.
+    return this.authService.resetPassword(dto.identifier, dto.otp, dto.newPassword, {
+      userAgent: req.headers['user-agent'],
+      ip: req.ip,
+      requestId: req.requestId,
+    });
   }
 
   // ── OTP ───────────────────────────────────────────────────────────────────
