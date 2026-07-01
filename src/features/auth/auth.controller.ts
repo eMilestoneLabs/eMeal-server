@@ -113,7 +113,7 @@ export class AuthController {
     // purpose:'reset' makes the email read "password reset code" and matches the
     // verify step in resetPassword below.
     return this.authService.requestOtp(
-      { identifier: dto.identifier, purpose: 'reset' },
+      { identifier: dto.identifier, purpose: 'reset', roleContext: dto.roleContext },
       req.requestId,
     );
   }

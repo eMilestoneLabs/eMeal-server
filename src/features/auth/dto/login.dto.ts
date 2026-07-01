@@ -23,6 +23,13 @@ export class OtpRequestDto {
   @IsOptional()
   @IsString()
   purpose?: 'login' | 'signup' | 'reset';
+
+  // Workspace the request came from: 'student' | 'admin' | 'event'.
+  // For reset, scopes the account lookup so a missing / wrong-workspace account
+  // is reported clearly (Issue 5).
+  @IsOptional()
+  @IsString()
+  roleContext?: string;
 }
 
 export class OtpVerifyDto {
@@ -43,6 +50,11 @@ export class ForgotPasswordDto {
   @IsString()
   @IsNotEmpty()
   identifier: string; // email (AUTH-017: Email OTP only)
+
+  // Workspace the reset was initiated from ('student' | 'admin' | 'event').
+  @IsOptional()
+  @IsString()
+  roleContext?: string;
 }
 
 export class ResetPasswordDto {

@@ -3,7 +3,6 @@ import {
   UnauthorizedException,
   ConflictException,
   BadRequestException,
-  NotFoundException,
   Logger,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -332,13 +331,25 @@ export class AuthService {
 
     const user = await this.usersRepo.findByIdentifier(dto.identifier);
 
-    // AUTH-037 + SEC-005: a password-reset OTP is delivered ONLY to a registered
-    // address. When the account is unknown we silently skip generation/delivery
-    // but still return an identical generic success so the endpoint can't be used
-    // to enumerate accounts.
-    if (purpose === 'reset' && !user) {
-      this.logger.warn('Password reset requested for an unknown identifier — generic success returned');
-      return { message: 'If an account exists, an OTP has been sent.', expiresIn: cfg.otp.ttlSeconds };
+    // AUTH-037 + SEC-005 (Option B — anti-enumeration): a reset code is delivered
+    // ONLY to a registered address that matches the workspace it was requested
+    // from, but the endpoint NEVER reveals whether an account exists or its role.
+    // When there is no matching account we silently skip generation/delivery and
+    // return an identical generic success. A reset can never succeed without a
+    // server-stored OTP, so a wrong/unknown email is a harmless dead-end.
+    if (purpose === 'reset') {
+      const matches =
+        !!user &&
+        (!dto.roleContext || this.roleMatchesContext(user.role, dto.roleContext));
+      if (!matches) {
+        this.logger.warn(
+          'Password reset requested for an unknown/wrong-workspace identifier — generic success returned',
+        );
+        return {
+          message: 'If an account exists for this email, a reset code has been sent.',
+          expiresIn: cfg.otp.ttlSeconds,
+        };
+      }
     }
 
     await this.authRepo.createOtpRequest({
@@ -741,25 +752,58 @@ export class AuthService {
   }
 
     private async checkIdentifierAvailability(email?: string, phone?: string) {
+    // Issue 5: email + mobile are unique across the ENTIRE user base (any role).
+    // The error names which workspace already owns the identifier so the user
+    // knows where their existing account lives.
     if (email) {
-      const emailExists = await this.usersRepo.existsByEmail(email);
-      if (emailExists) {
+      const existing = await this.usersRepo.findByEmail(email);
+      if (existing) {
+        const label = this.workspaceLabel(this.contextForRole(existing.role));
         throw new ConflictException({
           message: 'Validation failed',
-          errors: { email: 'Email already registered' },
+          errors: { email: `This email already has a ${label} account` },
           statusCode: 409,
         });
       }
     }
     if (phone) {
-      const phoneExists = await this.usersRepo.existsByPhone(phone);
-      if (phoneExists) {
+      const existing = await this.usersRepo.findByPhone(phone);
+      if (existing) {
+        const label = this.workspaceLabel(this.contextForRole(existing.role));
         throw new ConflictException({
           message: 'Validation failed',
-          errors: { mobileNumber: 'Mobile number already registered' },
+          errors: { mobileNumber: `This mobile number already has a ${label} account` },
           statusCode: 409,
         });
       }
+    }
+  }
+
+  // ── Role ⇄ workspace mapping (Issue 5) ──────────────────────────────────────
+
+  private static readonly _adminRoles = [
+    'messManager', 'hostelManager', 'hostelAdmin', 'organizationManager',
+  ];
+  private static readonly _eventRoles = ['eventAdmin', 'eventGuest'];
+
+  private contextForRole(role: string): 'student' | 'admin' | 'event' {
+    if (AuthService._adminRoles.includes(role)) return 'admin';
+    if (AuthService._eventRoles.includes(role)) return 'event';
+    return 'student';
+  }
+
+  private roleMatchesContext(role: string, context: string): boolean {
+    return this.contextForRole(role) === context;
+  }
+
+  private workspaceLabel(context?: string): string {
+    switch (context) {
+      case 'admin':
+        return 'Admin/Manager';
+      case 'event':
+        return 'Event';
+      default:
+        return 'Student/Member';
     }
   }
 
