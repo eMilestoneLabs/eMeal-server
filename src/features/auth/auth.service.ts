@@ -352,7 +352,7 @@ export class AuthService {
           'Password reset unmatched (unknown / wrong-workspace / missing context) — generic success, no code sent',
         );
         return {
-          message: 'If an account exists for this email, a reset code has been sent.',
+          message: AuthService._resetGenericMessage,
           expiresIn: cfg.otp.ttlSeconds,
         };
       }
@@ -404,9 +404,10 @@ export class AuthService {
       );
     }
 
-    // For reset, keep the message identical to the unknown-account branch above
-    // (anti-enumeration). For login/signup a normal confirmation is fine.
-    const message = purpose === 'reset' ? 'If an account exists, an OTP has been sent.' : 'OTP sent successfully';
+    // For reset, return the SAME shared message as the no-match branch above
+    // (anti-enumeration — responses must be byte-identical). Login/signup get a
+    // normal confirmation.
+    const message = purpose === 'reset' ? AuthService._resetGenericMessage : 'OTP sent successfully';
 
     return {
       message,
@@ -791,6 +792,11 @@ export class AuthService {
     'messManager', 'hostelManager', 'hostelAdmin', 'organizationManager',
   ];
   private static readonly _eventRoles = ['eventAdmin', 'eventGuest'];
+
+  // Single source for the reset response so the "sent" and "not-sent" branches
+  // return a BYTE-IDENTICAL message (anti-enumeration, SEC-005). Never split.
+  private static readonly _resetGenericMessage =
+    'If an account exists for this email, a reset code has been sent.';
 
   private contextForRole(role: string): 'student' | 'admin' | 'event' {
     if (AuthService._adminRoles.includes(role)) return 'admin';
