@@ -338,12 +338,18 @@ export class AuthService {
     // return an identical generic success. A reset can never succeed without a
     // server-stored OTP, so a wrong/unknown email is a harmless dead-end.
     if (purpose === 'reset') {
+      // STRICT workspace isolation (security): a reset code is sent ONLY when the
+      // account exists AND belongs to the workspace the request came from. An
+      // absent OR mismatched roleContext yields an identical generic success with
+      // NO code — so an Admin account can never be reset from the Student flow
+      // (and vice-versa), and the endpoint still never enumerates accounts.
       const matches =
         !!user &&
-        (!dto.roleContext || this.roleMatchesContext(user.role, dto.roleContext));
+        !!dto.roleContext &&
+        this.roleMatchesContext(user.role, dto.roleContext);
       if (!matches) {
         this.logger.warn(
-          'Password reset requested for an unknown/wrong-workspace identifier — generic success returned',
+          'Password reset unmatched (unknown / wrong-workspace / missing context) — generic success, no code sent',
         );
         return {
           message: 'If an account exists for this email, a reset code has been sent.',
