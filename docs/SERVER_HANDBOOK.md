@@ -671,3 +671,89 @@ The app added a **stale-while-revalidate** cache (`ResponseCacheService`) so ret
 dashboards/menu/attendance/groups **instantly** while a fresh fetch runs. This is **client-side** — no
 backend change. The remaining gap is **cold-boot** (first-ever load = network-bound); the real fix is an
 **India edge / server region** (infra decision). Backend stays the single source of truth.
+
+---
+
+# PART 15 — GOLDEN PERFORMANCE RELEASE (2026-07-03): changes, measured baselines & full diagnostic pack
+
+Release `11fcbcd` (+ nginx keepalive follow-up). Everything additive; no contract/schema change.
+
+## 15.1 What changed (backend + infra + app)
+| Layer | Change | Why |
+|---|---|---|
+| Backend | **NEW `GET /api/v1/dashboard/admin/overview?date=YYYY-MM-DD`** (`src/features/overview/` — own module to avoid the Attendance→Dashboard module cycle). Composes GroupsService + MealsService + AttendanceService (Promise.allSettled, fail-soft). Admin roles only. | Admin dashboard cold load = **1 request instead of 1+2N+M in 3 sequential waves** |
+| Backend | `dashboard.repository.ts` `getOrgTimezone` fixed (was infinite self-recursion, dead code) + wired into `getTodayBoundsInOrgTz` (5-min in-process TTL) | Latent crash removed; 1 PK query saved per dashboard cache miss |
+| Nginx | `keepalive_timeout 650s; keepalive_requests 10000;` on **api + cdn** vhosts (repo `nginx/emilestone.conf`) | Default ~75s closed the phone's TLS connection between taps → every screen paid a fresh ~1.5-2s handshake on a high-RTT link. 650s pairs with the app's 600s client idle (client closes first) |
+| App | Instant boot (session restored from storage, `/auth/me` validates in background), `/health` TLS pre-warm during splash, h2 idle 60s→600s, image-cache seeding on upload (meal + avatar), login-time warm of default-group attendance + members + ≤30 avatars | Cold start 15s → ~2s; image reflect 5-6s → instant; per-tab 5s → warm round-trip |
+
+## 15.2 Measured baselines (live server, 2026-07-03 — re-measure against these)
+| Parameter | Measured | Target |
+|---|---|---|
+| Per-endpoint compute (localhost TTFB) | 8-13 ms avg (`/dashboard/admin` 27 ms) | < 200 ms |
+| `overview` endpoint (full admin dashboard) | 200 OK in 106-317 ms (317 = cold Redis; warm ~110-215) | < 300 ms |
+| Unauthenticated rejection cost | 5-18 ms | cheap ✅ |
+| k6 1000 VU × 3 min (served requests) | med 68 ms · p95 **158 ms** · max 321 ms · ~980 req/s | p95 < 300 ms |
+| k6 "97.7% errors" | = per-IP throttle (`THROTTLE_LIMIT=1000/min`) correctly limiting a single-IP flood; 4000 allowed = exact budget. NOT app failure | by design |
+| PM2 workers under load | 4 × ~117 MB, flat (no leak) | stable |
+| PostgreSQL cache hit | 99.99 % | > 99 % |
+| Redis | 2.69 MB used; hits 2.63 M / misses 4.85 M (~35 % — many single-shot per-meal/day keys; fine) | small |
+| System | RAM 1.7/7.8 G · disk 18 % · swap 0 · Prometheus 5/5 up | headroom |
+| nginx 404/503 noise | bot scans (`/wp-config.php`, `.env` probes) being rate-limited → 503. Harmless; Fail2Ban/limit_req working | expected |
+
+Known gotcha: `POST /auth/login` accepts ONLY `identifier`+`password` — any extra field (e.g.
+`roleContext`) is rejected 422 by `forbidNonWhitelisted`. Login throttle: 10/min/IP.
+
+## 15.3 FULL DIAGNOSTIC PACK (run all; compare against §15.2)
+```bash
+cd ~/eMeal-server
+# ── A. Service health ─────────────────────────────────────────────────────────
+uptime && free -h && df -h / && swapon --show
+pm2 status && pm2 logs emeal-server --err --lines 30 --nostream
+curl -s http://127.0.0.1:3000/api/v1/health; echo
+docker ps --format "table {{.Names}}\t{{.Status}}"
+# ── B. Speed (needs admin creds) ──────────────────────────────────────────────
+read -p "Admin email: " EMAIL; read -s -p "Password: " PASS; echo
+TOKEN=$(curl -s -X POST http://127.0.0.1:3000/api/v1/auth/login -H 'Content-Type: application/json' \
+  -d "{\"identifier\":\"$EMAIL\",\"password\":\"$PASS\"}" | grep -o '"accessToken":"[^"]*' | cut -d'"' -f4)
+echo "token length: ${#TOKEN}"
+for i in 1 2 3 4 5; do curl -s -o /dev/null -w "overview %{time_total}s http=%{http_code}\n" \
+  -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:3000/api/v1/dashboard/admin/overview?date=$(date +%F)"; done
+BENCH_TOKEN="$TOKEN" bash deploy/benchmark-endpoints.sh
+# ── C. Load + concurrency (k6 installed) ──────────────────────────────────────
+k6 run deploy/loadtest.js          # NOTE: served-request p95 is the real number;
+                                   # the error % is the per-IP throttle by design
+# ── D. Memory-leak watch (run DURING k6 in a 2nd terminal) ────────────────────
+for i in $(seq 1 12); do date +%T; pm2 jlist | grep -o '"memory":[0-9]*' \
+  | awk -F: '{printf "  rss=%.0fMB\n", $2/1048576}'; sleep 10; done
+# ── E. Data stores ────────────────────────────────────────────────────────────
+REDIS_PW=$(grep -m1 '^REDIS_PASSWORD=' .env | cut -d= -f2-)
+docker exec emeal_redis redis-cli -a "$REDIS_PW" info stats 2>/dev/null | grep -E "keyspace_hits|keyspace_misses|evicted|rejected"
+docker exec emeal_redis redis-cli -a "$REDIS_PW" info memory 2>/dev/null | grep -E "used_memory_human|maxmemory_human"
+docker exec emeal_postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT round(sum(blks_hit)*100.0/nullif(sum(blks_hit)+sum(blks_read),0),2) AS cache_hit_pct FROM pg_stat_database;"'
+docker exec emeal_postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT pg_size_pretty(pg_database_size(current_database()));"'
+# ── F. Security posture ───────────────────────────────────────────────────────
+sudo sshd -T 2>/dev/null | grep -E "^(passwordauthentication|permitrootlogin)"   # expect no + no
+sudo ufw status | head -12
+sudo fail2ban-client status sshd | grep -E "Currently banned|Total banned"
+curl -sI https://api.emilestone.com/api/v1/health | grep -iE "strict-transport|x-frame|x-content"
+echo | openssl s_client -connect api.emilestone.com:443 -alpn h2 2>/dev/null | grep -E "ALPN|Protocol|Cipher"
+sudo certbot certificates 2>/dev/null | grep -E "Domains|Expiry"
+# ── G. Long-term stability ────────────────────────────────────────────────────
+pm2 describe emeal-server | grep -E "restarts|uptime|created at" | head -6
+docker inspect --format "{{.Name}} restarts={{.RestartCount}}" emeal_postgres emeal_redis emeal_minio
+ls -lht ~/backups/db/ | head -4                                   # daily backups landing?
+grep -c "restore-verified=1" ~/backups/backup.log 2>/dev/null || tail -3 ~/backups/*.log 2>/dev/null
+curl -s http://127.0.0.1:9090/api/v1/targets | grep -o '"health":"[a-z]*"' | sort | uniq -c   # all "up"
+sudo tail -300 /var/log/nginx/access.log | awk "{print \$9}" | sort | uniq -c | sort -rn | head -8
+journalctl -p err --since "24h ago" --no-pager | tail -10
+# ── H. Keepalive verification (the 2026-07-03 fix) ────────────────────────────
+grep -B1 -A1 keepalive_timeout /etc/nginx/sites-available/emilestone
+```
+
+## 15.4 Interpreting long-term stability
+- **pm2 restarts (↺)** should only grow on deploys/reboots; unexplained growth = investigate `pm2 logs --err`.
+- **docker RestartCount** should stay 0 between reboots.
+- **Backups**: newest file in `~/backups/db/` must be < 26 h old and `restore-verified=1`.
+- **Cert expiry** > 14 days (auto-renews via certbot; alerting cron watches it).
+- **RSS** per worker drifting past ~300 MB and never falling = leak → capture `pm2 logs`, then fresh start.
+- **journalctl -p err** should be quiet; nginx 404/503 bursts from single foreign IPs are bot scans (rate-limited, banned).
