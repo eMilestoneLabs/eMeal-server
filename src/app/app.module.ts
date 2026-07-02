@@ -34,6 +34,7 @@ import { RealtimeModule } from '../realtime/realtime.module';
 // Phase B5
 import { EventsModule } from '../features/events/events.module';
 import { DashboardModule } from '../features/dashboard/dashboard.module';
+import { OverviewModule } from '../features/overview/overview.module';
 import { ExportsModule } from '../features/exports/exports.module';
 import { ReportsModule } from '../features/reports/reports.module';
 // Phase B6
@@ -83,6 +84,7 @@ import { HealthController } from './health.controller';
     // Phase B5
     EventsModule,
     DashboardModule,
+    OverviewModule,
     ExportsModule,
     ReportsModule,
     // Phase B6 — Queue infrastructure + background workers

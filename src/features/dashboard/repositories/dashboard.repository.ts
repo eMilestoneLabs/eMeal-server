@@ -34,7 +34,11 @@ export class DashboardRepository {
     const now = Date.now();
     const hit = DashboardRepository._tzCache.get(organizationId);
     if (hit && hit.expires > now) return hit.tz;
-    const tz = await this.getOrgTimezone(organizationId);
+    const org = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { timezone: true },
+    });
+    const tz = org?.timezone ?? 'Asia/Kolkata';
     DashboardRepository._tzCache.set(organizationId, { tz, expires: now + DashboardRepository._TZ_TTL_MS });
     return tz;
   }
@@ -48,11 +52,7 @@ export class DashboardRepository {
   private async getTodayBoundsInOrgTz(
     organizationId: string,
   ): Promise<{ todayUtc: Date; tomorrowUtc: Date }> {
-    const org = await this.prisma.organization.findUnique({
-      where: { id: organizationId },
-      select: { timezone: true },
-    });
-    const tz = org?.timezone ?? 'Asia/Kolkata';
+    const tz = await this.getOrgTimezone(organizationId);
     const todayStr = new Intl.DateTimeFormat('en-CA', {
       timeZone: tz,
       year: 'numeric',
