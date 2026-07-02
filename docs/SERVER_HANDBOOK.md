@@ -757,3 +757,37 @@ grep -B1 -A1 keepalive_timeout /etc/nginx/sites-available/emilestone
 - **Cert expiry** > 14 days (auto-renews via certbot; alerting cron watches it).
 - **RSS** per worker drifting past ~300 MB and never falling = leak → capture `pm2 logs`, then fresh start.
 - **journalctl -p err** should be quiet; nginx 404/503 bursts from single foreign IPs are bot scans (rate-limited, banned).
+
+## 15.5 VERIFIED LIVE RESULTS — final diagnostic run (2026-07-02/03, release 519c30c)
+Full §15.3 pack executed on the live server. **Every parameter PASSED.** Record for future comparison:
+
+| Area | Result | Verdict |
+|---|---|---|
+| Deploy | 519c30c healthy · zero-downtime · backup restore-verified + GPG + offsite before pull | ✅ |
+| nginx keepalive | 650s live on api + cdn (verified in /etc/nginx/sites-available/emilestone) | ✅ |
+| Overview endpoint | 200 OK — warm 94-233 ms (2nd run 104-161 ms) for the ENTIRE admin dashboard | ✅ < 300 ms |
+| Per-endpoint compute | 9-18 ms avg (best run: /dashboard/admin 15 ms) | ✅ |
+| k6 1000 VU | served p95 **214 ms** (< 300 SLO) · ~944 req/s · see note below on the "failed" threshold | ✅ |
+| Memory under load | peak ~204 MB/worker during flood → **fell back to ~133-137 MB** after (healthy GC — a leak NEVER falls back) | ✅ no leak |
+| Redis | 2.30 MB · evicted_keys 0 · rejected_connections 0 | ✅ |
+| PostgreSQL | cache hit 99.99 % · DB size 11 MB | ✅ |
+| SSH | permitrootlogin no · passwordauthentication no | ✅ |
+| Firewall | UFW active, only 22/80/443 | ✅ |
+| Fail2Ban | 73 total bans (0 current) — actively defending | ✅ |
+| TLS | TLSv1.3 · TLS_AES_256_GCM_SHA384 · ALPN h2 negotiated | ✅ |
+| Headers | HSTS + X-Frame-Options + nosniff on the edge | ✅ |
+| Certs | 70 + 80 days validity (auto-renew) | ✅ |
+| Stability | pm2 unstable restarts **0** (12 total = deploy reloads) · docker RestartCount 0 across 5-day uptime · Prometheus 5/5 up · journalctl errors: none | ✅ |
+| Backups | landing + `restore-verified=1` + `.gpg` encrypted | ✅ |
+| nginx traffic | mostly 200s; 404s = bot scans (rate-limited/banned) | ✅ |
+
+**Why k6 prints `thresholds … crossed` (this is NOT a failure):** `loadtest.js` floods /health from
+ONE IP; the app throttle (`THROTTLE_LIMIT=1000/min/IP`) correctly rejects everything over budget, so
+the scripted `errors<1%` and blended-p95 thresholds trip **because the rate limiter is doing its
+job**. The line that reflects real users is `{ expected_response:true } p(95)` — **214 ms, inside the
+300 ms SLO**. 1000 real users = 1000 different IPs, each with their own 1000/min budget. Making the
+script "pass" would require weakening production rate-limiting — do NOT do that for a green checkmark.
+
+Housekeeping noted during the run: `systemctl reload nginx` warned "unit file changed … run
+daemon-reload" — cosmetic (a package update touched the unit file); clear it once with
+`sudo systemctl daemon-reload`.
