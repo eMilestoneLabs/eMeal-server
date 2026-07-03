@@ -11,7 +11,7 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 
 /**
  * GroupType enum values — EXACTLY matching Flutter GroupType enum (M-05 fix).
@@ -195,6 +195,11 @@ export class MealConfigDto {
 }
 
 export class CreateGroupDto {
+  // Trimmed BEFORE validation — IsNotEmpty alone accepts whitespace-only
+  // strings (FR-GRP-013, caught live in the Pass 10 server validation).
+  @Transform(({ value }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
   @IsString()
   @IsNotEmpty()
   @MaxLength(100)

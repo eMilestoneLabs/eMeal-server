@@ -9,7 +9,7 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   MealConfigDto,
   VALID_GROUP_TYPES,
@@ -18,7 +18,12 @@ import {
 
 export class UpdateGroupDto {
   // SRS FR-GRP-013 (Pass 10): a PATCHed name may be omitted, never empty.
+  // Trimmed BEFORE validation — IsNotEmpty alone accepts whitespace-only
+  // strings (caught live in the Pass 10 server validation).
   @IsOptional()
+  @Transform(({ value }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
   @IsString()
   @IsNotEmpty({ message: 'Group name cannot be empty' })
   @MaxLength(100)
