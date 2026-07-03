@@ -246,6 +246,20 @@ export class RealtimeEventsService {
     this.logger.debug(`group.member.updated.v1 → group:${groupId} action=${payload.action}`);
   }
 
+  /**
+   * SRS FR-MODE-012 (Pass 6): meal-config / mode change pushed to the group
+   * room so student dashboards drop or add meal widgets in real time when an
+   * admin flips the mode mid-session — no stale meal UI, no stale actions.
+   */
+  emitGroupConfigUpdated(
+    groupId: string,
+    payload: { groupId: string; changes: Record<string, unknown> },
+  ): void {
+    if (!this.isReady) return;
+    this.gateway!.emitToGroup(groupId, 'group.config.updated.v1', payload);
+    this.logger.debug(`group.config.updated.v1 → group:${groupId}`);
+  }
+
   // ── B5 Dashboard/Analytics/Event events ──────────────────────────────────
 
   /**

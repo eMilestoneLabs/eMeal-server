@@ -231,6 +231,9 @@ model Group {
   vacationModeEnabled  Boolean  @default(true)
   // Additive: when ON, meals carry a ₹ price; shown to students + used for billing/exports
   mealPricingEnabled   Boolean  @default(false)
+  // SRS FR-TIME-005 (LOOP-090): per-group grace period (minutes) that extends
+  // the attendance-window close for late marking. Null = 0 (no grace).
+  attendanceGraceMinutes Int?
 
   maxMembers Int?
   isActive   Boolean  @default(true)

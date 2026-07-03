@@ -5,6 +5,7 @@ import {
   IsOptional,
   IsEnum,
   IsIn,
+  IsISO8601,
   Matches,
   MaxLength,
   ValidateNested,
@@ -59,6 +60,17 @@ export class MarkAttendanceDto {
   @IsString()
   @MaxLength(500)
   note?: string;
+
+  /**
+   * SRS FR-CONC-005 (LOOP-091): the client's claimed action time for
+   * offline-queued marks, ISO-8601. ADVISORY ONLY — window enforcement is
+   * server-authoritative (FR-TIME-010); a replay after close is rejected
+   * regardless (fail-safe default). Stored in the audit trail so disputed
+   * replays can be analysed.
+   */
+  @IsOptional()
+  @IsISO8601()
+  clientActionAt?: string;
 
   /**
    * Module 36 (FR-PG-013/031): multi-group selection set — required when the

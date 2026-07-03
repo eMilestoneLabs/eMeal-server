@@ -31,6 +31,8 @@ export class GroupEntity {
   vacationModeEnabled: boolean;
   // Additive: ₹ pricing toggle
   mealPricingEnabled: boolean;
+  // SRS FR-TIME-005: per-group late-marking grace (minutes). Null = 0.
+  attendanceGraceMinutes: number | null;
 
   // ── Computed from GroupMember at query time ───────────────────────────────
   memberCount: number;

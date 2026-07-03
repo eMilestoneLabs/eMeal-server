@@ -17,6 +17,24 @@ import { GroupEntity } from '../entities/group.entity';
 export class GroupsRepository {
   constructor(private readonly prisma: PrismaService) {}
 
+  // ── Org timezone (Pass 6, FR-TIME-011) ─────────────────────────────────────
+  // Small in-process TTL cache (same pattern as dashboard.repository
+  // getOrgTimezone) so hot read paths never pay a per-request PK lookup.
+  private readonly orgTzCache = new Map<string, { tz: string; exp: number }>();
+
+  async getOrganizationTimezone(organizationId: string): Promise<string> {
+    const ttlMs = parseInt(process.env.ORG_TZ_CACHE_TTL_MS ?? '300000', 10);
+    const hit = this.orgTzCache.get(organizationId);
+    if (hit && hit.exp > Date.now()) return hit.tz;
+    const org = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { timezone: true },
+    });
+    const tz = org?.timezone ?? 'Asia/Kolkata';
+    this.orgTzCache.set(organizationId, { tz, exp: Date.now() + ttlMs });
+    return tz;
+  }
+
   // ── Entity builder — computes membership fields from included relation ─────
 
   private buildEntity(raw: any): GroupEntity {
@@ -192,6 +210,7 @@ export class GroupsRepository {
       enabledPreferences: string[];
       vacationModeEnabled: boolean;
       mealPricingEnabled: boolean;
+      attendanceGraceMinutes: number | null;
       isActive: boolean;
       joinToken: string;
       joinTokenExpiresAt: Date | null;

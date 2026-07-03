@@ -68,6 +68,8 @@ export class GroupSerializer {
         enabledPreferences: group.enabledPreferences,
         vacationModeEnabled: group.vacationModeEnabled,
         mealPricingEnabled: group.mealPricingEnabled,
+        // SRS FR-TIME-005: per-group late-marking grace (minutes, 0 = none).
+        attendanceGraceMinutes: group.attendanceGraceMinutes ?? 0,
       },
 
       createdAt: group.createdAt.toISOString(),

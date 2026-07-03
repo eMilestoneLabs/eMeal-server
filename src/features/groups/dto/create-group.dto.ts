@@ -6,6 +6,7 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
   ValidateNested,
@@ -80,6 +81,16 @@ export class MealConfigDto {
   @IsOptional()
   @IsBoolean()
   mealPricingEnabled?: boolean;
+
+  /**
+   * SRS FR-TIME-005 (LOOP-090): grace period in minutes that extends the
+   * attendance-window close for late marking. 0 or null = no grace.
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(240)
+  attendanceGraceMinutes?: number;
 }
 
 export class CreateGroupDto {

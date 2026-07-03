@@ -21,7 +21,10 @@ import { QueryMealsDto } from './dto/query-meals.dto';
 import { ADMIN_ROLES } from '../../common/decorators/roles.decorator';
 import { PaginatedResponseDto } from '../../common/dto/paginated-response.dto';
 import { GroupsRepository } from '../groups/repositories/groups.repository';
-import { getCurrentTimeInTimezone } from '../../common/utils/date.utils';
+import {
+  getCurrentTimeInTimezone,
+  getWindowState,
+} from '../../common/utils/date.utils';
 import { hhmmToMinutes } from './utils/entry-chrono.util';
 import { StorageService } from '../../storage/storage.service';
 import { PreferencesService } from '../preferences/preferences.service';
@@ -272,6 +275,11 @@ export class MealsService {
     organizationId: string,
     groupId: string,
   ) {
+    // Pass 6: single group fetch reused by the planner branch, the
+    // attendance-only fallback AND window-state decoration (grace) below —
+    // collapses what used to be up to three identical lookups.
+    const planGroup = await this.groupsRepo.findById(groupId, organizationId);
+
     const result = await this.getMeals(userId, role, organizationId, {
       groupId,
       page: 1,
@@ -283,7 +291,6 @@ export class MealsService {
       // Mode) onto today's meals so per-day attendance window, preference
       // enforcement and meal visibility follow admin configuration. Attendance,
       // analytics, history and notifications stay unchanged (same mealId/date).
-      const planGroup = await this.groupsRepo.findById(groupId, organizationId);
       if (
         planGroup &&
         (planGroup.weeklyMenuEnabled || planGroup.dayWiseMealsEnabled)
@@ -347,27 +354,63 @@ export class MealsService {
         // (off-day) or nothing has ever been published → show NO meals. Never
         // master meals, never draft data.
         await this.attachPreferenceGroups(overlaid, organizationId);
-        return PaginatedResponseDto.of(overlaid, overlaid.length, 1, 50);
+        return this.withWindowMeta(
+          PaginatedResponseDto.of(overlaid, overlaid.length, 1, 50),
+          planGroup,
+          organizationId,
+        );
       }
       await this.attachPreferenceGroups(result.data as any[], organizationId);
-      return result;
+      return this.withWindowMeta(result, planGroup, organizationId);
     }
 
     // No active meals. Only provide the implicit attendance slot when the meal
     // system is DISABLED for this group (true attendance-only mode). When meals
     // are ENABLED but none configured, attendance is intentionally blocked.
-    const group = await this.groupsRepo.findById(groupId, organizationId);
-    if (group && group.mealsEnabled === false) {
+    if (planGroup && planGroup.mealsEnabled === false) {
       const slot = await this.ensureGeneralSlot(groupId, organizationId);
-      return PaginatedResponseDto.of(
-        [MealSerializer.toResponse(slot)],
-        1,
-        1,
-        50,
+      return this.withWindowMeta(
+        PaginatedResponseDto.of([MealSerializer.toResponse(slot)], 1, 1, 50),
+        planGroup,
+        organizationId,
       );
     }
 
-    return PaginatedResponseDto.of([], 0, 1, 50);
+    return this.withWindowMeta(
+      PaginatedResponseDto.of([], 0, 1, 50),
+      planGroup,
+      organizationId,
+    );
+  }
+
+  /**
+   * SRS FR-TIME-008/011 (LOOP-092): decorate today's meal list with the
+   * canonical per-meal window state plus the server clock and the group's
+   * grace period, so clients reconcile clock skew and disable controls
+   * proactively instead of trusting the device clock. Purely additive fields —
+   * older clients ignore them.
+   */
+  private async withWindowMeta(
+    response: any,
+    group: { attendanceGraceMinutes?: number | null } | null,
+    organizationId: string,
+  ) {
+    const timezone =
+      await this.groupsRepo.getOrganizationTimezone(organizationId);
+    const nowHHmm = getCurrentTimeInTimezone(timezone);
+    const graceMinutes = Math.max(0, group?.attendanceGraceMinutes ?? 0);
+    for (const m of response.data ?? []) {
+      m.windowState = getWindowState(
+        nowHHmm,
+        m?.attendanceWindow?.openTime ?? null,
+        m?.attendanceWindow?.closeTime ?? null,
+        graceMinutes,
+      );
+    }
+    response.serverTime = new Date().toISOString();
+    response.timezone = timezone;
+    response.graceMinutes = graceMinutes;
+    return response;
   }
 
   /**

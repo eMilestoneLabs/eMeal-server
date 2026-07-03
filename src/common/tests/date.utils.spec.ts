@@ -23,9 +23,18 @@ describe('date.utils', () => {
       expect(isWithinWindow('10:00', '07:00', '09:00')).toBe(false);
       expect(isWithinWindow('06:59', '07:00', '09:00')).toBe(false);
     });
-    it('is inclusive on both boundaries', () => {
+    // SRS FR-TIME-002 (LOOP-023): open-inclusive, close-EXCLUSIVE.
+    it('is inclusive of open and exclusive of close', () => {
       expect(isWithinWindow('07:00', '07:00', '09:00')).toBe(true);
-      expect(isWithinWindow('09:00', '07:00', '09:00')).toBe(true);
+      expect(isWithinWindow('09:00', '07:00', '09:00')).toBe(false);
+      expect(isWithinWindow('08:59', '07:00', '09:00')).toBe(true);
+    });
+    // SRS FR-TIME-005 (LOOP-090): grace extends the close boundary.
+    it('honours a grace period past close', () => {
+      expect(isWithinWindow('09:00', '07:00', '09:00', 10)).toBe(true);
+      expect(isWithinWindow('09:09', '07:00', '09:00', 10)).toBe(true);
+      expect(isWithinWindow('09:10', '07:00', '09:00', 10)).toBe(false);
+      expect(isWithinWindow('09:00', '07:00', '09:00', -5)).toBe(false);
     });
   });
 

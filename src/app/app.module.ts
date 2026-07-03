@@ -10,6 +10,7 @@ import redisConfig from '../config/redis.config';
 import authConfig from '../config/auth.config';
 import correctionsConfig from '../config/corrections.config';
 import preferencesConfig from '../config/preferences.config';
+import attendanceConfig from '../config/attendance.config';
 
 // Infrastructure
 import { PrismaModule } from '../prisma/prisma.module';
@@ -60,6 +61,7 @@ import { HealthController } from './health.controller';
         authConfig,
         correctionsConfig,
         preferencesConfig,
+        attendanceConfig,
       ],
       envFilePath: ['.env'],
     }),

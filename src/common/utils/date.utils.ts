@@ -53,22 +53,62 @@ export function getCurrentTimeInTimezone(timezone: string): string {
   }
 }
 
+/** Convert HH:mm to minutes since midnight. */
+function hhmmToMinutesSinceMidnight(t: string): number {
+  const [h, m] = t.split(':').map(Number);
+  return h * 60 + m;
+}
+
 /**
  * Check whether a HH:mm time string falls within an open–close window.
  * Compares by total minutes since midnight — no date ambiguity.
  *
+ * SRS FR-TIME-002 (LOOP-023): boundaries are inclusive of `open` and
+ * EXCLUSIVE of `close` (`open ≤ now < close`) — marking exactly at close is
+ * rejected unless a grace period applies.
+ * SRS FR-TIME-005 (LOOP-090): an optional per-group `graceMinutes` extends
+ * the close boundary (`now < close + grace`).
+ *
  * @example isWithinWindow('08:15', '07:00', '09:00') // → true
- * @example isWithinWindow('10:00', '07:00', '09:00') // → false
+ * @example isWithinWindow('09:00', '07:00', '09:00') // → false (close-exclusive)
+ * @example isWithinWindow('09:05', '07:00', '09:00', 10) // → true (grace)
  */
-export function isWithinWindow(time: string, open: string, close: string): boolean {
-  const toMinutes = (t: string): number => {
-    const [h, m] = t.split(':').map(Number);
-    return h * 60 + m;
-  };
-  const t = toMinutes(time);
-  const o = toMinutes(open);
-  const c = toMinutes(close);
-  return t >= o && t <= c;
+export function isWithinWindow(
+  time: string,
+  open: string,
+  close: string,
+  graceMinutes = 0,
+): boolean {
+  const t = hhmmToMinutesSinceMidnight(time);
+  const o = hhmmToMinutesSinceMidnight(open);
+  const c = hhmmToMinutesSinceMidnight(close);
+  return t >= o && t < c + Math.max(0, graceMinutes);
+}
+
+/**
+ * SRS FR-TIME-008 — canonical window state exposed to clients:
+ *   upcoming (now < open) · open (open ≤ now < close) ·
+ *   grace (close ≤ now < close+grace) · closed (now ≥ effective close).
+ */
+export type AttendanceWindowState = 'upcoming' | 'open' | 'grace' | 'closed';
+
+export function getWindowState(
+  time: string,
+  open: string | null,
+  close: string | null,
+  graceMinutes = 0,
+): AttendanceWindowState {
+  // FR-TIME-001 documented default: a meal with no window is always-open
+  // for the date.
+  if (!open || !close) return 'open';
+  const t = hhmmToMinutesSinceMidnight(time);
+  const o = hhmmToMinutesSinceMidnight(open);
+  const c = hhmmToMinutesSinceMidnight(close);
+  const g = Math.max(0, graceMinutes);
+  if (t < o) return 'upcoming';
+  if (t < c) return 'open';
+  if (t < c + g) return 'grace';
+  return 'closed';
 }
 
 /**

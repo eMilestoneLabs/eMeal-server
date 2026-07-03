@@ -1,4 +1,9 @@
-import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  ConflictException,
+  BadRequestException,
+} from '@nestjs/common';
 import { UsersRepository } from './repositories/users.repository';
 import { UserSerializer } from './serializers/user.serializer';
 import { UpdateUserDto } from './dto/update-user.dto';
@@ -75,6 +80,21 @@ export class UsersService {
           errors: { phone: 'Phone number already in use' },
         });
       }
+    }
+
+    // SRS Module 01 (AUTH-012/014): Mobile login preference is only meaningful
+    // when a mobile number is on file — reject the switch otherwise.
+    if (
+      dto.loginPreference === 'mobile' &&
+      !(dto.phone ?? user.phone)
+    ) {
+      throw new BadRequestException({
+        message: 'Validation failed',
+        errors: {
+          loginPreference:
+            'Add a mobile number before choosing Mobile as your login preference',
+        },
+      });
     }
 
     // Additive: a base64 data-URI avatar is uploaded to MinIO and stored as a

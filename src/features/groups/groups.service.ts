@@ -4,6 +4,7 @@ import {
   ConflictException,
   BadRequestException,
   ForbiddenException,
+  UnprocessableEntityException,
   Logger,
   Optional,
   Inject,
@@ -220,6 +221,32 @@ export class GroupsService {
       if (mc.enabledPreferences !== undefined) updateData.enabledPreferences = mc.enabledPreferences;
       if (mc.vacationModeEnabled !== undefined) updateData.vacationModeEnabled = mc.vacationModeEnabled;
       if (mc.mealPricingEnabled !== undefined) updateData.mealPricingEnabled = mc.mealPricingEnabled;
+      // SRS FR-TIME-005 (LOOP-090): per-group grace period — audited below.
+      if (mc.attendanceGraceMinutes !== undefined) {
+        updateData.attendanceGraceMinutes = mc.attendanceGraceMinutes;
+      }
+
+      // SRS FR-MODE-004 (LOOP): pricing requires the meal system. Evaluate the
+      // FINAL EFFECTIVE state so partial patches can't create pricing-in-AO.
+      const effPricing =
+        updateData.mealPricingEnabled ?? existing.mealPricingEnabled;
+      const effMealsOn = updateData.mealsEnabled ?? existing.mealsEnabled;
+      if (effPricing && effMealsOn === false) {
+        if (updateData.mealPricingEnabled === true) {
+          // This patch tried to ENABLE pricing in Attendance-Only → reject.
+          throw new UnprocessableEntityException({
+            message: 'Meal pricing requires the meal system to be enabled',
+            code: 'PRICING_REQUIRES_MEALS',
+            errors: {
+              mealPricingEnabled:
+                'Enable meals for this group before turning on meal pricing',
+            },
+          });
+        }
+        // This patch disabled meals while pricing was already ON → cascade
+        // pricing OFF (recorded in modeChanges audit) instead of blocking.
+        updateData.mealPricingEnabled = false;
+      }
     }
 
     const group = await this.groupsRepo.update(id, organizationId, updateData);
@@ -244,6 +271,8 @@ export class GroupsService {
       'preferencesEnabled',
       'vacationModeEnabled',
       'mealPricingEnabled',
+      // FR-TIME-005: grace changes are auditable (who/when/old→new).
+      'attendanceGraceMinutes',
     ] as const;
     const modeChanges: Record<string, { from: unknown; to: unknown }> = {};
     for (const key of modeFlagKeys) {
@@ -266,6 +295,15 @@ export class GroupsService {
       },
       requestId,
     });
+
+    // SRS FR-MODE-012 (Pass 6): push mode flips to the group room so student
+    // dashboards drop/add meal widgets in real time — no stale meal actions.
+    if (Object.keys(modeChanges).length > 0) {
+      this.realtime?.emitGroupConfigUpdated(id, {
+        groupId: id,
+        changes: modeChanges,
+      });
+    }
 
     return GroupSerializer.toResponse(group);
   }
@@ -735,6 +773,8 @@ export class GroupsService {
       enabledPreferences: group.enabledPreferences,
       vacationModeEnabled: group.vacationModeEnabled,
       mealPricingEnabled: group.mealPricingEnabled,
+      // SRS FR-TIME-005: per-group late-marking grace (minutes, 0 = none).
+      attendanceGraceMinutes: group.attendanceGraceMinutes ?? 0,
     };
   }
 

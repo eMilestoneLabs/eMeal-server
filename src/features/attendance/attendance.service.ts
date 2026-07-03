@@ -3,6 +3,7 @@ import {
   BadRequestException,
   ForbiddenException,
   NotFoundException,
+  UnprocessableEntityException,
   HttpException,
   Logger,
   Inject,
@@ -20,6 +21,8 @@ import {
   toUtcMidnight,
   getCurrentTimeInTimezone,
   isWithinWindow,
+  getWindowState,
+  AttendanceWindowState,
 } from '../../common/utils/date.utils';
 import {
   AttendanceSerializer,
@@ -148,6 +151,8 @@ export class AttendanceService {
     openTime: string | null;
     closeTime: string | null;
     price: number | null;
+    /** SRS FR-MODE-032: whether a published entry schedules this meal today. */
+    scheduledToday: boolean;
   }> {
     const dateUtc = toUtcMidnight(dateStr);
     const dow = (dateUtc.getUTCDay() + 6) % 7;
@@ -174,6 +179,7 @@ export class AttendanceService {
       openTime: entry?.openTime ? entry.openTime : master.openTime,
       closeTime: entry?.openTime ? entry.closeTime : master.closeTime,
       price: entry?.price != null ? entry.price : master.price,
+      scheduledToday: !!entry,
     };
   }
 
@@ -189,7 +195,17 @@ export class AttendanceService {
     const meal = await this.prisma.meal.findFirst({
       where: { id: dto.mealId, organizationId },
       include: {
-        group: { select: { id: true, mealsEnabled: true } },
+        group: {
+          select: {
+            id: true,
+            mealsEnabled: true,
+            // Pass 6: planner flags (FR-MODE-032 holiday guard) + grace
+            // period (FR-TIME-005) ride the same query — no extra round-trip.
+            weeklyMenuEnabled: true,
+            dayWiseMealsEnabled: true,
+            attendanceGraceMinutes: true,
+          },
+        },
         organization: { select: { timezone: true } },
       },
     });
@@ -239,6 +255,33 @@ export class AttendanceService {
       );
     }
 
+    // SRS FR-CONC-003 (LOOP double-tap): short-TTL Redis NX key de-duplicates
+    // rapid re-submits. On a duplicate, the already-written record is returned
+    // (idempotent) — no second event/audit is emitted. A first attempt that
+    // was REJECTED leaves no record, so the retry falls through to the normal
+    // validation path and gets the same canonical error.
+    const dedupTtl = this.config.get<number>(
+      'attendance.markDedupTtlSeconds',
+      3,
+    );
+    if (dedupTtl > 0) {
+      const dedupKey = `att:mark:${userId}:${dto.mealId}:${attendanceDate}:${status}`;
+      const firstWriter = await this.redis.setDedup(dedupKey, dedupTtl);
+      if (!firstWriter) {
+        const existing = await this.prisma.attendanceRecord.findFirst({
+          where: {
+            organizationId,
+            userId,
+            mealId: dto.mealId,
+            attendanceDate: toUtcMidnight(attendanceDate),
+          },
+        });
+        if (existing && existing.status === status) {
+          return AttendanceSerializer.toMarkResponse(existing as any);
+        }
+      }
+    }
+
     // Per-day window override (Weekly / Day-Wise Meal Mode): a published
     // schedule entry for THIS meal today takes precedence over the master meal
     // window, so enforcement matches exactly what the student sees on
@@ -258,22 +301,57 @@ export class AttendanceService {
     const effectiveOpen = effective.openTime;
     const effectiveClose = effective.closeTime;
 
-    // Check within attendance window (effective = per-day override or master)
+    // SRS FR-MODE-032 (LOOP-094): holiday / no-meal day. When the group runs a
+    // planner mode (Weekly / Day-Wise), students see ONLY the published
+    // schedule — a meal with no published entry today is a no-meal day and
+    // must be unmarkable (and therefore never billed or counted absent).
+    // Attendance-only groups (mealsEnabled=false) are exempt: their implicit
+    // general slot never appears in schedules.
+    const plannerActive =
+      meal.group?.mealsEnabled !== false &&
+      (meal.group?.weeklyMenuEnabled === true ||
+        meal.group?.dayWiseMealsEnabled === true);
+    if (plannerActive && !effective.scheduledToday) {
+      throw new UnprocessableEntityException({
+        message: 'No meal today — this meal is not scheduled for today',
+        code: 'NO_MEAL_TODAY',
+        errors: { mealId: 'This meal is not scheduled for today' },
+      });
+    }
+
+    // Check within attendance window (effective = per-day override or master).
+    // SRS FR-TIME-002: open-inclusive, close-EXCLUSIVE (LOOP-023).
+    // SRS FR-TIME-005: per-group grace extends close (LOOP-090).
+    // SRS FR-TIME-008: canonical window state (upcoming/open/grace/closed).
+    const graceMinutes = Math.max(
+      0,
+      meal.group?.attendanceGraceMinutes ?? 0,
+    );
+    let windowState: AttendanceWindowState = 'open';
     if (effectiveOpen && effectiveClose) {
       const currentTime = getCurrentTimeInTimezone(orgTimezone);
-      const withinWindow = isWithinWindow(
+      windowState = getWindowState(
         currentTime,
         effectiveOpen,
         effectiveClose,
+        graceMinutes,
       );
 
-      if (!withinWindow) {
+      if (windowState === 'upcoming' || windowState === 'closed') {
         // GAP-ATT-1 (RESOLVED): source-of-truth requires HTTP 423 (Locked) for
         // out-of-window marks. Flat error contract (LAW-12), same message text.
+        // SRS FR-TIME-011/012 (LOOP-091/092): machine-readable code, close
+        // instant and serverTime ride additively so clients reconcile skew and
+        // offline replays surface the canonical conflict.
         throw new HttpException(
           {
             message: `Attendance window closed. Window: ${effectiveOpen}–${effectiveClose}`,
+            code: 'ATTENDANCE_WINDOW_CLOSED',
             errors: { window: `Closed at ${effectiveClose}` },
+            windowState,
+            closeTime: effectiveClose,
+            graceMinutes,
+            serverTime: new Date().toISOString(),
             statusCode: 423,
           },
           423,
@@ -344,17 +422,32 @@ export class AttendanceService {
     // 8. Emit realtime event (marked.v1 = new mark, updated.v1 = re-mark)
     this.emitAttendanceUpdated(meal.groupId, record, organizationId, true);
 
-    // 9. Audit log (fire-and-forget)
+    // 9. Audit log (fire-and-forget). Grace marks are auditable (FR-TIME-005)
+    // and an offline replay's claimed action time is kept for conflict
+    // analysis (FR-CONC-005) — advisory only, never trusted for enforcement.
     this.audit.log({
       organizationId,
       actorId: userId,
       targetId: record.id,
       targetType: 'Attendance',
       action: AuditAction.create,
+      metadata: {
+        windowState,
+        ...(windowState === 'grace'
+          ? { markedInGrace: true, graceMinutes, windowClose: effectiveClose }
+          : {}),
+        ...(dto.clientActionAt ? { clientActionAt: dto.clientActionAt } : {}),
+      },
       requestId,
     });
 
-    return AttendanceSerializer.toMarkResponse(record);
+    // FR-TIME-011: serverTime + windowState ride additively on the response
+    // so clients reconcile clock skew and disable controls proactively.
+    return {
+      ...AttendanceSerializer.toMarkResponse(record),
+      serverTime: new Date().toISOString(),
+      windowState,
+    };
   }
 
   // ── Bulk mark attendance (student) ────────────────────────────────────────
