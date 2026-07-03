@@ -12,7 +12,15 @@ interface ErrorResponse {
   message: string;
   errors: Record<string, string | string[]>;
   statusCode: number;
+  [extra: string]: unknown;
 }
+
+/**
+ * Keys owned by the flat contract (or injected by Nest itself) that must
+ * never be overwritten by passthrough. `error` is Nest's auto-added class
+ * name (e.g. "Locked") — dropping it preserves the pre-existing body shape.
+ */
+const RESERVED_ERROR_KEYS = new Set(['message', 'errors', 'statusCode', 'error']);
 
 /**
  * Global exception filter — produces FLAT error shape required by Flutter.
@@ -35,6 +43,7 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     let status = HttpStatus.INTERNAL_SERVER_ERROR;
     let message = 'Internal server error';
     let errors: Record<string, string | string[]> = {};
+    const extras: Record<string, unknown> = {};
 
     if (exception instanceof HttpException) {
       status = exception.getStatus();
@@ -55,6 +64,14 @@ export class GlobalExceptionFilter implements ExceptionFilter {
           if (resp.errors && typeof resp.errors === 'object') {
             errors = resp.errors;
           }
+          // SRS FR-TIME-012: additive machine-readable fields (code,
+          // windowState, closeTime, serverTime, ...) ride at the root of the
+          // flat contract instead of being stripped.
+          for (const [key, value] of Object.entries(resp)) {
+            if (!RESERVED_ERROR_KEYS.has(key) && value !== undefined) {
+              extras[key] = value;
+            }
+          }
         }
       }
     } else if (exception instanceof Error) {
@@ -66,7 +83,7 @@ export class GlobalExceptionFilter implements ExceptionFilter {
       );
     }
 
-    const errorBody: ErrorResponse = { message, errors, statusCode: status };
+    const errorBody: ErrorResponse = { ...extras, message, errors, statusCode: status };
 
     this.logger.warn(
       `HTTP ${status} on ${request.method} ${request.url}`,
