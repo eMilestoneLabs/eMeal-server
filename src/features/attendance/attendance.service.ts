@@ -9,11 +9,13 @@ import {
   Optional,
 } from '@nestjs/common';
 import { AuditAction } from '@prisma/client';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../redis/redis.service';
 import { AuditService } from '../../audit/audit.service';
 import { AttendanceRepository } from './repositories/attendance.repository';
 import { MembersRepository } from '../groups/repositories/members.repository';
+import { PreferencesService } from '../preferences/preferences.service';
 import {
   toUtcMidnight,
   getCurrentTimeInTimezone,
@@ -92,6 +94,8 @@ export class AttendanceService {
     private readonly membersRepo: MembersRepository,
     private readonly redis: RedisService,
     private readonly audit: AuditService,
+    private readonly config: ConfigService,
+    private readonly preferencesService: PreferencesService,
     // Gateway injected optionally — avoids circular dep if realtime module loads after
     // Use ATTENDANCE_GATEWAY token to break the circular dependency safely
     @Optional() @Inject('ATTENDANCE_GATEWAY')
@@ -113,7 +117,39 @@ export class AttendanceService {
     attendanceDate: string,
     masterPrice: number | null,
   ): Promise<number | null> {
-    const dateUtc = toUtcMidnight(attendanceDate);
+    const effective = await this.resolveEffectiveWindow(
+      mealId,
+      groupId,
+      organizationId,
+      attendanceDate,
+      { openTime: null, closeTime: null, price: masterPrice },
+    );
+    return effective.price;
+  }
+
+  /**
+   * Resolves the EFFECTIVE attendance window + price for a meal on a date:
+   * the per-day published schedule entry (exact date, else recurring weekday)
+   * overrides the master meal values — matching exactly what the student sees
+   * on GET /meals/today. Public so the corrections module (Module 33) enforces
+   * the same window semantics as marking itself.
+   */
+  async resolveEffectiveWindow(
+    mealId: string,
+    groupId: string,
+    organizationId: string,
+    dateStr: string,
+    master: {
+      openTime: string | null;
+      closeTime: string | null;
+      price: number | null;
+    },
+  ): Promise<{
+    openTime: string | null;
+    closeTime: string | null;
+    price: number | null;
+  }> {
+    const dateUtc = toUtcMidnight(dateStr);
     const dow = (dateUtc.getUTCDay() + 6) % 7;
     let entry = await this.prisma.scheduleEntry.findFirst({
       where: {
@@ -121,7 +157,7 @@ export class AttendanceService {
         date: dateUtc,
         schedule: { groupId, organizationId, isPublished: true },
       },
-      select: { price: true },
+      select: { openTime: true, closeTime: true, price: true },
     });
     if (!entry) {
       entry = await this.prisma.scheduleEntry.findFirst({
@@ -131,10 +167,14 @@ export class AttendanceService {
           schedule: { groupId, organizationId, isPublished: true },
         },
         orderBy: { schedule: { weekStart: 'desc' } },
-        select: { price: true },
+        select: { openTime: true, closeTime: true, price: true },
       });
     }
-    return entry?.price ?? masterPrice ?? null;
+    return {
+      openTime: entry?.openTime ? entry.openTime : master.openTime,
+      closeTime: entry?.openTime ? entry.closeTime : master.closeTime,
+      price: entry?.price != null ? entry.price : master.price,
+    };
   }
 
   // ── Mark attendance (student) ─────────────────────────────────────────────
@@ -203,43 +243,20 @@ export class AttendanceService {
     // schedule entry for THIS meal today takes precedence over the master meal
     // window, so enforcement matches exactly what the student sees on
     // GET /meals/today. Falls back to the master window when no schedule applies.
-    let effectivePrice: number | null = meal.price ?? null;
-    let effectiveOpen = meal.attendanceWindowOpen;
-    let effectiveClose = meal.attendanceWindowClose;
-    {
-      const todayUtc = toUtcMidnight(todayInTz);
-      const dow = (todayUtc.getUTCDay() + 6) % 7;
-      let entry = await this.prisma.scheduleEntry.findFirst({
-        where: {
-          mealId: meal.id,
-          date: todayUtc,
-          schedule: { groupId: meal.groupId, organizationId, isPublished: true },
-        },
-        select: { openTime: true, closeTime: true, price: true },
-      });
-      if (!entry) {
-        entry = await this.prisma.scheduleEntry.findFirst({
-          where: {
-            mealId: meal.id,
-            dayOfWeek: dow,
-            schedule: {
-              groupId: meal.groupId,
-              organizationId,
-              isPublished: true,
-            },
-          },
-          orderBy: { schedule: { weekStart: 'desc' } },
-          select: { openTime: true, closeTime: true, price: true },
-        });
-      }
-      if (entry && entry.openTime) {
-        effectiveOpen = entry.openTime;
-        effectiveClose = entry.closeTime;
-      }
-      if (entry && entry.price != null) {
-        effectivePrice = entry.price;
-      }
-    }
+    const effective = await this.resolveEffectiveWindow(
+      meal.id,
+      meal.groupId,
+      organizationId,
+      todayInTz,
+      {
+        openTime: meal.attendanceWindowOpen,
+        closeTime: meal.attendanceWindowClose,
+        price: meal.price ?? null,
+      },
+    );
+    const effectivePrice = effective.price;
+    const effectiveOpen = effective.openTime;
+    const effectiveClose = effective.closeTime;
 
     // Check within attendance window (effective = per-day override or master)
     if (effectiveOpen && effectiveClose) {
@@ -264,6 +281,37 @@ export class AttendanceService {
       }
     }
 
+    // 5b. Module 36 (FR-PG-031/032/040): when the meal has explicit preference
+    // groups and the member marks Present, the selection set is validated
+    // server-side and priced (base + Σ delta×qty). Meals WITHOUT explicit
+    // groups stay on the legacy flat path untouched (FR-PG-021/100).
+    let markPrice = effectivePrice;
+    let derivedPreference = dto.preference ?? null;
+    let selectionSnapshot: Array<Record<string, unknown>> | undefined;
+    let selectionRows:
+      | Parameters<AttendanceRepository['upsert']>[0]['selectionRows']
+      | undefined;
+    if (status === 'present') {
+      const pgGroups = await this.preferencesService.getEffectiveGroupsForMeal(
+        meal.id,
+        organizationId,
+      );
+      if (pgGroups.length > 0) {
+        const validated = this.preferencesService.validateSelections(
+          pgGroups,
+          dto.selections ?? [],
+        );
+        // Option deltas bill only when meal pricing is active (base price set);
+        // without a base price, selections are recorded but never billed.
+        if (effectivePrice != null) {
+          markPrice = effectivePrice + validated.totalDelta;
+        }
+        derivedPreference = dto.preference ?? validated.primaryKey;
+        selectionSnapshot = validated.snapshot;
+        selectionRows = validated.rows;
+      }
+    }
+
     // 6. Upsert attendance (idempotent)
     const attendanceDateUtc = toUtcMidnight(attendanceDate);
     const record = await this.attendanceRepo.upsert({
@@ -273,11 +321,15 @@ export class AttendanceService {
       mealId: dto.mealId,
       attendanceDate: attendanceDateUtc,
       status,
-      preference: dto.preference ?? null,
+      preference: derivedPreference,
       note: dto.note ?? null,
       markedAt: new Date(),
       markedBy: null, // student marks own attendance
-      price: effectivePrice,
+      price: markPrice,
+      source: 'self', // Module 33 consent trail
+      ...(selectionRows !== undefined
+        ? { preferences: selectionSnapshot, selectionRows }
+        : {}),
     });
 
     // 7. Invalidate Redis cache
@@ -402,10 +454,15 @@ export class AttendanceService {
     dto: AdminOverrideDto,
     requestId?: string,
   ) {
-    // 1. Verify meal exists in org
+    // 1. Verify meal exists in org (+ pricing flag for the FR-OVR-001 gate)
     const meal = await this.prisma.meal.findFirst({
       where: { id: dto.mealId, organizationId },
-      select: { id: true, groupId: true, price: true },
+      select: {
+        id: true,
+        groupId: true,
+        price: true,
+        group: { select: { mealPricingEnabled: true } },
+      },
     });
     if (!meal) throw new NotFoundException('Meal not found');
 
@@ -425,6 +482,47 @@ export class AttendanceService {
       dto.attendanceDate,
       (meal as any).price ?? null,
     );
+
+    // FR-OVR-001 / FR-FAIR-010 (Module 33): the Δliability classifier.
+    // billable(present) = effectivePrice; billable(anything else / none) = 0.
+    // A liability-INCREASING override (none/absent/skip/vacation → present on
+    // a priced meal) is never applied unilaterally — it becomes a pending
+    // member confirmation (FR-OVR-020) and the record changes only after the
+    // member consents. Neutral/decrease overrides apply exactly as before,
+    // so Attendance-Only and unpriced groups are completely unaffected.
+    const pricingActive =
+      (meal as any).group?.mealPricingEnabled === true &&
+      (overridePrice ?? 0) > 0;
+    if (pricingActive && dto.status === 'present') {
+      const existing = await this.attendanceRepo.findByKey(
+        dto.userId,
+        dto.mealId,
+        attendanceDateUtc,
+        organizationId,
+      );
+      if (existing?.status !== 'present') {
+        const confirmation = await this.createMemberConfirmation({
+          adminId,
+          organizationId,
+          groupId: meal.groupId,
+          userId: dto.userId,
+          mealId: dto.mealId,
+          attendanceDate: attendanceDateUtc,
+          requestedStatus: dto.status,
+          requestedPreference: dto.preference ?? null,
+          note: dto.note ?? null,
+          requestId,
+        });
+        return {
+          requiresMemberConsent: true,
+          message:
+            'This change would increase the member’s bill, so it needs their consent. ' +
+            'A confirmation request has been sent to the member; the record updates only after they confirm.',
+          correctionRequest: confirmation,
+        };
+      }
+    }
+
     const record = await this.attendanceRepo.upsert({
       organizationId,
       groupId: meal.groupId,
@@ -437,6 +535,7 @@ export class AttendanceService {
       markedAt: new Date(),
       markedBy: adminId, // tracks who performed override
       price: overridePrice,
+      source: 'admin', // Module 33 consent trail (neutral/decrease change)
     });
 
     // 4. Invalidate cache
@@ -465,6 +564,178 @@ export class AttendanceService {
     });
 
     return AttendanceSerializer.toMarkResponse(record);
+  }
+
+  // ── Module 33: member confirmation + consented-change write path ──────────
+
+  /**
+   * FR-OVR-020: create (or idempotently reuse) a pending member confirmation
+   * when an admin proposes a liability-increasing change. Stored as an
+   * AttendanceCorrectionRequest with sourceChannel='admin_prompt'; the
+   * proposing admin is kept in reviewedBy and the member decides via
+   * confirm/decline (corrections module).
+   */
+  private async createMemberConfirmation(params: {
+    adminId: string;
+    organizationId: string;
+    groupId: string;
+    userId: string;
+    mealId: string;
+    attendanceDate: Date;
+    requestedStatus: string;
+    requestedPreference: string | null;
+    note: string | null;
+    requestId?: string;
+  }): Promise<Record<string, unknown>> {
+    const toPayload = (r: any) => ({
+      id: r.id,
+      status: r.status,
+      requestType: r.requestType,
+      sourceChannel: r.sourceChannel,
+      userId: r.userId,
+      mealId: r.mealId,
+      attendanceDate: r.attendanceDate.toISOString().slice(0, 10),
+      expiresAt: r.expiresAt.toISOString(),
+    });
+
+    // Idempotent: one open confirmation per (member, meal, date).
+    const existing = await this.prisma.attendanceCorrectionRequest.findFirst({
+      where: {
+        organizationId: params.organizationId,
+        userId: params.userId,
+        mealId: params.mealId,
+        attendanceDate: params.attendanceDate,
+        status: 'pending',
+        sourceChannel: 'admin_prompt',
+      },
+    });
+    if (existing) return toPayload(existing);
+
+    const expiryHours =
+      this.config.get<number>('corrections.expiryHours') ?? 48;
+    const created = await this.prisma.attendanceCorrectionRequest.create({
+      data: {
+        organizationId: params.organizationId,
+        groupId: params.groupId,
+        userId: params.userId,
+        mealId: params.mealId,
+        attendanceDate: params.attendanceDate,
+        requestType: 'claim_present',
+        requestedStatus: params.requestedStatus,
+        requestedPreference: params.requestedPreference,
+        reason: params.note,
+        status: 'pending',
+        sourceChannel: 'admin_prompt',
+        reviewedBy: params.adminId, // proposing admin (consent artifact trail)
+        expiresAt: new Date(Date.now() + expiryHours * 60 * 60 * 1000),
+      },
+    });
+
+    this.audit.log({
+      organizationId: params.organizationId,
+      actorId: params.adminId,
+      targetId: created.id,
+      targetType: 'AttendanceCorrectionRequest',
+      action: AuditAction.create,
+      metadata: {
+        sourceChannel: 'admin_prompt',
+        targetUserId: params.userId,
+        mealId: params.mealId,
+      },
+      requestId: params.requestId,
+    });
+
+    // Notify the member (their prompt) + the group (admin queue refresh).
+    this.gateway?.emitToUser(
+      params.userId,
+      'correction.requested.v1',
+      toPayload(created),
+    );
+    this.gateway?.emitToGroup(
+      params.groupId,
+      'correction.requested.v1',
+      toPayload(created),
+    );
+
+    return toPayload(created);
+  }
+
+  /**
+   * Module 33: shared write path for member-consented attendance changes
+   * (approved ACR, member confirmation, auto-approved decrease). One place
+   * for price snapshot, idempotent upsert, cache invalidation, realtime and
+   * audit — used by the corrections module so its writes behave EXACTLY like
+   * every other attendance write.
+   */
+  async applyConsentedChange(params: {
+    actorId: string;
+    organizationId: string;
+    userId: string;
+    groupId: string;
+    mealId: string;
+    attendanceDate: string; // YYYY-MM-DD
+    status: string;
+    preference?: string | null;
+    note?: string | null;
+    markedBy?: string | null;
+    source: string; // request | admin | system_default | verified
+    sourceRequestId?: string | null;
+    auditMetadata?: Record<string, unknown>;
+    requestId?: string;
+  }) {
+    const meal = await this.prisma.meal.findFirst({
+      where: { id: params.mealId, organizationId: params.organizationId },
+      select: { price: true },
+    });
+    const price = await this.resolveEffectiveMealPrice(
+      params.mealId,
+      params.groupId,
+      params.organizationId,
+      params.attendanceDate,
+      meal?.price ?? null,
+    );
+
+    const record = await this.attendanceRepo.upsert({
+      organizationId: params.organizationId,
+      groupId: params.groupId,
+      userId: params.userId,
+      mealId: params.mealId,
+      attendanceDate: toUtcMidnight(params.attendanceDate),
+      status: params.status,
+      preference: params.preference ?? null,
+      note: params.note ?? null,
+      markedAt: new Date(),
+      markedBy: params.markedBy ?? null,
+      price,
+      source: params.source,
+      sourceRequestId: params.sourceRequestId ?? null,
+    });
+
+    await this.invalidateAttendanceCache(
+      params.organizationId,
+      params.userId,
+      params.groupId,
+      params.attendanceDate,
+      params.mealId,
+    );
+
+    this.emitAttendanceUpdated(params.groupId, record, params.organizationId);
+
+    this.audit.log({
+      organizationId: params.organizationId,
+      actorId: params.actorId,
+      targetId: record.id,
+      targetType: 'Attendance',
+      action: AuditAction.update,
+      metadata: {
+        source: params.source,
+        sourceRequestId: params.sourceRequestId ?? null,
+        ...(params.auditMetadata ?? {}),
+      },
+      requestId: params.requestId,
+    });
+
+    return record;
   }
 
   // ── Get attendance history (paginated) ────────────────────────────────────

@@ -3,6 +3,7 @@ import {
   NotFoundException,
   BadRequestException,
   ConflictException,
+  UnprocessableEntityException,
   Logger,
   Optional,
   Inject,
@@ -41,6 +42,11 @@ function parseLocalDate(dateStr: string): Date {
 function isMonday(date: Date): boolean {
   return toDayOfWeek(date) === 0;
 }
+
+/** Human day labels (0=Monday…6=Sunday) for actionable validation errors. */
+const DAY_LABELS = [
+  'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday',
+] as const;
 
 /**
  * SchedulesService — business logic for meal schedule CRUD, publishing, and cloning.
@@ -314,6 +320,33 @@ export class SchedulesService {
         entries,
       );
     } else {
+      // FR-MEAL-032 (ISSUE-4/ISSUE-11): validate the existing draft entries
+      // BEFORE the flag-flip publish — a stale entry (meal deleted/disabled
+      // since the draft was saved) fails with an actionable 422 identifying
+      // the day + meal instead of publishing a broken week.
+      const existing = await this.schedulesRepo.findById(id, organizationId);
+      if (!existing) {
+        throw new NotFoundException({
+          message: 'Schedule not found',
+          errors: { id: 'Schedule does not exist in your organization' },
+        });
+      }
+      if (existing.entries.length > 0) {
+        const knownMealIds = await this.activeMealIds(
+          existing.groupId,
+          organizationId,
+        );
+        for (const e of existing.entries) {
+          if (!knownMealIds.has(e.mealId)) {
+            throw SchedulesService.entryMealInvalid(
+              e.mealId,
+              e.dayOfWeek,
+              e.mealName ?? e.meal?.displayName ?? e.meal?.name ?? null,
+              'meal no longer exists or is disabled',
+            );
+          }
+        }
+      }
       schedule = await this.schedulesRepo.publish(id, organizationId);
     }
 
@@ -458,21 +491,22 @@ export class SchedulesService {
       price: number | null;
     }> = [];
 
-    for (const entry of entriesDto) {
-      // Verify mealId belongs to this group and org
-      const isValid = await this.mealsRepo.verifyGroupOwnership(
-        entry.mealId,
-        groupId,
-        organizationId,
-      );
-      if (!isValid) {
-        throw new BadRequestException({
-          message: 'Invalid mealId in entries',
-          errors: { mealId: `Meal ${entry.mealId} does not belong to this group` },
-        });
-      }
+    // FR-MEAL-032 (ISSUE-4/ISSUE-11): validate ALL entries against the group's
+    // active meal catalogue in ONE query (previously one ownership query per
+    // entry) and reject with an actionable, machine-readable 422 identifying
+    // the exact day + meal — never an opaque "Meal Invalid".
+    const knownMealIds = await this.activeMealIds(groupId, organizationId);
 
+    for (const entry of entriesDto) {
       const date = parseLocalDate(entry.date);
+      if (!knownMealIds.has(entry.mealId)) {
+        throw SchedulesService.entryMealInvalid(
+          entry.mealId,
+          toDayOfWeek(date),
+          entry.mealName ?? null,
+          'meal not found in this group (deleted, disabled, or wrong group)',
+        );
+      }
       validatedEntries.push({
         id: entry.id,
         mealId: entry.mealId,
@@ -492,5 +526,43 @@ export class SchedulesService {
     }
 
     return validatedEntries;
+  }
+
+  // ── FR-MEAL-032 helpers (ISSUE-4 / ISSUE-11) ───────────────────────────────
+
+  /** Practical upper bound on meals per group for the one-shot catalogue load. */
+  private static readonly MAX_GROUP_MEALS = 500;
+
+  /** Active meal ids of a group, loaded in one query. */
+  private async activeMealIds(
+    groupId: string,
+    organizationId: string,
+  ): Promise<Set<string>> {
+    const catalogue = await this.mealsRepo.findByGroup(groupId, organizationId, {
+      page: 1,
+      limit: SchedulesService.MAX_GROUP_MEALS,
+    });
+    return new Set(catalogue.data.map((m) => m.id));
+  }
+
+  /**
+   * Actionable 422 for an invalid schedule entry — identifies the day and the
+   * meal plus a stable machine-readable code, so the client can show
+   * "Tuesday · Lunch · meal not found" instead of a generic "Meal Invalid".
+   */
+  private static entryMealInvalid(
+    mealId: string,
+    dayOfWeek: number,
+    mealName: string | null,
+    reason: string,
+  ): UnprocessableEntityException {
+    const day = DAY_LABELS[dayOfWeek] ?? `Day ${dayOfWeek + 1}`;
+    const label =
+      mealName && mealName.trim().length > 0 ? mealName.trim() : mealId;
+    return new UnprocessableEntityException({
+      message: `${day} · ${label} · ${reason}`,
+      code: 'SCHEDULE_ENTRY_MEAL_INVALID',
+      errors: { day, mealId, reason },
+    });
   }
 }

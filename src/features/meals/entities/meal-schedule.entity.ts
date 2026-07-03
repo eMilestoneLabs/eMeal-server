@@ -52,6 +52,11 @@ export class ScheduleEntryEntity {
     imageUrl: string | null;
     description: string | null;
     price: number | null;
+    // FR-MEAL-007: template window used for chronological within-day ordering
+    // when the entry has no per-day override. Optional — snapshots published
+    // before this field existed simply fall back to `order`.
+    attendanceWindowOpen?: string | null;
+    attendanceWindowClose?: string | null;
   };
 
   constructor(partial: Partial<ScheduleEntryEntity> & Pick<ScheduleEntryEntity, 'id' | 'scheduleId' | 'mealId' | 'dayOfWeek' | 'date'>) {

@@ -192,19 +192,29 @@ export class GroupsService {
       if (mc.mealsEnabled !== undefined) updateData.mealsEnabled = mc.mealsEnabled;
       if (mc.weeklyMenuEnabled !== undefined) updateData.weeklyMenuEnabled = mc.weeklyMenuEnabled;
       if (mc.dayWiseMealsEnabled !== undefined) updateData.dayWiseMealsEnabled = mc.dayWiseMealsEnabled;
-      // Additive guard: Weekly Menu and Day-Wise Meals are mutually exclusive,
-      // and when the meal system is ON exactly one mode must be active
-      // (truth table: both-ON and both-OFF are Not Allowed).
-      if (updateData.weeklyMenuEnabled === true) updateData.dayWiseMealsEnabled = false;
-      if (updateData.dayWiseMealsEnabled === true) updateData.weeklyMenuEnabled = false;
-      // Not-both-OFF: if both modes are turned off while meals stay enabled,
-      // default to Weekly Meal Mode so the meal system always has a delivery mode.
+      // FR-MODE-003/063 (server-enforced, atomic): Weekly Menu and Day-Wise
+      // Meals are mutually exclusive, and while the meal system is ON exactly
+      // one mode must be active (both-ON and both-OFF are Not Allowed).
+      // Evaluate against the FINAL EFFECTIVE state (patch value ?? current DB
+      // value) so a partial PATCH (FR-MEAL-010 / ISSUE-9) can never leave the
+      // group in an invalid combination — e.g. turning Weekly off while
+      // Day-Wise was already off used to persist both-OFF.
       if (
-        updateData.mealsEnabled !== false &&
-        updateData.weeklyMenuEnabled === false &&
-        updateData.dayWiseMealsEnabled === false
+        mc.mealsEnabled !== undefined ||
+        mc.weeklyMenuEnabled !== undefined ||
+        mc.dayWiseMealsEnabled !== undefined
       ) {
-        updateData.weeklyMenuEnabled = true;
+        const effMeals = updateData.mealsEnabled ?? existing.mealsEnabled;
+        let effWeekly = updateData.weeklyMenuEnabled ?? existing.weeklyMenuEnabled;
+        let effDayWise = updateData.dayWiseMealsEnabled ?? existing.dayWiseMealsEnabled;
+        // The mode explicitly enabled in THIS patch wins the exclusivity.
+        if (updateData.weeklyMenuEnabled === true) effDayWise = false;
+        else if (updateData.dayWiseMealsEnabled === true) effWeekly = false;
+        else if (effWeekly && effDayWise) effDayWise = false; // legacy both-ON rows
+        // Not-both-OFF: default to Weekly Meal Mode while meals stay enabled.
+        if (effMeals !== false && !effWeekly && !effDayWise) effWeekly = true;
+        updateData.weeklyMenuEnabled = effWeekly;
+        updateData.dayWiseMealsEnabled = effDayWise;
       }
       if (mc.preferencesEnabled !== undefined) updateData.preferencesEnabled = mc.preferencesEnabled;
       if (mc.enabledPreferences !== undefined) updateData.enabledPreferences = mc.enabledPreferences;
@@ -225,13 +235,35 @@ export class GroupsService {
       }
     }
 
+    // FR-MODE-064: record every mode transition (who/when/old→new) in the
+    // audit log — not just which fields were touched.
+    const modeFlagKeys = [
+      'mealsEnabled',
+      'weeklyMenuEnabled',
+      'dayWiseMealsEnabled',
+      'preferencesEnabled',
+      'vacationModeEnabled',
+      'mealPricingEnabled',
+    ] as const;
+    const modeChanges: Record<string, { from: unknown; to: unknown }> = {};
+    for (const key of modeFlagKeys) {
+      const next = updateData[key];
+      const prev = (existing as any)[key];
+      if (next !== undefined && next !== prev) {
+        modeChanges[key] = { from: prev, to: next };
+      }
+    }
+
     this.audit.log({
       organizationId,
       actorId,
       targetId: id,
       targetType: 'Group',
       action: 'update',
-      metadata: { updatedFields: Object.keys(updateData) },
+      metadata: {
+        updatedFields: Object.keys(updateData),
+        ...(Object.keys(modeChanges).length > 0 ? { modeChanges } : {}),
+      },
       requestId,
     });
 

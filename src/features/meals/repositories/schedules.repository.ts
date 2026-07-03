@@ -4,6 +4,7 @@ import {
   MealScheduleEntity,
   ScheduleEntryEntity,
 } from '../entities/meal-schedule.entity';
+import { compareEntriesChronologically } from '../utils/entry-chrono.util';
 
 /**
  * SchedulesRepository — all DB queries for MealSchedule and ScheduleEntry models.
@@ -34,6 +35,9 @@ export class SchedulesRepository {
             imageUrl: true,
             description: true,
             price: true,
+            // FR-MEAL-007: template window for chronological ordering
+            attendanceWindowOpen: true,
+            attendanceWindowClose: true,
           },
         },
       },
@@ -69,13 +73,29 @@ export class SchedulesRepository {
             imageUrl: raw.meal.imageUrl ?? null,
             description: raw.meal.description ?? null,
             price: raw.meal.price ?? null,
+            attendanceWindowOpen: raw.meal.attendanceWindowOpen ?? null,
+            attendanceWindowClose: raw.meal.attendanceWindowClose ?? null,
           }
         : undefined,
     });
   }
 
+  // ── FR-MEAL-007 (ISSUE-18): chronological within-day entry ordering ────────
+
+  /** Day ASC, then the shared chronological rule (entry-chrono.util). */
+  private static sortEntriesChronologically(
+    entries: ScheduleEntryEntity[],
+  ): ScheduleEntryEntity[] {
+    return entries.sort((a, b) => {
+      if (a.dayOfWeek !== b.dayOfWeek) return a.dayOfWeek - b.dayOfWeek;
+      return compareEntriesChronologically(a, b);
+    });
+  }
+
   private buildScheduleEntity(raw: any): MealScheduleEntity {
-    const entries = (raw.entries ?? []).map((e: any) => this.buildEntryEntity(e));
+    const entries = SchedulesRepository.sortEntriesChronologically(
+      (raw.entries ?? []).map((e: any) => this.buildEntryEntity(e)),
+    );
     return new MealScheduleEntity({
       id: raw.id,
       organizationId: raw.organizationId,
@@ -119,6 +139,8 @@ export class SchedulesRepository {
             imageUrl: e.meal.imageUrl ?? null,
             description: e.meal.description ?? null,
             price: e.meal.price ?? null,
+            attendanceWindowOpen: e.meal.attendanceWindowOpen ?? null,
+            attendanceWindowClose: e.meal.attendanceWindowClose ?? null,
           }
         : undefined,
     }));
@@ -133,11 +155,13 @@ export class SchedulesRepository {
   private scheduleFromSnapshot(raw: any): MealScheduleEntity {
     const snap = raw.publishedSnapshot;
     if (Array.isArray(snap) && snap.length > 0) {
-      const entries = snap.map((e: any) =>
-        this.buildEntryEntity({
-          ...e,
-          date: e.date ? new Date(e.date) : new Date(),
-        }),
+      const entries = SchedulesRepository.sortEntriesChronologically(
+        snap.map((e: any) =>
+          this.buildEntryEntity({
+            ...e,
+            date: e.date ? new Date(e.date) : new Date(),
+          }),
+        ),
       );
       return new MealScheduleEntity({
         id: raw.id,

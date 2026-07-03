@@ -325,12 +325,117 @@ model Meal {
   group             Group              @relation(fields: [groupId], references: [id], onDelete: Cascade)
   scheduleEntries   ScheduleEntry[]
   attendanceRecords AttendanceRecord[]
+  // Module 36 (FR-PG-012): explicit multi-dimensional preference groups.
+  // Empty = legacy flat enabledPreferences[] behaviour (FR-PG-021).
+  preferenceGroupBindings MealPreferenceGroup[]
 
   @@index([organizationId])
   @@index([groupId])
   @@index([isActive])
   @@index([order])
   @@map("meals")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE 36 — MULTI-DIMENSIONAL PREFERENCE GROUPS (FR-PG-*)
+// A meal supports N choice dimensions ("Staple", "Non-Veg"), each with its own
+// pick rule and priced options. Legacy Meal.enabledPreferences[] remains valid
+// as one implicit group (FR-PG-021) — fully additive, zero data loss.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model PreferenceGroup {
+  id             String  @id @default(cuid())
+  organizationId String  // tenant isolation (from JWT, never client)
+  groupId        String? // null = org-level template; set = group-scoped (FR-PG-073)
+  scope          String  @default("group") // org | group | meal (where it lives/reused)
+  label          String  // student-facing dimension name, e.g. "Staple"
+  description    String?
+  order          Int     @default(0)
+  selectionType  String  @default("single") // single | multiple
+  minSelect      Int     @default(1)
+  maxSelect      Int     @default(1)
+  required       Boolean @default(true)
+  quantityEnabled Boolean @default(false)
+  // FR-PG-060 conditional visibility: {"groupId": "...", "optionKey": "..."}
+  visibleWhen    Json?
+  vegOnly        Boolean @default(false) // FR-PG-061
+  isActive       Boolean @default(true)  // soft disable — history preserved (FR-PG-072)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  options      PreferenceOption[]
+  mealBindings MealPreferenceGroup[]
+
+  @@index([organizationId])
+  @@index([groupId, isActive])
+  @@map("preference_groups")
+}
+
+model PreferenceOption {
+  id                String  @id @default(cuid())
+  preferenceGroupId String
+  key               String  // canonical lowercase, immutable once selections exist
+  label             String  // student-facing, e.g. "Ruti"
+  emoji             String?
+  color             String? // hex
+  isVeg             Boolean @default(true)
+  priceDelta        Int     @default(0) // ₹ minor units added to base (FR-PG-040)
+  minQty            Int     @default(1) // used only when group.quantityEnabled
+  maxQty            Int     @default(1)
+  order             Int     @default(0)
+  isActive          Boolean @default(true) // soft disable (FR-PG-072)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  group PreferenceGroup @relation(fields: [preferenceGroupId], references: [id], onDelete: Cascade)
+
+  @@unique([preferenceGroupId, key])
+  @@index([preferenceGroupId, isActive])
+  @@map("preference_options")
+}
+
+model MealPreferenceGroup {
+  id                String   @id @default(cuid())
+  mealId            String
+  preferenceGroupId String
+  order             Int      @default(0)
+  // Per-meal rule overrides — null = use the group's own rule (FR-PG-012)
+  requiredOverride  Boolean?
+  minSelectOverride Int?
+  maxSelectOverride Int?
+
+  createdAt DateTime @default(now())
+
+  meal            Meal            @relation(fields: [mealId], references: [id], onDelete: Cascade)
+  preferenceGroup PreferenceGroup @relation(fields: [preferenceGroupId], references: [id], onDelete: Cascade)
+
+  @@unique([mealId, preferenceGroupId])
+  @@index([mealId])
+  @@map("meal_preference_groups")
+}
+
+// One row per chosen option — snapshotted for historical integrity (FR-PG-013/072).
+// The JSON mirror lives on AttendanceRecord.preferences.
+model AttendancePreferenceSelection {
+  id                  String  @id @default(cuid())
+  attendanceRecordId  String
+  preferenceGroupId   String  // soft FK — group may later be edited/disabled
+  groupLabelSnapshot  String
+  optionKey           String
+  optionLabelSnapshot String
+  isVegSnapshot       Boolean @default(true)
+  priceDeltaSnapshot  Int     @default(0) // immutable — later edits never change past bills
+  quantity            Int     @default(1)
+
+  createdAt DateTime @default(now())
+
+  record AttendanceRecord @relation(fields: [attendanceRecordId], references: [id], onDelete: Cascade)
+
+  @@index([attendanceRecordId])
+  @@index([preferenceGroupId, optionKey]) // cross-tab analytics (FR-PG-050)
+  @@map("attendance_preference_selections")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -418,12 +523,22 @@ model AttendanceRecord {
   status         AttendanceStatus @default(present) // default=present (was pending — B4 fix)
 
   preference String?   // "veg"|"chicken"|"fish"|"mutton"|"egg"|"jain" (exact lowercase)
+  // Module 36 (FR-PG-013): immutable full multi-group selection snapshot
+  // [{groupId,groupLabel,optionKey,optionLabel,isVeg,priceDelta,quantity}].
+  // `preference` above stays populated as the derived primary (FR-PG-100).
+  preferences Json?
   note       String?   // optional note from student or admin
 
   markedAt DateTime?
   markedBy String?    // userId of admin who performed manual override (nullable)
   // Additive: ₹ price snapshot at mark time (per-day override or master). Null = pre-pricing record.
   price    Int?
+
+  // Module 33 (MIG-010) consent trail — how this record came to exist:
+  // self | default | system_default | admin | request | verified
+  source          String? @default("self")
+  // AttendanceCorrectionRequest id that produced this record (consent proof)
+  sourceRequestId String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -432,6 +547,8 @@ model AttendanceRecord {
   group        Group        @relation(fields: [groupId], references: [id], onDelete: Cascade)
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   meal         Meal         @relation(fields: [mealId], references: [id], onDelete: Cascade)
+  // Module 36 (FR-PG-013): per-option child rows for cross-tab analytics
+  preferenceSelections AttendancePreferenceSelection[]
 
   @@unique([userId, mealId, attendanceDate])    // idempotency — upsert key (NON-NEGOTIABLE)
   @@index([organizationId])
@@ -655,4 +772,44 @@ model VacationRequest {
   @@index([groupId])
   @@index([organizationId, status])
   @@map("vacation_requests")
+}
+
+/// Module 33 (MIG-010) — Attendance Correction Request: the member-initiated
+/// consent path for attendance/billing changes (FR-ACR-*). Self-contained,
+/// scalar-only (no Prisma relations) — purely additive, mirrors VacationRequest.
+/// requestType: claim_present | correct_to_absent | correct_to_skip |
+///              fix_preference | dispute_charge  (DTO-whitelisted)
+/// status:      pending | approved | rejected | expired | cancelled
+/// sourceChannel: member (member-raised) | admin_prompt (FR-OVR-020 member
+///                confirmation created when an admin proposes an increase)
+model AttendanceCorrectionRequest {
+  id             String   @id @default(cuid())
+  organizationId String   // tenant isolation (from JWT, never client)
+  groupId        String
+  userId         String   // the member whose record/bill is affected
+  mealId         String
+  attendanceDate DateTime // UTC midnight of the meal's business date
+
+  requestType         String
+  requestedStatus     String? // target AttendanceStatus for claim/correct types
+  requestedPreference String? // for fix_preference
+  reason              String?
+  evidenceUrl         String? // optional photo proof (MinIO URL)
+
+  status         String    @default("pending")
+  reviewedBy     String?   // admin userId (or member userId for confirm/decline)
+  reviewedAt     DateTime?
+  reviewNote     String?
+  sourceChannel  String    @default("member")
+  resultRecordId String?   // AttendanceRecord id created/updated on approval
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  expiresAt DateTime // auto-expiry deadline (creation + ACR_EXPIRY_HOURS)
+
+  @@index([groupId, status])
+  @@index([userId, attendanceDate])
+  @@index([organizationId])
+  @@index([status, expiresAt]) // lazy expiry sweep
+  @@map("attendance_correction_requests")
 }

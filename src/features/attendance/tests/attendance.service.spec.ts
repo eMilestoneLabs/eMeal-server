@@ -1,10 +1,12 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { ConfigService } from '@nestjs/config';
 import {
   BadRequestException,
   ForbiddenException,
   NotFoundException,
   HttpException,
 } from '@nestjs/common';
+import { PreferencesService } from '../../preferences/preferences.service';
 import { AttendanceService } from '../attendance.service';
 import { AttendanceRepository } from '../repositories/attendance.repository';
 import { MembersRepository } from '../../groups/repositories/members.repository';
@@ -55,11 +57,21 @@ describe('AttendanceService', () => {
       providers: [
         AttendanceService,
         {
+          provide: PreferencesService,
+          useValue: {
+            // Module 36: default = no explicit groups -> legacy path everywhere.
+            getEffectiveGroupsForMeal: jest.fn().mockResolvedValue([]),
+            getEffectiveGroupsForMeals: jest.fn().mockResolvedValue(new Map()),
+            validateSelections: jest.fn(),
+          },
+        },
+        {
           provide: AttendanceRepository,
           useValue: {
             upsert: jest.fn(),
             findByUser: jest.fn(),
             findByGroup: jest.fn(),
+            findByKey: jest.fn(),
             getUserSummary: jest.fn(),
             getMealSummary: jest.fn(),
             bulkUpsert: jest.fn(),
@@ -85,6 +97,20 @@ describe('AttendanceService', () => {
             groupMember: {
               count: jest.fn(),
             },
+            // Planner per-day window overlay — null = no override (master
+            // meal window applies), matching groups without a published plan.
+            scheduleEntry: {
+              findFirst: jest.fn().mockResolvedValue(null),
+            },
+            // Approved-vacation exclusion in summaries — none by default.
+            vacationRequest: {
+              findMany: jest.fn().mockResolvedValue([]),
+            },
+            // Module 33 member confirmations (FR-OVR-020).
+            attendanceCorrectionRequest: {
+              findFirst: jest.fn().mockResolvedValue(null),
+              create: jest.fn(),
+            },
           },
         },
         {
@@ -94,6 +120,11 @@ describe('AttendanceService', () => {
             set: jest.fn(),
             del: jest.fn(),
           },
+        },
+        {
+          // Module 33 tunables (ACR expiry etc.) — defaults are fine here.
+          provide: ConfigService,
+          useValue: { get: jest.fn().mockReturnValue(undefined) },
         },
         {
           provide: AuditService,
@@ -337,6 +368,104 @@ describe('AttendanceService', () => {
 
       // membersRepo.isActiveMember should NOT be called in admin override path
       expect(membersRepo.isActiveMember).not.toHaveBeenCalled();
+    });
+
+    // ── FR-OVR-001 / FR-FAIR-010 (Module 33): Δliability classifier ─────────
+
+    const pricedMeal = {
+      id: 'meal_01',
+      groupId: 'grp_01',
+      price: 60,
+      group: { mealPricingEnabled: true },
+    };
+
+    it('liability INCREASE (none→present, priced) is NOT applied — creates a member confirmation', async () => {
+      (prisma.meal.findFirst as jest.Mock).mockResolvedValue(pricedMeal);
+      (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'usr_01' });
+      (attendanceRepo.findByKey as jest.Mock).mockResolvedValue(null); // no record
+      ((prisma as any).attendanceCorrectionRequest.create as jest.Mock).mockResolvedValue({
+        id: 'acr_01',
+        status: 'pending',
+        requestType: 'claim_present',
+        sourceChannel: 'admin_prompt',
+        userId: 'usr_01',
+        mealId: 'meal_01',
+        attendanceDate: new Date('2026-01-05T00:00:00.000Z'),
+        expiresAt: new Date('2026-01-07T00:00:00.000Z'),
+      });
+
+      const result: any = await service.adminOverride('admin_01', 'org_01', {
+        userId: 'usr_01',
+        mealId: 'meal_01',
+        attendanceDate: '2026-01-05',
+        status: 'present',
+      });
+
+      expect(result.requiresMemberConsent).toBe(true);
+      expect(result.correctionRequest.sourceChannel).toBe('admin_prompt');
+      // The attendance record (and therefore the bill) must NOT change.
+      expect(attendanceRepo.upsert).not.toHaveBeenCalled();
+    });
+
+    it('liability DECREASE (present→absent, priced) applies immediately', async () => {
+      (prisma.meal.findFirst as jest.Mock).mockResolvedValue(pricedMeal);
+      (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'usr_01' });
+      (attendanceRepo.upsert as jest.Mock).mockResolvedValue(mockMealRecord);
+      (redis.del as jest.Mock).mockResolvedValue(undefined);
+
+      await service.adminOverride('admin_01', 'org_01', {
+        userId: 'usr_01',
+        mealId: 'meal_01',
+        attendanceDate: '2026-01-05',
+        status: 'absent',
+      });
+
+      expect(attendanceRepo.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'absent', source: 'admin' }),
+      );
+    });
+
+    it('present→present (already billed, priced) is neutral and applies', async () => {
+      (prisma.meal.findFirst as jest.Mock).mockResolvedValue(pricedMeal);
+      (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'usr_01' });
+      (attendanceRepo.findByKey as jest.Mock).mockResolvedValue({
+        ...mockMealRecord,
+        status: 'present',
+      });
+      (attendanceRepo.upsert as jest.Mock).mockResolvedValue(mockMealRecord);
+      (redis.del as jest.Mock).mockResolvedValue(undefined);
+
+      await service.adminOverride('admin_01', 'org_01', {
+        userId: 'usr_01',
+        mealId: 'meal_01',
+        attendanceDate: '2026-01-05',
+        status: 'present',
+      });
+
+      expect(attendanceRepo.upsert).toHaveBeenCalled();
+    });
+
+    it('unpriced groups keep the original unrestricted override behavior', async () => {
+      (prisma.meal.findFirst as jest.Mock).mockResolvedValue({
+        id: 'meal_01',
+        groupId: 'grp_01',
+        price: null,
+        group: { mealPricingEnabled: false },
+      });
+      (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'usr_01' });
+      (attendanceRepo.upsert as jest.Mock).mockResolvedValue(mockMealRecord);
+      (redis.del as jest.Mock).mockResolvedValue(undefined);
+
+      await service.adminOverride('admin_01', 'org_01', {
+        userId: 'usr_01',
+        mealId: 'meal_01',
+        attendanceDate: '2026-01-05',
+        status: 'present',
+      });
+
+      expect(attendanceRepo.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'present', markedBy: 'admin_01' }),
+      );
     });
   });
 

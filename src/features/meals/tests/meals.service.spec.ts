@@ -1,9 +1,12 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { PreferencesService } from '../../preferences/preferences.service';
 import { MealsService } from '../meals.service';
 import { MealsRepository } from '../repositories/meals.repository';
+import { SchedulesRepository } from '../repositories/schedules.repository';
 import { GroupsRepository } from '../../groups/repositories/groups.repository';
 import { AuditService } from '../../../audit/audit.service';
+import { StorageService } from '../../../storage/storage.service';
 import { MealEntity } from '../entities/meal.entity';
 import { GroupEntity } from '../../groups/entities/group.entity';
 
@@ -71,6 +74,13 @@ describe('MealsService', () => {
       providers: [
         MealsService,
         {
+          provide: PreferencesService,
+          useValue: {
+            getEffectiveGroupsForMeal: jest.fn().mockResolvedValue([]),
+            getEffectiveGroupsForMeals: jest.fn().mockResolvedValue(new Map()),
+          },
+        },
+        {
           provide: MealsRepository,
           useValue: {
             findById: jest.fn(),
@@ -83,6 +93,14 @@ describe('MealsService', () => {
           },
         },
         {
+          provide: SchedulesRepository,
+          useValue: {
+            // Planner overlay is empty by default — tests exercise the plain
+            // master-meal path unless they override this mock.
+            findTodayOverlay: jest.fn().mockResolvedValue(new Map()),
+          },
+        },
+        {
           provide: GroupsRepository,
           useValue: {
             findById: jest.fn(),
@@ -91,6 +109,14 @@ describe('MealsService', () => {
         {
           provide: AuditService,
           useValue: { log: jest.fn() },
+        },
+        {
+          provide: StorageService,
+          useValue: {
+            // Image paths are not exercised in these unit tests.
+            uploadImage: jest.fn(),
+            deleteImage: jest.fn(),
+          },
         },
       ],
     }).compile();

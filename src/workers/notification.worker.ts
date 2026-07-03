@@ -20,12 +20,20 @@ import { Processor, WorkerHost, OnWorkerEvent } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
 import { QUEUE_NAMES, JOB_TYPES } from '../queue/constants/queue.constants';
-import { NotificationSendService } from '../features/notifications/services/notification-send.service';
+import {
+  NotificationSendService,
+  STALE_TOKEN_ERROR_CODES,
+} from '../features/notifications/services/notification-send.service';
 import { NotificationPayloadService } from '../features/notifications/services/notification-payload.service';
+import { PrismaService } from '../prisma/prisma.service';
+import { RedisService } from '../redis/redis.service';
 import type {
   SendPushPayload,
   SendBatchPushPayload,
 } from '../queue/interfaces/job-payload.interface';
+
+/** FR-NOTX-018: last-send diagnostics retention (7 days). */
+const LAST_SEND_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 @Processor(QUEUE_NAMES.NOTIFICATION, {
   concurrency: 5,
@@ -36,6 +44,8 @@ export class NotificationWorker extends WorkerHost {
   constructor(
     private readonly sendService: NotificationSendService,
     private readonly payloadBuilder: NotificationPayloadService,
+    private readonly prisma: PrismaService,
+    private readonly redis: RedisService,
   ) {
     super();
   }
@@ -71,14 +81,17 @@ export class NotificationWorker extends WorkerHost {
       userId,
     );
 
+    await this.recordLastSend(organizationId, title, result.success ? 1 : 0, result.success ? 0 : 1, 1);
+
     if (!result.success) {
       this.logger.warn(
         `Push send failed job=${job.id} user=${userId} ` +
         `errorCode=${result.errorCode} error=${result.error}`,
       );
-      // Invalid token signals B7: enqueue token cleanup
-      if (result.errorCode === 'messaging/registration-token-not-registered') {
-        this.logger.warn(`Stale FCM token detected for user=${userId} — mark for cleanup`);
+      // FR-NOTX-014 (ISSUE-16): the token is dead — prune it immediately so
+      // this device stops failing silently and diagnostics reflect reality.
+      if (result.errorCode && STALE_TOKEN_ERROR_CODES.has(result.errorCode)) {
+        await this.pruneStaleTokens(organizationId, [{ userId, fcmToken }]);
       }
       return; // Resolve cleanly — do not retry for delivery failures
     }
@@ -91,16 +104,83 @@ export class NotificationWorker extends WorkerHost {
 
     this.assertOrgId(organizationId, job.id);
 
-    const { successful, failed } = await this.sendService.sendBatch(
+    const { successful, failed, staleTokens } = await this.sendService.sendBatch(
       recipients,
       { title, body, route, data },
+    );
+
+    // FR-NOTX-014: prune dead tokens found during the batch.
+    if (staleTokens.length > 0) {
+      await this.pruneStaleTokens(organizationId, staleTokens);
+    }
+
+    // FR-NOTX-018: record the outcome so admins can see the last-send result.
+    await this.recordLastSend(
+      organizationId,
+      title,
+      successful.length,
+      failed.length,
+      recipients.length,
     );
 
     this.logger.log(
       `Batch push job=${job.id} ` +
       `successful=${successful.length} failed=${failed.length} ` +
-      `total=${recipients.length}`,
+      `stale=${staleTokens.length} total=${recipients.length}`,
     );
+  }
+
+  // ── FR-NOTX-014: stale-token pruning ────────────────────────────────────────
+
+  /**
+   * Clears dead FCM tokens so future sends stop failing silently. Guarded by
+   * BOTH userId and the exact failing token — a token the user re-registered
+   * between send and prune is never wiped.
+   */
+  private async pruneStaleTokens(
+    organizationId: string,
+    stale: Array<{ userId: string; fcmToken: string }>,
+  ): Promise<void> {
+    try {
+      for (const s of stale) {
+        await this.prisma.user.updateMany({
+          where: { id: s.userId, organizationId, fcmToken: s.fcmToken },
+          data: { fcmToken: null },
+        });
+      }
+      this.logger.log(
+        `Pruned ${stale.length} stale FCM token(s) org=${organizationId}`,
+      );
+    } catch (err) {
+      this.logger.warn(`Stale-token prune failed: ${(err as Error).message}`);
+    }
+  }
+
+  // ── FR-NOTX-018: last-send diagnostics ──────────────────────────────────────
+
+  /** Best-effort record of the most recent send outcome (7-day retention). */
+  private async recordLastSend(
+    organizationId: string,
+    title: string,
+    successful: number,
+    failed: number,
+    total: number,
+  ): Promise<void> {
+    try {
+      await this.redis.set(
+        `notify:lastsend:${organizationId}`,
+        JSON.stringify({
+          at: new Date().toISOString(),
+          title,
+          successful,
+          failed,
+          total,
+        }),
+        LAST_SEND_TTL_SECONDS,
+      );
+    } catch (_) {
+      /* diagnostics stay best-effort */
+    }
   }
 
   // ── Event handlers ───────────────────────────────────────────────────────────

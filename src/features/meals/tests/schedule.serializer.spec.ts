@@ -31,6 +31,10 @@ describe('ScheduleSerializer', () => {
       imageUrl: null,
       description: null,
       price: null,
+      // FR-MEAL-007: template window used for chronological ordering when the
+      // entry has no per-day override.
+      attendanceWindowOpen: '07:00',
+      attendanceWindowClose: '09:00',
     },
   });
 
@@ -104,13 +108,41 @@ describe('ScheduleSerializer', () => {
   });
 
   describe('days[].meals[] — ordering + shape', () => {
-    it('groups both Monday meals and sorts them by meal.order', () => {
+    it('groups both Monday meals chronologically (FR-MEAL-007 / ISSUE-18)', () => {
       const res = ScheduleSerializer.toResponse(baseSchedule) as any;
       const monday = res.days[0];
       expect(monday.day).toBe('monday');
       expect(monday.meals).toHaveLength(2);
-      expect(monday.meals[0].slotKey).toBe('breakfast'); // order 1 first
-      expect(monday.meals[1].slotKey).toBe('lunch');     // order 2 second
+      // Breakfast 07:00 (template window) before Lunch 12:00 (per-day override).
+      expect(monday.meals[0].slotKey).toBe('breakfast');
+      expect(monday.meals[1].slotKey).toBe('lunch');
+    });
+
+    it('sorts windowless entries last, meal.order as tie-break (FR-MEAL-007)', () => {
+      const windowless = new ScheduleEntryEntity({
+        ...breakfast,
+        id: 'ent_03',
+        mealId: 'meal_03',
+        meal: {
+          slotKey: 'special',
+          name: 'Special',
+          displayName: null,
+          order: 0, // lowest order — would sort FIRST under the old rule
+          menuItems: [],
+          imageUrl: null,
+          description: null,
+          price: null,
+        },
+      });
+      const res = ScheduleSerializer.toResponse(
+        new MealScheduleEntity({
+          ...baseSchedule,
+          entries: [windowless, breakfast, lunch],
+        }),
+      ) as any;
+      expect(res.days[0].meals.map((m: any) => m.slotKey)).toEqual([
+        'breakfast', 'lunch', 'special',
+      ]);
     });
 
     it('meal item carries the exact contract keys', () => {

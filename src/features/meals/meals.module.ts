@@ -14,6 +14,7 @@ import { SchedulesRepository } from './repositories/schedules.repository';
 import { GroupsModule } from '../groups/groups.module';
 import { RealtimeModule } from '../../realtime/realtime.module';
 import { StorageModule } from '../../storage/storage.module';
+import { PreferencesModule } from '../preferences/preferences.module';
 
 /**
  * MealsModule — Phase B3
@@ -39,6 +40,7 @@ import { StorageModule } from '../../storage/storage.module';
     GroupsModule, // for GroupsRepository access
     RealtimeModule,   // for 'REALTIME_GATEWAY' token (@Optional inject in services)
     StorageModule,    // B11: MinIO meal-image upload
+    PreferencesModule, // Module 36 — effective preference-group embedding (FR-PG-090)
   ],
   controllers: [MealsController, SchedulesController],
   providers: [

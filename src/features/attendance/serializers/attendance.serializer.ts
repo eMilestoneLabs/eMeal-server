@@ -63,6 +63,8 @@ export class AttendanceSerializer {
 
       status: record.status,
       preference: record.preference ?? null,
+      // Module 36 (FR-PG-013): multi-group selection snapshot (null = legacy).
+      preferences: record.preferences ?? null,
       note: record.note ?? null,
       markedAt: record.markedAt ? record.markedAt.toISOString() : null,
       markedBy: record.markedBy ?? null,
@@ -95,8 +97,13 @@ export class AttendanceSerializer {
       date: toDateString(record.attendanceDate),
       status: record.status,
       preference: record.preference ?? null,
+      // Module 36 (FR-PG-013): multi-group selection snapshot (null = legacy).
+      preferences: record.preferences ?? null,
       price: record.price ?? null,
       markedAt: record.markedAt ? record.markedAt.toISOString() : null,
+      // Module 33 consent trail (additive — FR-TRUST-010 groundwork).
+      source: record.source ?? null,
+      sourceRequestId: record.sourceRequestId ?? null,
     };
   }
 }

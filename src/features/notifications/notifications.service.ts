@@ -26,6 +26,7 @@ import { QueueService } from '../../queue/queue.service';
 import {
   NotificationPayloadService,
 } from './services/notification-payload.service';
+import { NotificationSendService } from './services/notification-send.service';
 
 // FCM token deduplication TTL in Redis — 24 hours
 const TOKEN_DEDUP_TTL = 24 * 60 * 60;
@@ -39,6 +40,7 @@ export class NotificationsService {
     private readonly redis: RedisService,
     private readonly queue: QueueService,
     private readonly payloadBuilder: NotificationPayloadService,
+    private readonly sendService: NotificationSendService,
   ) {}
 
   // ── FCM TOKEN REGISTRATION ─────────────────────────────────────────────────
@@ -207,6 +209,200 @@ export class NotificationsService {
     this.logger.log(
       `Enqueued schedule-published batch push group=${params.groupId} recipients=${recipients.length}`,
     );
+  }
+
+  // ── NOTICE PUBLISHED (FR-NOTX-006 / ISSUE-15/16) ──────────────────────────
+
+  /**
+   * Push a "new notice" alert to every in-scope member. The stored notice is
+   * the RELIABLE in-app channel (it exists regardless of this push); this is
+   * the best-effort alert layer. Never throws — a push failure must never
+   * break notice publishing (FR-NOTX-016).
+   *
+   * Vacation members still receive notices (they are announcements, not meal
+   * reminders); the member's remindersEnabled consent flag is respected.
+   */
+  async notifyNoticePublished(params: {
+    organizationId: string;
+    groupId: string | null; // null = org-wide notice
+    noticeId: string;
+    title: string;
+    priority: string;
+  }): Promise<void> {
+    try {
+      let recipients: Array<{ userId: string; fcmToken: string }>;
+      if (params.groupId) {
+        const members = await this.prisma.groupMember.findMany({
+          where: {
+            groupId: params.groupId,
+            status: 'active',
+            user: { remindersEnabled: true, fcmToken: { not: null } },
+          },
+          select: { userId: true, user: { select: { fcmToken: true } } },
+        });
+        recipients = members
+          .filter((m) => m.user.fcmToken)
+          .map((m) => ({ userId: m.userId, fcmToken: m.user.fcmToken! }));
+      } else {
+        const users = await this.prisma.user.findMany({
+          where: {
+            organizationId: params.organizationId,
+            remindersEnabled: true,
+            fcmToken: { not: null },
+          },
+          select: { id: true, fcmToken: true },
+        });
+        recipients = users.map((u) => ({ userId: u.id, fcmToken: u.fcmToken! }));
+      }
+
+      if (!recipients.length) {
+        this.logger.debug(
+          `No push-eligible recipients for notice=${params.noticeId} — in-app notice remains available`,
+        );
+        return;
+      }
+
+      const payload = this.payloadBuilder.buildNoticePublishedPayload({
+        title: params.title,
+        priority: params.priority,
+        noticeId: params.noticeId,
+      });
+
+      await this.queue.enqueueBatchPush({
+        organizationId: params.organizationId,
+        recipients,
+        title: payload.title,
+        body: payload.body,
+        route: payload.route,
+        data: payload.data,
+      });
+
+      this.logger.log(
+        `Enqueued notice-published batch push notice=${params.noticeId} recipients=${recipients.length}`,
+      );
+    } catch (err) {
+      // FR-NOTX-016: push is best-effort — the in-app notice already exists.
+      this.logger.warn(
+        `notice-published push enqueue failed (in-app notice unaffected): ${(err as Error).message}`,
+      );
+    }
+  }
+
+  // ── CORRECTION REQUESTS (Module 33 — FR-ACR notifications) ────────────────
+
+  /** Alert group admins that a member raised a correction request. */
+  async notifyCorrectionRequested(params: {
+    organizationId: string;
+    requesterName: string;
+    typeLabel: string;
+    mealName: string;
+    dateStr: string;
+  }): Promise<void> {
+    try {
+      const admins = await this.prisma.user.findMany({
+        where: {
+          organizationId: params.organizationId,
+          role: {
+            in: ['messManager', 'hostelManager', 'hostelAdmin', 'organizationManager'],
+          },
+          fcmToken: { not: null },
+        },
+        select: { id: true, fcmToken: true },
+      });
+      if (!admins.length) return;
+
+      const payload = this.payloadBuilder.buildCorrectionRequestedPayload({
+        requesterName: params.requesterName,
+        typeLabel: params.typeLabel,
+        mealName: params.mealName,
+        dateStr: params.dateStr,
+      });
+
+      await this.queue.enqueueBatchPush({
+        organizationId: params.organizationId,
+        recipients: admins.map((a) => ({ userId: a.id, fcmToken: a.fcmToken! })),
+        title: payload.title,
+        body: payload.body,
+        route: payload.route,
+        data: payload.data,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `correction-requested push enqueue failed: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  /** Alert the requesting member that their correction was decided. */
+  async notifyCorrectionDecided(params: {
+    organizationId: string;
+    userId: string;
+    approved: boolean;
+    mealName: string;
+    dateStr: string;
+  }): Promise<void> {
+    try {
+      const user = await this.prisma.user.findUnique({
+        where: { id: params.userId },
+        select: { fcmToken: true },
+      });
+      if (!user?.fcmToken) return;
+
+      const payload = this.payloadBuilder.buildCorrectionDecidedPayload({
+        approved: params.approved,
+        mealName: params.mealName,
+        dateStr: params.dateStr,
+      });
+
+      await this.queue.enqueuePush({
+        organizationId: params.organizationId,
+        userId: params.userId,
+        fcmToken: user.fcmToken,
+        title: payload.title,
+        body: payload.body,
+        route: payload.route,
+        data: payload.data,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `correction-decided push enqueue failed: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  // ── DELIVERY DIAGNOSTICS (FR-NOTX-018 / ISSUE-16) ─────────────────────────
+
+  /**
+   * Makes "notifications are ON but nothing arrives" observable: whether the
+   * push channel is configured, how many org members have a registered
+   * device, and the outcome of the most recent send (recorded by the
+   * notification worker in Redis).
+   */
+  async getDiagnostics(organizationId: string): Promise<Record<string, unknown>> {
+    const [registeredDevices, totalMembers] = await Promise.all([
+      this.prisma.user.count({
+        where: { organizationId, fcmToken: { not: null } },
+      }),
+      this.prisma.user.count({ where: { organizationId } }),
+    ]);
+
+    let lastSend: unknown = null;
+    try {
+      const raw = await this.redis.get(`notify:lastsend:${organizationId}`);
+      if (raw) lastSend = JSON.parse(raw);
+    } catch (_) {
+      /* diagnostics stay best-effort */
+    }
+
+    return {
+      pushConfigured: this.sendService.pushEnabled,
+      registeredDevices,
+      membersWithoutDevice: totalMembers - registeredDevices,
+      totalMembers,
+      lastSend,
+      // The in-app notice board is always available regardless of push.
+      inAppChannel: 'always-on',
+    };
   }
 
   // ── GROUP MEMBERSHIP NOTIFICATION ─────────────────────────────────────────

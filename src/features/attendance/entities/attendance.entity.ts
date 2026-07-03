@@ -18,11 +18,20 @@ export class AttendanceEntity {
   status: string; // AttendanceStatus enum value as string
 
   preference: string | null;
+  // Module 36 (FR-PG-013): immutable multi-group selection snapshot
+  // [{groupId,groupLabel,optionKey,optionLabel,isVeg,priceDelta,quantity}].
+  preferences?: unknown;
   note: string | null;
   markedAt: Date | null;
   markedBy: string | null; // userId of admin who performed manual override
   // Additive: ₹ price snapshot at mark time (per-day override or master meal price).
   price: number | null;
+
+  // Module 33 consent trail — how this record came to exist:
+  // self | default | system_default | admin | request | verified
+  source?: string | null;
+  // AttendanceCorrectionRequest id that produced this record (consent proof)
+  sourceRequestId?: string | null;
 
   createdAt: Date;
   updatedAt: Date;

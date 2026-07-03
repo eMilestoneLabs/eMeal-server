@@ -1,4 +1,5 @@
 import { MealScheduleEntity, ScheduleEntryEntity } from '../entities/meal-schedule.entity';
+import { compareEntriesChronologically } from '../utils/entry-chrono.util';
 
 /**
  * ScheduleSerializer — converts MealScheduleEntity to exact Flutter JSON contract.
@@ -47,10 +48,9 @@ export class ScheduleSerializer {
     // Build days[] — ALL 7 days always present (M-12 requirement)
     const days = DAY_NAMES.map((dayName, index) => {
       const dayEntries = entryByDay.get(index) ?? [];
-      // Sort by meal.order for consistent rendering
-      const sorted = [...dayEntries].sort(
-        (a, b) => (a.meal?.order ?? 999) - (b.meal?.order ?? 999),
-      );
+      // FR-MEAL-007 (ISSUE-18): chronological within the day — effective open
+      // time (per-day override ?? meal template window), meal.order tie-break.
+      const sorted = [...dayEntries].sort(compareEntriesChronologically);
       return {
         day: dayName,
         meals: sorted.map((e) => ScheduleSerializer.entryToMealItem(e)),

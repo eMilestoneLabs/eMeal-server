@@ -8,6 +8,8 @@ import appConfig from '../config/app.config';
 import jwtConfig from '../config/jwt.config';
 import redisConfig from '../config/redis.config';
 import authConfig from '../config/auth.config';
+import correctionsConfig from '../config/corrections.config';
+import preferencesConfig from '../config/preferences.config';
 
 // Infrastructure
 import { PrismaModule } from '../prisma/prisma.module';
@@ -30,6 +32,8 @@ import { OrganizationsModule } from '../features/organizations/organizations.mod
 import { GroupsModule } from '../features/groups/groups.module';
 import { MealsModule } from '../features/meals/meals.module';
 import { AttendanceModule } from '../features/attendance/attendance.module';
+import { CorrectionsModule } from '../features/corrections/corrections.module';
+import { PreferencesModule } from '../features/preferences/preferences.module';
 import { RealtimeModule } from '../realtime/realtime.module';
 // Phase B5
 import { EventsModule } from '../features/events/events.module';
@@ -49,7 +53,14 @@ import { HealthController } from './health.controller';
     // Config — global, loaded first
     ConfigModule.forRoot({
       isGlobal: true,
-      load: [appConfig, jwtConfig, redisConfig, authConfig],
+      load: [
+        appConfig,
+        jwtConfig,
+        redisConfig,
+        authConfig,
+        correctionsConfig,
+        preferencesConfig,
+      ],
       envFilePath: ['.env'],
     }),
 
@@ -81,6 +92,10 @@ import { HealthController } from './health.controller';
     // Phase B4
     AttendanceModule,
     RealtimeModule,
+    // Module 33 — Attendance Correction Requests (consent workflow)
+    CorrectionsModule,
+    // Module 36 — Multi-dimensional preference groups (FR-PG-*)
+    PreferencesModule,
     // Phase B5
     EventsModule,
     DashboardModule,

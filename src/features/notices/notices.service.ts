@@ -13,6 +13,7 @@ import { ADMIN_ROLES } from '../../common/decorators/roles.decorator';
 import { CreateNoticeDto } from './dto/create-notice.dto';
 import { UpdateNoticeDto } from './dto/update-notice.dto';
 import { QueryNoticeDto } from './dto/query-notice.dto';
+import { NotificationsService } from '../notifications/notifications.service';
 import type { RealtimeEventsService } from '../../realtime/services/realtime-events.service';
 
 /**
@@ -28,6 +29,7 @@ export class NoticesService {
   constructor(
     private readonly repo: NoticesRepository,
     private readonly audit: AuditService,
+    private readonly notifications: NotificationsService,
     @Optional()
     @Inject('REALTIME_GATEWAY')
     private readonly realtime: RealtimeEventsService | null = null,
@@ -77,6 +79,17 @@ export class NoticesService {
       publishedAt: notice.publishedAt.toISOString(),
     };
     this.realtime?.emitNoticeCreated(organizationId, notice.groupId, payload);
+
+    // FR-NOTX-006 / ISSUE-15: best-effort push to in-scope members. The stored
+    // notice above is the reliable in-app channel (FR-NOTX-018) — the method
+    // never throws, so publishing succeeds even if push fails (FR-NOTX-016).
+    void this.notifications.notifyNoticePublished({
+      organizationId,
+      groupId: notice.groupId,
+      noticeId: notice.id,
+      title: notice.title,
+      priority: notice.priority,
+    });
 
     return NoticeSerializer.toResponse(notice);
   }

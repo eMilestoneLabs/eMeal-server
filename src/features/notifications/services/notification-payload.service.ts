@@ -113,6 +113,74 @@ export class NotificationPayloadService {
     };
   }
 
+  // ── Notice notifications (FR-NOTX-006 / ISSUE-15/16) ────────────────────────
+
+  /**
+   * A new notice was published — the in-app notice is the reliable channel;
+   * this push is the best-effort alert. No sensitive data (FR-NOTX-017).
+   * Route: /notices
+   */
+  buildNoticePublishedPayload(params: {
+    title: string;
+    priority: string;
+    noticeId: string;
+  }): NotificationPayload {
+    const urgent = params.priority === 'urgent' || params.priority === 'high';
+    return {
+      title: urgent ? '📢 Important Notice' : 'New Notice',
+      body: params.title,
+      route: '/notices',
+      data: {
+        type: 'notice_published',
+        noticeId: params.noticeId,
+        priority: params.priority,
+      },
+    };
+  }
+
+  // ── Correction requests (Module 33 / FR-ACR notifications) ──────────────────
+
+  /**
+   * A member raised an attendance correction request — sent to group admins.
+   * Route: /admin/attendance (corrections queue lives there).
+   */
+  buildCorrectionRequestedPayload(params: {
+    requesterName: string;
+    typeLabel: string;
+    mealName: string;
+    dateStr: string;
+  }): NotificationPayload {
+    return {
+      title: 'Correction Request',
+      body:
+        `${params.requesterName} requests "${params.typeLabel}" for ` +
+        `${params.mealName} (${params.dateStr}).`,
+      route: '/admin/attendance',
+      data: { type: 'correction_requested' },
+    };
+  }
+
+  /**
+   * A correction request was decided — sent to the requesting member.
+   * Route: /student/attendance (My Corrections lives there).
+   */
+  buildCorrectionDecidedPayload(params: {
+    approved: boolean;
+    mealName: string;
+    dateStr: string;
+  }): NotificationPayload {
+    return {
+      title: params.approved
+        ? 'Correction Approved'
+        : 'Correction Request Update',
+      body: params.approved
+        ? `Your correction for ${params.mealName} (${params.dateStr}) was approved.`
+        : `Your correction for ${params.mealName} (${params.dateStr}) was not approved.`,
+      route: '/student/attendance',
+      data: { type: 'correction_decided', approved: String(params.approved) },
+    };
+  }
+
   // ── Event notifications ─────────────────────────────────────────────────────
 
   /**

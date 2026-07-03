@@ -59,7 +59,10 @@ export class VacationRequestsRepository {
     const raw = await (this.prisma as any).vacationRequest.findFirst({
       where: { id, organizationId, deletedAt: null },
     });
-    return raw ? this.toEntity(raw) : null;
+    if (!raw) return null;
+    // FR-NAME-001 (ISSUE-3): prefer the canonical User.name at read time.
+    const canonical = await this.getUserName(raw.userId);
+    return this.toEntity({ ...raw, userName: canonical ?? raw.userName });
   }
 
   async list(
@@ -80,13 +83,41 @@ export class VacationRequestsRepository {
     const [rows, total] = await Promise.all([
       (this.prisma as any).vacationRequest.findMany({
         where,
-        orderBy: [{ createdAt: 'desc' }],
+        // FR-SORT-001 (ISSUE-12): latest first with a stable secondary key.
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip,
         take: opts.limit,
       }),
       (this.prisma as any).vacationRequest.count({ where }),
     ]);
-    return { data: rows.map((r: any) => this.toEntity(r)), total };
+    // FR-NAME-001 (ISSUE-3): member-facing names resolve from the canonical
+    // User.name at read time — the denormalised userName column is only a
+    // fallback for users that no longer exist. One indexed batch query per page.
+    const nameById = await this.canonicalNames(rows.map((r: any) => r.userId));
+    return {
+      data: rows.map((r: any) =>
+        this.toEntity({
+          ...r,
+          userName: nameById.get(r.userId) ?? r.userName,
+        }),
+      ),
+      total,
+    };
+  }
+
+  /** Batch-resolve canonical user names (FR-NAME-001). Empty input → empty map. */
+  private async canonicalNames(userIds: string[]): Promise<Map<string, string>> {
+    const ids = [...new Set(userIds)].filter(Boolean);
+    if (ids.length === 0) return new Map();
+    const users = await this.prisma.user.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, name: true },
+    });
+    const map = new Map<string, string>();
+    for (const u of users) {
+      if (u.name && u.name.trim().length > 0) map.set(u.id, u.name);
+    }
+    return map;
   }
 
   async updateStatus(

@@ -1,4 +1,5 @@
 import {
+  IsArray,
   IsString,
   IsNotEmpty,
   IsOptional,
@@ -6,7 +7,10 @@ import {
   IsIn,
   Matches,
   MaxLength,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
+import { PreferenceSelectionDto } from '../../preferences/dto/preference-group.dto';
 
 /**
  * DTO for POST /attendance — student marks own attendance.
@@ -55,4 +59,15 @@ export class MarkAttendanceDto {
   @IsString()
   @MaxLength(500)
   note?: string;
+
+  /**
+   * Module 36 (FR-PG-013/031): multi-group selection set — required when the
+   * meal has explicit preference groups and status is Present (FR-PG-032).
+   * Legacy flat-preference meals keep using `preference` above unchanged.
+   */
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => PreferenceSelectionDto)
+  selections?: PreferenceSelectionDto[];
 }

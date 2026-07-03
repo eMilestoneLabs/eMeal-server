@@ -22,7 +22,9 @@ import { ADMIN_ROLES } from '../../common/decorators/roles.decorator';
 import { PaginatedResponseDto } from '../../common/dto/paginated-response.dto';
 import { GroupsRepository } from '../groups/repositories/groups.repository';
 import { getCurrentTimeInTimezone } from '../../common/utils/date.utils';
+import { hhmmToMinutes } from './utils/entry-chrono.util';
 import { StorageService } from '../../storage/storage.service';
+import { PreferencesService } from '../preferences/preferences.service';
 
 /**
  * Matches a base64 image data URI (jpeg/png) so the meal photo can be uploaded
@@ -54,9 +56,28 @@ export class MealsService {
     private readonly schedulesRepo: SchedulesRepository,
     private readonly audit: AuditService,
     private readonly storage: StorageService,
+    private readonly preferencesService: PreferencesService,
     @Optional() @Inject('REALTIME_GATEWAY')
     private readonly realtime: RealtimeEventsService | null = null,
   ) {}
+
+  /**
+   * Module 36 (FR-PG-090): attach the effective preference groups to serialized
+   * meals so the client renders selection UIs dynamically. ONE batched query
+   * for the whole list (no N+1). Meals without explicit groups get [] — the
+   * client falls back to the legacy flat enabledPreferences UI (FR-PG-021).
+   */
+  private async attachPreferenceGroups(
+    meals: any[],
+    organizationId: string,
+  ): Promise<void> {
+    if (!meals.length) return;
+    const map = await this.preferencesService.getEffectiveGroupsForMeals(
+      meals.map((m) => m.id),
+      organizationId,
+    );
+    for (const m of meals) m.preferenceGroups = map.get(m.id) ?? [];
+  }
 
   /**
    * Performance fix: when a meal image arrives as a base64 data URI, upload it
@@ -309,6 +330,15 @@ export class MealsService {
                   return next;
                 })
             : [];
+        // FR-MEAL-007 (ISSUE-18): a per-day window override can move a meal
+        // earlier/later than its template slot — re-sort so the list stays
+        // chronological by the EFFECTIVE open time shown to the student.
+        overlaid.sort((a: any, b: any) => {
+          const ak = MealsService.windowOpenMinutes(a);
+          const bk = MealsService.windowOpenMinutes(b);
+          if (ak !== bk) return ak - bk;
+          return (a.order ?? 0) - (b.order ?? 0);
+        });
         // Issue 1 — planner mode (Weekly / Day-Wise) is PUBLISHED-driven. Students
         // read the PUBLISHED snapshot ONLY (findTodayOverlay reads
         // publishedSnapshot, which is PRESERVED while the admin edits a draft — so
@@ -316,8 +346,10 @@ export class MealsService {
         // empty overlay means the published schedule has no meal for today
         // (off-day) or nothing has ever been published → show NO meals. Never
         // master meals, never draft data.
+        await this.attachPreferenceGroups(overlaid, organizationId);
         return PaginatedResponseDto.of(overlaid, overlaid.length, 1, 50);
       }
+      await this.attachPreferenceGroups(result.data as any[], organizationId);
       return result;
     }
 
@@ -336,6 +368,14 @@ export class MealsService {
     }
 
     return PaginatedResponseDto.of([], 0, 1, 50);
+  }
+
+  /**
+   * FR-MEAL-007: serialized meal response → minutes-since-midnight of its
+   * attendance-window open time; missing/invalid windows sort last.
+   */
+  private static windowOpenMinutes(m: any): number {
+    return hhmmToMinutes(m?.attendanceWindow?.openTime);
   }
 
   /**
@@ -386,7 +426,9 @@ export class MealsService {
         errors: { id: 'Meal does not exist or has been archived' },
       });
     }
-    return MealSerializer.toResponse(meal);
+    const response: any = MealSerializer.toResponse(meal);
+    await this.attachPreferenceGroups([response], organizationId);
+    return response;
   }
 
   // ── UPDATE ────────────────────────────────────────────────────────────────

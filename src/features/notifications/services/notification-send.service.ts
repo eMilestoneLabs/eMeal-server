@@ -27,6 +27,13 @@ export interface NotificationDeliveryResult {
   error?: string;
 }
 
+/** FCM error codes that mean the token is dead and must be pruned (FR-NOTX-014). */
+export const STALE_TOKEN_ERROR_CODES = new Set([
+  'messaging/registration-token-not-registered',
+  'messaging/invalid-registration-token',
+  'messaging/invalid-argument',
+]);
+
 @Injectable()
 export class NotificationSendService implements OnModuleInit {
   private readonly logger = new Logger(NotificationSendService.name);
@@ -37,6 +44,11 @@ export class NotificationSendService implements OnModuleInit {
   private messaging: any = null;
 
   constructor(private readonly config: ConfigService) {}
+
+  /** FR-NOTX-018: whether the real FCM channel is configured (vs log-only). */
+  get pushEnabled(): boolean {
+    return this.fcmEnabled;
+  }
 
   onModuleInit(): void {
     const projectId = this.config.get<string>('FIREBASE_PROJECT_ID');
@@ -93,10 +105,17 @@ export class NotificationSendService implements OnModuleInit {
   async sendBatch(
     recipients: Array<{ userId: string; fcmToken: string }>,
     payload: NotificationPayload,
-  ): Promise<{ successful: string[]; failed: string[] }> {
+  ): Promise<{
+    successful: string[];
+    failed: string[];
+    // FR-NOTX-014: dead tokens detected during the batch — the worker prunes
+    // them so future sends stop failing silently for these devices.
+    staleTokens: Array<{ userId: string; fcmToken: string }>;
+  }> {
     const BATCH_CHUNK_SIZE = 50;
     const successful: string[] = [];
     const failed: string[] = [];
+    const staleTokens: Array<{ userId: string; fcmToken: string }> = [];
 
     for (let i = 0; i < recipients.length; i += BATCH_CHUNK_SIZE) {
       const chunk = recipients.slice(i, i + BATCH_CHUNK_SIZE);
@@ -108,11 +127,18 @@ export class NotificationSendService implements OnModuleInit {
           successful.push(chunk[j].userId);
         } else {
           failed.push(chunk[j].userId);
+          if (
+            result.status === 'fulfilled' &&
+            result.value.errorCode &&
+            STALE_TOKEN_ERROR_CODES.has(result.value.errorCode)
+          ) {
+            staleTokens.push(chunk[j]);
+          }
           this.logger.warn(`[NotificationSend] Batch send failed for user=${chunk[j].userId}`);
         }
       });
     }
-    return { successful, failed };
+    return { successful, failed, staleTokens };
   }
 
   // ── Real FCM send (Phase 2) ──────────────────────────────────────────────────

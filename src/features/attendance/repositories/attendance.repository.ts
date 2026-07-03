@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
 import {
   AttendanceEntity,
@@ -31,10 +32,13 @@ export class AttendanceRepository {
       attendanceDate: record.attendanceDate,
       status: record.status,
       preference: record.preference ?? null,
+      preferences: record.preferences ?? null,
       note: record.note ?? null,
       markedAt: record.markedAt ?? null,
       markedBy: record.markedBy ?? null,
       price: record.price ?? null,
+      source: record.source ?? null,
+      sourceRequestId: record.sourceRequestId ?? null,
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
       meal: record.meal
@@ -91,7 +95,27 @@ export class AttendanceRepository {
     markedAt?: Date | null;
     markedBy?: string | null;
     price?: number | null;
+    // Module 33 consent trail — omitted = leave existing / default 'self'.
+    source?: string | null;
+    sourceRequestId?: string | null;
+    // Module 36 (FR-PG-013) — omitted = legacy path, selections untouched.
+    // Provided (possibly empty) = replace the JSON snapshot + child rows.
+    preferences?: Array<Record<string, unknown>> | null;
+    selectionRows?: Array<{
+      preferenceGroupId: string;
+      groupLabelSnapshot: string;
+      optionKey: string;
+      optionLabelSnapshot: string;
+      isVegSnapshot: boolean;
+      priceDeltaSnapshot: number;
+      quantity: number;
+    }>;
   }): Promise<AttendanceEntity> {
+    // Module 36: when a selection set travels with the mark, the record upsert
+    // and its child rows must land atomically (FAIL_SAFE/data integrity).
+    if (data.selectionRows !== undefined) {
+      return this.upsertWithSelections(data as any);
+    }
     const record = await this.prisma.attendanceRecord.upsert({
       where: {
         userId_mealId_attendanceDate: {
@@ -112,6 +136,10 @@ export class AttendanceRepository {
         markedAt: data.markedAt ?? new Date(),
         markedBy: data.markedBy ?? null,
         price: data.price ?? null,
+        ...(data.source !== undefined ? { source: data.source } : {}),
+        ...(data.sourceRequestId !== undefined
+          ? { sourceRequestId: data.sourceRequestId }
+          : {}),
       },
       update: {
         status: data.status as any,
@@ -126,8 +154,108 @@ export class AttendanceRepository {
         markedAt: data.markedAt ?? new Date(),
         markedBy: data.markedBy ?? null,
         price: data.price ?? null,
+        ...(data.source !== undefined ? { source: data.source } : {}),
+        ...(data.sourceRequestId !== undefined
+          ? { sourceRequestId: data.sourceRequestId }
+          : {}),
       },
       include: this.mealInclude,
+    });
+
+    return this.toEntity(record);
+  }
+
+  /**
+   * Module 36 (FR-PG-013): upsert record + replace its selection child rows
+   * atomically. JSON snapshot and rows always move together — a crash between
+   * the two can never leave a half-written selection.
+   */
+  private async upsertWithSelections(data: {
+    organizationId: string;
+    groupId: string;
+    userId: string;
+    mealId: string;
+    attendanceDate: Date;
+    status: string;
+    preference?: string | null;
+    note?: string | null;
+    markedAt?: Date | null;
+    markedBy?: string | null;
+    price?: number | null;
+    source?: string | null;
+    sourceRequestId?: string | null;
+    preferences?: Array<Record<string, unknown>> | null;
+    selectionRows: Array<{
+      preferenceGroupId: string;
+      groupLabelSnapshot: string;
+      optionKey: string;
+      optionLabelSnapshot: string;
+      isVegSnapshot: boolean;
+      priceDeltaSnapshot: number;
+      quantity: number;
+    }>;
+  }): Promise<AttendanceEntity> {
+    const prefJson =
+      data.preferences && data.preferences.length > 0
+        ? (data.preferences as Prisma.InputJsonValue)
+        : Prisma.DbNull;
+
+    const record = await this.prisma.$transaction(async (tx) => {
+      const rec = await tx.attendanceRecord.upsert({
+        where: {
+          userId_mealId_attendanceDate: {
+            userId: data.userId,
+            mealId: data.mealId,
+            attendanceDate: data.attendanceDate,
+          },
+        },
+        create: {
+          organizationId: data.organizationId,
+          groupId: data.groupId,
+          userId: data.userId,
+          mealId: data.mealId,
+          attendanceDate: data.attendanceDate,
+          status: data.status as any,
+          preference: data.preference ?? null,
+          preferences: prefJson,
+          note: data.note ?? null,
+          markedAt: data.markedAt ?? new Date(),
+          markedBy: data.markedBy ?? null,
+          price: data.price ?? null,
+          ...(data.source !== undefined ? { source: data.source } : {}),
+          ...(data.sourceRequestId !== undefined
+            ? { sourceRequestId: data.sourceRequestId }
+            : {}),
+        },
+        update: {
+          status: data.status as any,
+          // Same preference-preservation guard as the legacy path (Issue 1).
+          ...(data.preference != null ? { preference: data.preference } : {}),
+          preferences: prefJson,
+          note: data.note ?? null,
+          markedAt: data.markedAt ?? new Date(),
+          markedBy: data.markedBy ?? null,
+          price: data.price ?? null,
+          ...(data.source !== undefined ? { source: data.source } : {}),
+          ...(data.sourceRequestId !== undefined
+            ? { sourceRequestId: data.sourceRequestId }
+            : {}),
+        },
+        include: this.mealInclude,
+      });
+
+      await tx.attendancePreferenceSelection.deleteMany({
+        where: { attendanceRecordId: rec.id },
+      });
+      if (data.selectionRows.length > 0) {
+        await tx.attendancePreferenceSelection.createMany({
+          data: data.selectionRows.map((r) => ({
+            ...r,
+            attendanceRecordId: rec.id,
+          })),
+        });
+      }
+      return rec;
     });
 
     return this.toEntity(record);
@@ -194,7 +322,13 @@ export class AttendanceRepository {
       this.prisma.attendanceRecord.findMany({
         where,
         include: this.mealInclude,
-        orderBy: { attendanceDate: 'desc' },
+        // FR-SORT-001 (ISSUE-12): latest first — newest date, then newest mark
+        // within the day (unmarked/pending last), id as stable final key.
+        orderBy: [
+          { attendanceDate: 'desc' },
+          { markedAt: { sort: 'desc', nulls: 'last' } },
+          { id: 'desc' },
+        ],
         skip,
         take: limit,
       }),
@@ -253,7 +387,13 @@ export class AttendanceRepository {
             },
           },
         },
-        orderBy: [{ attendanceDate: 'desc' }, { createdAt: 'asc' }],
+        // FR-SORT-001 (ISSUE-12): latest first — newest date, then newest mark
+        // within the day (unmarked/pending last), id as stable final key.
+        orderBy: [
+          { attendanceDate: 'desc' },
+          { markedAt: { sort: 'desc', nulls: 'last' } },
+          { id: 'desc' },
+        ],
         skip,
         take: limit,
       }),

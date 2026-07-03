@@ -10,7 +10,10 @@ import { MealEntity } from '../entities/meal.entity';
  * - organizationId always comes from JWT — never from client payload.
  * - Soft-delete: isActive=false. Hard delete never used.
  * - slotKey is always free-form string — NEVER validated as enum here.
- * - Results ordered by `order ASC, createdAt ASC` for consistent Flutter rendering.
+ * - Results ordered chronologically by attendance-window open time (FR-MEAL-007,
+ *   ISSUE-18): "HH:mm" ASC with windowless meals last, then `order ASC,
+ *   createdAt ASC` as stable tie-breakers — Morning Tea 06:30 → Breakfast 08:00
+ *   → Lunch 12:00 regardless of creation order.
  */
 @Injectable()
 export class MealsRepository {
@@ -60,7 +63,8 @@ export class MealsRepository {
   }
 
   /**
-   * List meals for a group — ordered by `order ASC, createdAt ASC`.
+   * List meals for a group — chronological by attendance-window open time
+   * (FR-MEAL-007), windowless meals last, `order ASC, createdAt ASC` tie-break.
    * Admin can see disabled meals; students see only isActive=true.
    */
   async findByGroup(
@@ -86,7 +90,13 @@ export class MealsRepository {
         where,
         skip,
         take: opts.limit,
-        orderBy: [{ order: 'asc' }, { createdAt: 'asc' }],
+        orderBy: [
+          // FR-MEAL-007 (ISSUE-18): zero-padded "HH:mm" strings sort correctly
+          // as text; meals with no window go last.
+          { attendanceWindowOpen: { sort: 'asc', nulls: 'last' } },
+          { order: 'asc' },
+          { createdAt: 'asc' },
+        ],
       }),
       this.prisma.meal.count({ where }),
     ]);

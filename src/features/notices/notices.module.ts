@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { AuditModule } from '../../audit/audit.module';
 import { RealtimeModule } from '../../realtime/realtime.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 import { NoticesController } from './notices.controller';
 import { NoticesService } from './notices.service';
@@ -14,9 +15,10 @@ import { NoticesRepository } from './repositories/notices.repository';
  *   PrismaModule   — Notice + NoticeRead access
  *   AuditModule    — audit logging for create/update/delete
  *   RealtimeModule — 'REALTIME_GATEWAY' token for notice.created.v1 emit
+ *   NotificationsModule — best-effort push on publish (FR-NOTX-006 / ISSUE-15)
  */
 @Module({
-  imports: [PrismaModule, AuditModule, RealtimeModule],
+  imports: [PrismaModule, AuditModule, RealtimeModule, NotificationsModule],
   controllers: [NoticesController],
   providers: [NoticesService, NoticesRepository],
   exports: [NoticesService, NoticesRepository],

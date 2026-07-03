@@ -7,6 +7,7 @@ import { PrismaModule } from '../../prisma/prisma.module';
 import { RedisModule } from '../../redis/redis.module';
 import { AuditModule } from '../../audit/audit.module';
 import { RealtimeModule } from '../../realtime/realtime.module';
+import { PreferencesModule } from '../preferences/preferences.module';
 
 /**
  * AttendanceModule — Phase B4 attendance system.
@@ -26,6 +27,7 @@ import { RealtimeModule } from '../../realtime/realtime.module';
     AuditModule,
     GroupsModule,       // provides MembersRepository
     RealtimeModule,     // provides 'ATTENDANCE_GATEWAY' token
+    PreferencesModule,  // Module 36 — selection validation + pricing (FR-PG-031/040)
   ],
   controllers: [AttendanceController],
   providers: [AttendanceService, AttendanceRepository],
