@@ -19,6 +19,7 @@ import { MembersRepository } from '../groups/repositories/members.repository';
 import { PreferencesService } from '../preferences/preferences.service';
 import { BillingService } from '../billing/billing.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { GuestsService } from '../guests/guests.service';
 import {
   toUtcMidnight,
   getCurrentTimeInTimezone,
@@ -117,7 +118,29 @@ export class AttendanceService {
     // Pass 7 (FR-TRUST-011): proactive member notify on non-self changes.
     @Optional() @Inject(NotificationsService)
     private readonly notifications: NotificationsService | null,
+    // Pass 8 (FR-HG-035/060): hosted-guest reconciliation + kitchen counts.
+    @Optional() @Inject(GuestsService)
+    private readonly guests: GuestsService | null,
   ) {}
+
+  /**
+   * Module 22 (FR-HG-035): when a host's status flips away from Present,
+   * their booked guests are cancelled with them (unless the group allows
+   * hostless guests). Fire-and-forget — reconciliation never fails a mark.
+   */
+  private reconcileGuests(params: {
+    organizationId: string;
+    groupId: string;
+    hostUserId: string;
+    mealId: string;
+    attendanceDate: Date;
+    newStatus: string;
+    actorId: string;
+    requestId?: string;
+  }): void {
+    if (params.newStatus === 'present') return;
+    void this.guests?.reconcileOnHostChange(params);
+  }
 
   /**
    * SRS FR-DISP-010 (LOOP-014): attendance/billing writes into a FINALIZED
@@ -246,6 +269,9 @@ export class AttendanceService {
             weeklyMenuEnabled: true,
             dayWiseMealsEnabled: true,
             attendanceGraceMinutes: true,
+            // Pass 10 (FR-MEMX-006/SC-006): archived-group state re-checked
+            // at write time — rides the same query, no extra round-trip.
+            isActive: true,
           },
         },
         organization: { select: { timezone: true } },
@@ -256,14 +282,35 @@ export class AttendanceService {
       throw new NotFoundException('Meal not found');
     }
 
+    // Pass 10 (FR-GRP-014/FR-MEMX-006, LOOP-026): a group archived mid-day
+    // rejects in-flight marks — state is server-checked at submit, not UI.
+    if (meal.group && meal.group.isActive === false) {
+      throw new ForbiddenException({
+        message: 'Group access is no longer available',
+        code: 'GROUP_ARCHIVED',
+        errors: { mealId: 'This group has been archived' },
+      });
+    }
+
     // 2. Verify meal attendance is enabled
     if (!meal.attendanceEnabled) {
       throw new BadRequestException('Attendance is not enabled for this meal');
     }
 
-    // 3. Verify student is an active member of this group
-    const member = await this.membersRepo.isActiveMember(meal.groupId, userId);
-    if (!member) {
+    // 3. Verify membership state at submit (FR-MEMX-002/006): blocked members
+    // get the canonical MEMBER_BLOCKED; removed/never-joined stay generic.
+    const membership = await this.membersRepo.findMembership(
+      meal.groupId,
+      userId,
+    );
+    if (membership?.status === 'blocked') {
+      throw new ForbiddenException({
+        message: 'You have been blocked from this group and cannot mark attendance',
+        code: 'MEMBER_BLOCKED',
+        errors: { mealId: 'Contact your group admin' },
+      });
+    }
+    if (!membership || membership.status !== 'active') {
       throw new ForbiddenException(
         'You are not an active member of this group',
       );
@@ -470,6 +517,19 @@ export class AttendanceService {
 
     // 8. Emit realtime event (marked.v1 = new mark, updated.v1 = re-mark)
     this.emitAttendanceUpdated(meal.groupId, record, organizationId, true);
+
+    // Module 22 (FR-HG-035): a host flipping away from Present cancels their
+    // booked guests with them (default policy).
+    this.reconcileGuests({
+      organizationId,
+      groupId: meal.groupId,
+      hostUserId: userId,
+      mealId: dto.mealId,
+      attendanceDate: attendanceDateUtc,
+      newStatus: status,
+      actorId: userId,
+      requestId,
+    });
 
     // 9. Audit log (fire-and-forget). Grace marks are auditable (FR-TIME-005)
     // and an offline replay's claimed action time is kept for conflict
@@ -745,6 +805,19 @@ export class AttendanceService {
     // attendance.overridden.v1 (GAP-WS-1: source-of-truth event name)
     this.emitAttendanceUpdated(meal.groupId, record, organizationId);
     this.emitAttendanceOverridden(meal.groupId, record);
+
+    // Module 22 (FR-HG-035/054): override away from Present cascades to the
+    // host's booked guests per policy (audited inside the guests service).
+    this.reconcileGuests({
+      organizationId,
+      groupId: meal.groupId,
+      hostUserId: dto.userId,
+      mealId: dto.mealId,
+      attendanceDate: attendanceDateUtc,
+      newStatus: dto.status,
+      actorId: adminId,
+      requestId,
+    });
 
     // 6. Audit — LOOP-031: an admin acting on their OWN record is flagged.
     this.audit.log({
@@ -1156,6 +1229,19 @@ export class AttendanceService {
 
     this.emitAttendanceUpdated(params.groupId, record, params.organizationId);
 
+    // Module 22 (FR-HG-035): consented corrections away from Present cancel
+    // the host's booked guests too (e.g. approved correct_to_absent).
+    this.reconcileGuests({
+      organizationId: params.organizationId,
+      groupId: params.groupId,
+      hostUserId: params.userId,
+      mealId: params.mealId,
+      attendanceDate: toUtcMidnight(params.attendanceDate),
+      newStatus: params.status,
+      actorId: params.actorId,
+      requestId: params.requestId,
+    });
+
     this.audit.log({
       organizationId: params.organizationId,
       actorId: params.actorId,
@@ -1362,7 +1448,21 @@ export class AttendanceService {
       preferenceBreakdown: counts.preferenceBreakdown,
     });
 
-    const response = MealAttendanceSummarySerializer.toResponse(summaryEntity);
+    // Module 22 (FR-HG-060/061): kitchen counts include booked+approved
+    // guests as EXTRA plates — member vs guest never conflated. Additive keys.
+    const guestCounts = this.guests
+      ? await this.guests.getMealGuestCounts(
+          organizationId,
+          query.mealId,
+          attendanceDateUtc,
+        )
+      : { guestCount: 0, guestAdults: 0, guestChildren: 0, guestPreferenceBreakdown: {} };
+
+    const response = {
+      ...MealAttendanceSummarySerializer.toResponse(summaryEntity),
+      ...guestCounts,
+      attendingTotal: counts.presentCount + guestCounts.guestCount,
+    };
 
     // Cache result
     await this.redis.set(cacheKey, JSON.stringify(response), CACHE_TTL);
@@ -1450,10 +1550,33 @@ export class AttendanceService {
       byUser.set(r.userId, u);
     }
 
+    // Module 22 (FR-HG-050/053): each host's bill = own meals + Σ guest
+    // priceSnapshot (booked/approved; no-shows per billNoShowGuests). One
+    // groupBy query — separated from member charges, never conflated.
+    let guestByHost = new Map<string, { guestCount: number; guestAmount: number }>();
+    let guestRevenue = 0;
+    if (this.guests) {
+      const groupPolicy = await this.prisma.group.findFirst({
+        where: { id: query.groupId, organizationId },
+        select: { billNoShowGuests: true, guestAttendanceEnabled: true },
+      });
+      if (groupPolicy?.guestAttendanceEnabled) {
+        guestByHost = await this.guests.getGuestBillingByHost(
+          organizationId,
+          query.groupId,
+          fromDate,
+          toDate,
+          groupPolicy.billNoShowGuests ?? true,
+        );
+        for (const g of guestByHost.values()) guestRevenue += g.guestAmount;
+      }
+    }
+
     const memberMeta = new Map(members.map((m) => [m.userId, m]));
     const allUserIds = new Set<string>([
       ...members.map((m) => m.userId),
       ...byUser.keys(),
+      ...guestByHost.keys(),
     ]);
 
     const memberList = [...allUserIds]
@@ -1462,21 +1585,26 @@ export class AttendanceService {
           byUser.get(uid) ??
           { present: 0, skipped: 0, absent: 0, totalBill: 0, lastActivity: null };
         const meta = memberMeta.get(uid);
+        const guest = guestByHost.get(uid) ?? { guestCount: 0, guestAmount: 0 };
         return {
           userId: uid,
           userName: meta?.name ?? uid,
           role: meta?.role ?? 'member',
           email: meta?.email ?? null,
           phone: meta?.phone ?? null,
-          totalBill: agg.totalBill,
+          totalBill: agg.totalBill + guest.guestAmount,
           presentCount: agg.present,
           skippedCount: agg.skipped,
           absentCount: agg.absent,
+          // FR-HG-053: guest charges itemised separately from member charges.
+          guestCount: guest.guestCount,
+          guestAmount: guest.guestAmount,
           lastActivity: agg.lastActivity ? agg.lastActivity.toISOString() : null,
         };
       })
       .sort((a, b) => b.totalBill - a.totalBill);
 
+    revenue += guestRevenue;
     const memberCount = members.length;
     const averageBill = memberCount > 0 ? Math.round(revenue / memberCount) : 0;
 
@@ -1497,6 +1625,8 @@ export class AttendanceService {
         skippedMeals,
         absentMeals,
         averageBill,
+        // Module 22 (FR-HG-053): guest component surfaced separately.
+        guestRevenue,
       },
       mealBreakdown,
       members: memberList,

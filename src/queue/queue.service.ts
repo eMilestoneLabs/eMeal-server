@@ -57,6 +57,12 @@ export class QueueService {
 
     @InjectQueue(QUEUE_NAMES.CLEANUP)
     private readonly cleanupQueue: Queue,
+
+    @InjectQueue(QUEUE_NAMES.SCHEDULE_PUBLISH)
+    private readonly schedulePublishQueue: Queue,
+
+    @InjectQueue(QUEUE_NAMES.SYSTEM_DEFAULT)
+    private readonly systemDefaultQueue: Queue,
   ) {}
 
   // ── NOTIFICATION JOBS ──────────────────────────────────────────────────────
@@ -269,6 +275,10 @@ export class QueueService {
       { name: QUEUE_NAMES.ANALYTICS, queue: this.analyticsQueue },
       { name: QUEUE_NAMES.EXPORT, queue: this.exportQueue },
       { name: QUEUE_NAMES.CLEANUP, queue: this.cleanupQueue },
+      // Observability gap closed (Pass 7 validation finding): these two ran
+      // fine but were invisible to /health and /admin/queues/stats.
+      { name: QUEUE_NAMES.SCHEDULE_PUBLISH, queue: this.schedulePublishQueue },
+      { name: QUEUE_NAMES.SYSTEM_DEFAULT, queue: this.systemDefaultQueue },
     ];
 
     const metrics: Record<string, Record<string, number>> = {};

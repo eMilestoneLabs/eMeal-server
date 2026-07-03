@@ -35,6 +35,7 @@ import { MealsModule } from '../features/meals/meals.module';
 import { AttendanceModule } from '../features/attendance/attendance.module';
 import { CorrectionsModule } from '../features/corrections/corrections.module';
 import { BillingModule } from '../features/billing/billing.module';
+import { GuestsModule } from '../features/guests/guests.module';
 import { PreferencesModule } from '../features/preferences/preferences.module';
 import { RealtimeModule } from '../realtime/realtime.module';
 // Phase B5
@@ -99,6 +100,8 @@ import { HealthController } from './health.controller';
     CorrectionsModule,
     // Pass 7 — FR-DISP-010 billing period finalization & controlled reopen
     BillingModule,
+    // Pass 8 — Module 22 Member-Hosted Guests (+N)
+    GuestsModule,
     // Module 36 — Multi-dimensional preference groups (FR-PG-*)
     PreferencesModule,
     // Phase B5

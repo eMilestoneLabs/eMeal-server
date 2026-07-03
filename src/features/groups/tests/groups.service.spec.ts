@@ -188,14 +188,18 @@ describe('GroupsService', () => {
       ).rejects.toThrow(BadRequestException);
     });
 
-    it('throws BadRequestException when group is at max capacity', async () => {
+    // Pass 10 — SRS FR-GRP-015/FR-JOIN-012 (SC-043): 409 GROUP_FULL.
+    it('rejects joining a full group with 409 GROUP_FULL', async () => {
       const fullGroup = new GroupEntity({ ...mockGroup, maxMembers: 1, memberCount: 1 });
       groupsRepo.findByJoinCode.mockResolvedValue(fullGroup);
       membersRepo.findMembership.mockResolvedValue(null);
 
       await expect(
         service.joinGroup('usr_new', { joinCode: 'HTL3K8XZ' }),
-      ).rejects.toThrow(BadRequestException);
+      ).rejects.toMatchObject({
+        status: 409,
+        response: expect.objectContaining({ code: 'GROUP_FULL' }),
+      });
     });
 
     it('throws ForbiddenException for blocked user', async () => {

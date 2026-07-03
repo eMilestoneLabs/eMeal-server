@@ -47,6 +47,82 @@ export const VALID_FUNCTIONAL_ROLES = [
   'eventGuest',
 ] as const;
 
+/**
+ * Module 22 (FR-HG-020/021) — per-group hosted-guest configuration.
+ * Cross-field rules (perGuestPrice requires prices, etc.) are enforced in
+ * GroupsService so partial PATCHes validate against the FINAL effective state.
+ * Declared BEFORE MealConfigDto: the `guestConfig?: GuestConfigDto` property
+ * emits design:type metadata at decoration time — a later declaration would
+ * hit the class TDZ at module load.
+ */
+export class GuestConfigDto {
+  @IsOptional()
+  @IsBoolean()
+  guestAttendanceEnabled?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(50)
+  maxGuestsPerMemberPerMeal?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(100)
+  maxGuestsPerMemberPerDay?: number;
+
+  @IsOptional()
+  @IsIn(['sameAsMember', 'flatSurcharge', 'perGuestPrice'])
+  guestPricingMode?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(100000)
+  guestAdultPrice?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(100000)
+  guestChildPrice?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(100000)
+  guestSurcharge?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  guestRequiresApproval?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(720)
+  guestCutoffMinutesBeforeClose?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(30)
+  guestAdvanceBookingDays?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  guestPreferenceRequired?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  allowGuestWithoutHost?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  billNoShowGuests?: boolean;
+}
+
 export class MealConfigDto {
   @IsOptional()
   @IsBoolean()
@@ -110,6 +186,12 @@ export class MealConfigDto {
   @Min(0)
   @Max(240)
   minOptOutMinutes?: number;
+
+  /** Module 22 (Pass 8, FR-HG-020): hosted-guest configuration. */
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => GuestConfigDto)
+  guestConfig?: GuestConfigDto;
 }
 
 export class CreateGroupDto {

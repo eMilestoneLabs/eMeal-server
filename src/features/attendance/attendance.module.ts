@@ -10,6 +10,7 @@ import { RealtimeModule } from '../../realtime/realtime.module';
 import { PreferencesModule } from '../preferences/preferences.module';
 import { BillingModule } from '../billing/billing.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { GuestsModule } from '../guests/guests.module';
 
 /**
  * AttendanceModule — Phase B4 attendance system.
@@ -32,6 +33,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
     PreferencesModule,  // Module 36 — selection validation + pricing (FR-PG-031/040)
     BillingModule,      // Pass 7 — FR-DISP-010 period-lock guard (prisma-only, no cycle)
     NotificationsModule, // Pass 7 — FR-TRUST-011 member notify on non-self changes
+    GuestsModule,       // Pass 8 — FR-HG-035 reconciliation + FR-HG-060 kitchen counts
   ],
   controllers: [AttendanceController],
   providers: [AttendanceService, AttendanceRepository],

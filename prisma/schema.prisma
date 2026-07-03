@@ -244,6 +244,23 @@ model Group {
   // Null = server default (ATTENDANCE_MIN_OPT_OUT_MINUTES, 30).
   minOptOutMinutes Int?
 
+  // ── Module 22 (Pass 8) — Member-Hosted Guests config (FR-HG-020) ──────────
+  // All additive. Nulls = server defaults resolved in code, so existing
+  // groups are untouched (feature default OFF).
+  guestAttendanceEnabled        Boolean @default(false)
+  maxGuestsPerMemberPerMeal     Int?    // null = default (5)
+  maxGuestsPerMemberPerDay      Int?    // null = no per-day cap
+  guestPricingMode              String? // sameAsMember | flatSurcharge | perGuestPrice
+  guestAdultPrice               Int?    // perGuestPrice mode
+  guestChildPrice               Int?    // perGuestPrice mode
+  guestSurcharge                Int?    // flatSurcharge mode (added to meal price)
+  guestRequiresApproval         Boolean @default(false)
+  guestCutoffMinutesBeforeClose Int?    // null = 0 (bookable until close)
+  guestAdvanceBookingDays       Int?    // null = 0 (same-day only)
+  guestPreferenceRequired       Boolean @default(false)
+  allowGuestWithoutHost         Boolean @default(false)
+  billNoShowGuests              Boolean @default(true) // LOOP-013 policy
+
   maxMembers Int?
   isActive   Boolean  @default(true)
   createdAt  DateTime @default(now())
@@ -552,6 +569,11 @@ model AttendanceRecord {
   // AttendanceCorrectionRequest id that produced this record (consent proof)
   sourceRequestId String?
 
+  // Module 22 (Pass 8, FR-HG-012): denormalised hosted-guest counters —
+  // updated in the SAME transaction as MealGuest changes for join-free reads.
+  guestAdults   Int @default(0)
+  guestChildren Int @default(0)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -784,6 +806,45 @@ model VacationRequest {
   @@index([groupId])
   @@index([organizationId, status])
   @@map("vacation_requests")
+}
+
+/// Module 22 (Pass 8) — Member-Hosted Guest (FR-HG-010): one row per hosted
+/// guest, attached to the host's attendance by (hostUserId, mealId,
+/// attendanceDate). Accountless (FR-HG-002), tenant-scoped, price snapshotted
+/// at booking (FR-HG-013). Self-contained scalars — purely additive.
+/// status: booked | cancelled | no_show
+/// pendingApproval: true while awaiting admin approval (guestRequiresApproval)
+///                  or HOST confirmation (admin-added, FR-HG-062) — excluded
+///                  from kitchen counts and billing until cleared.
+model MealGuest {
+  id             String   @id @default(cuid())
+  organizationId String
+  groupId        String
+  mealId         String
+  attendanceDate DateTime // UTC midnight business date
+  hostUserId     String   // the member financially responsible (FR-HG-050)
+
+  isAdult        Boolean @default(true)
+  displayName    String?
+  mealPreference String?
+  status         String  @default("booked")
+  pendingApproval Boolean @default(false)
+  priceSnapshot  Int?    // effective guest price at booking — immutable
+
+  createdBy   String    // host userId, or admin userId for on-behalf adds
+  approvedBy  String?
+  approvedAt  DateTime?
+  cancelledBy String?
+  cancelledAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([groupId, attendanceDate])
+  @@index([hostUserId, attendanceDate])
+  @@index([mealId, attendanceDate])
+  @@index([organizationId])
+  @@map("meal_guests")
 }
 
 /// SRS FR-DISP-010 (Pass 7) — Billing period finalization & controlled reopen.

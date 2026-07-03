@@ -234,6 +234,67 @@ export class GroupsService {
         updateData.minOptOutMinutes = mc.minOptOutMinutes;
       }
 
+      // Module 22 (Pass 8, FR-HG-020/021): hosted-guest config. Each field
+      // patches independently; cross-field rules validate against the FINAL
+      // effective state (same discipline as pricing/meals above).
+      if (mc.guestConfig) {
+        const gc = mc.guestConfig;
+        for (const key of [
+          'guestAttendanceEnabled',
+          'maxGuestsPerMemberPerMeal',
+          'maxGuestsPerMemberPerDay',
+          'guestPricingMode',
+          'guestAdultPrice',
+          'guestChildPrice',
+          'guestSurcharge',
+          'guestRequiresApproval',
+          'guestCutoffMinutesBeforeClose',
+          'guestAdvanceBookingDays',
+          'guestPreferenceRequired',
+          'allowGuestWithoutHost',
+          'billNoShowGuests',
+        ] as const) {
+          if (gc[key] !== undefined) updateData[key] = gc[key];
+        }
+
+        const effGuests =
+          updateData.guestAttendanceEnabled ??
+          (existing as any).guestAttendanceEnabled;
+        const effMeals2 = updateData.mealsEnabled ?? existing.mealsEnabled;
+        // FR-HG-004: guest hosting is Meal-Mode only.
+        if (effGuests === true && effMeals2 === false) {
+          throw new UnprocessableEntityException({
+            message: 'Hosted guests require the meal system to be enabled',
+            code: 'GUESTS_REQUIRE_MEALS',
+            errors: {
+              guestAttendanceEnabled:
+                'Enable meals for this group before turning on hosted guests',
+            },
+          });
+        }
+        // FR-HG-021: pricing-mode field requirements (final effective state).
+        const effMode =
+          updateData.guestPricingMode ?? (existing as any).guestPricingMode;
+        const effAdult =
+          updateData.guestAdultPrice ?? (existing as any).guestAdultPrice;
+        const effSurcharge =
+          updateData.guestSurcharge ?? (existing as any).guestSurcharge;
+        if (effMode === 'perGuestPrice' && (effAdult === null || effAdult === undefined)) {
+          throw new UnprocessableEntityException({
+            message: 'perGuestPrice mode requires guestAdultPrice',
+            code: 'GUEST_PRICE_REQUIRED',
+            errors: { guestAdultPrice: 'Set the adult guest price' },
+          });
+        }
+        if (effMode === 'flatSurcharge' && (effSurcharge === null || effSurcharge === undefined)) {
+          throw new UnprocessableEntityException({
+            message: 'flatSurcharge mode requires guestSurcharge',
+            code: 'GUEST_SURCHARGE_REQUIRED',
+            errors: { guestSurcharge: 'Set the per-guest surcharge' },
+          });
+        }
+      }
+
       // SRS FR-MODE-004 (LOOP): pricing requires the meal system. Evaluate the
       // FINAL EFFECTIVE state so partial patches can't create pricing-in-AO.
       const effPricing =
@@ -284,6 +345,15 @@ export class GroupsService {
       // FR-TRUST-001/003: trust-model changes are high-impact policy flips.
       'attendanceDefault',
       'minOptOutMinutes',
+      // Module 22 (FR-HG-020): guest policy flips are billing-relevant.
+      'guestAttendanceEnabled',
+      'guestPricingMode',
+      'guestAdultPrice',
+      'guestChildPrice',
+      'guestSurcharge',
+      'guestRequiresApproval',
+      'maxGuestsPerMemberPerMeal',
+      'billNoShowGuests',
     ] as const;
     const modeChanges: Record<string, { from: unknown; to: unknown }> = {};
     for (const key of modeFlagKeys) {
@@ -378,10 +448,12 @@ export class GroupsService {
       });
     }
 
-    // Max capacity check (null maxMembers = unlimited)
+    // Max capacity check (null maxMembers = unlimited).
+    // SRS FR-GRP-015/FR-JOIN-012 (LOOP-061, SC-043): 409 GROUP_FULL.
     if (group.maxMembers !== null && group.memberCount >= group.maxMembers) {
-      throw new BadRequestException({
+      throw new ConflictException({
         message: 'Group is full',
+        code: 'GROUP_FULL',
         errors: { joinCode: 'This group has reached its maximum capacity' },
       });
     }
@@ -789,6 +861,8 @@ export class GroupsService {
       // SRS FR-TRUST-001/003: trust model (opt-in default) + fair floor.
       attendanceDefault: group.attendanceDefault ?? 'absent',
       minOptOutMinutes: group.minOptOutMinutes ?? null,
+      // Module 22 (FR-HG-020/022): hosted-guest config, nested + additive.
+      guestConfig: GroupSerializer.guestConfig(group),
     };
   }
 

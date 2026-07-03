@@ -36,6 +36,28 @@ export class GroupSerializer {
     return type === 'factory_' ? 'factory' : type;
   }
 
+  /**
+   * Module 22 (FR-HG-020/022): hosted-guest config with server defaults
+   * resolved, nested inside mealConfig (additive key — old clients ignore).
+   */
+  static guestConfig(group: Partial<GroupEntity>): Record<string, unknown> {
+    return {
+      guestAttendanceEnabled: group.guestAttendanceEnabled ?? false,
+      maxGuestsPerMemberPerMeal: group.maxGuestsPerMemberPerMeal ?? 5,
+      maxGuestsPerMemberPerDay: group.maxGuestsPerMemberPerDay ?? null,
+      guestPricingMode: group.guestPricingMode ?? 'sameAsMember',
+      guestAdultPrice: group.guestAdultPrice ?? null,
+      guestChildPrice: group.guestChildPrice ?? null,
+      guestSurcharge: group.guestSurcharge ?? null,
+      guestRequiresApproval: group.guestRequiresApproval ?? false,
+      guestCutoffMinutesBeforeClose: group.guestCutoffMinutesBeforeClose ?? 0,
+      guestAdvanceBookingDays: group.guestAdvanceBookingDays ?? 0,
+      guestPreferenceRequired: group.guestPreferenceRequired ?? false,
+      allowGuestWithoutHost: group.allowGuestWithoutHost ?? false,
+      billNoShowGuests: group.billNoShowGuests ?? true,
+    };
+  }
+
   static toResponse(group: GroupEntity): Record<string, unknown> {
     return {
       id: group.id,
@@ -73,6 +95,8 @@ export class GroupSerializer {
         // SRS FR-TRUST-001/003: trust model ('absent' opt-in default) + floor.
         attendanceDefault: group.attendanceDefault ?? 'absent',
         minOptOutMinutes: group.minOptOutMinutes ?? null,
+        // Module 22 (FR-HG-020/022): hosted-guest config, nested + additive.
+        guestConfig: GroupSerializer.guestConfig(group),
       },
 
       createdAt: group.createdAt.toISOString(),

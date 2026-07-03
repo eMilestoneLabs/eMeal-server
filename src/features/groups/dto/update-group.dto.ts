@@ -2,6 +2,7 @@ import {
   IsBoolean,
   IsIn,
   IsInt,
+  IsNotEmpty,
   IsOptional,
   IsString,
   MaxLength,
@@ -16,8 +17,10 @@ import {
 } from './create-group.dto';
 
 export class UpdateGroupDto {
+  // SRS FR-GRP-013 (Pass 10): a PATCHed name may be omitted, never empty.
   @IsOptional()
   @IsString()
+  @IsNotEmpty({ message: 'Group name cannot be empty' })
   @MaxLength(100)
   name?: string;
 

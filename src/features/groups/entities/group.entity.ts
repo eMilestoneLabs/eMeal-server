@@ -37,6 +37,20 @@ export class GroupEntity {
   attendanceDefault: string | null;
   // SRS FR-TRUST-003: fair-opportunity floor (minutes). Null = server default.
   minOptOutMinutes: number | null;
+  // Module 22 (FR-HG-020): hosted-guest config columns (nulls = defaults).
+  guestAttendanceEnabled: boolean;
+  maxGuestsPerMemberPerMeal: number | null;
+  maxGuestsPerMemberPerDay: number | null;
+  guestPricingMode: string | null;
+  guestAdultPrice: number | null;
+  guestChildPrice: number | null;
+  guestSurcharge: number | null;
+  guestRequiresApproval: boolean;
+  guestCutoffMinutesBeforeClose: number | null;
+  guestAdvanceBookingDays: number | null;
+  guestPreferenceRequired: boolean;
+  allowGuestWithoutHost: boolean;
+  billNoShowGuests: boolean;
 
   // ── Computed from GroupMember at query time ───────────────────────────────
   memberCount: number;

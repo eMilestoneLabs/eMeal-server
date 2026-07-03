@@ -87,6 +87,9 @@ describe('AttendanceService', () => {
           provide: MembersRepository,
           useValue: {
             isActiveMember: jest.fn(),
+            // Pass 10 (FR-MEMX-006): mark path re-checks full membership
+            // state at submit — default to an active member.
+            findMembership: jest.fn().mockResolvedValue({ status: 'active' }),
           },
         },
         {
@@ -228,7 +231,7 @@ describe('AttendanceService', () => {
 
     it('throws ForbiddenException when user is not an active member', async () => {
       (prisma.meal.findFirst as jest.Mock).mockResolvedValue(mockMeal);
-      (membersRepo.isActiveMember as jest.Mock).mockResolvedValue(false);
+      ((membersRepo as any).findMembership as jest.Mock).mockResolvedValue(null);
 
       await expect(
         service.markAttendance('usr_STRANGER', 'org_01', {
@@ -236,6 +239,41 @@ describe('AttendanceService', () => {
           attendanceDate: today,
         }),
       ).rejects.toThrow(ForbiddenException);
+    });
+
+    // Pass 10 — FR-MEMX-002/006 (LOOP-026) + FR-GRP-014 (SC-006).
+
+    it('blocked members get the canonical MEMBER_BLOCKED 403', async () => {
+      (prisma.meal.findFirst as jest.Mock).mockResolvedValue(mockMeal);
+      ((membersRepo as any).findMembership as jest.Mock).mockResolvedValue({
+        status: 'blocked',
+      });
+
+      await expect(
+        service.markAttendance('usr_01', 'org_01', {
+          mealId: 'meal_01',
+          attendanceDate: today,
+        }),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'MEMBER_BLOCKED' }),
+      });
+    });
+
+    it('archived groups reject in-flight marks with GROUP_ARCHIVED', async () => {
+      (prisma.meal.findFirst as jest.Mock).mockResolvedValue({
+        ...mockMeal,
+        group: { ...mockMeal.group, isActive: false },
+      });
+
+      await expect(
+        service.markAttendance('usr_01', 'org_01', {
+          mealId: 'meal_01',
+          attendanceDate: today,
+        }),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'GROUP_ARCHIVED' }),
+      });
+      expect(attendanceRepo.upsert).not.toHaveBeenCalled();
     });
 
     it('rejects out-of-window marks with HTTP 423 Locked + flat error contract (GAP-ATT-1)', async () => {
