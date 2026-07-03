@@ -18,7 +18,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { MarkAttendanceDto } from './dto/mark-attendance.dto';
 import { BulkAttendanceDto } from './dto/bulk-attendance.dto';
-import { AdminOverrideDto } from './dto/admin-override.dto';
+import { AdminOverrideDto, AdminBulkOverrideDto } from './dto/admin-override.dto';
 import {
   QueryAttendanceDto,
   QuerySummaryDto,
@@ -96,6 +96,22 @@ export class AttendanceController {
     @Req() req: any,
   ) {
     return this.attendanceService.adminOverride(
+      user.sub, user.organizationId!, dto, req.requestId,
+    );
+  }
+
+  // ── POST /attendance/admin/bulk-override (FR-ATT-033, governed per row) ───
+
+  @Post('admin/bulk-override')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(RolesGuard)
+  @Roles(...ADMIN_ROLES)
+  async adminBulkOverride(
+    @CurrentUser() user: { sub: string; organizationId: string; role: string },
+    @Body() dto: AdminBulkOverrideDto,
+    @Req() req: any,
+  ) {
+    return this.attendanceService.adminBulkOverride(
       user.sub, user.organizationId!, dto, req.requestId,
     );
   }
@@ -213,6 +229,19 @@ export class AttendanceController {
   ) {
     return this.attendanceService.getAttendance(
       user.sub, user.role, user.organizationId!, query,
+    );
+  }
+
+  // ── GET /attendance/:id/history — FR-TRUST-010 member-visible history ─────
+  // Members see their own record's full change trail; admins any in org.
+
+  @Get(':id/history')
+  async getRecordHistory(
+    @CurrentUser() user: { sub: string; organizationId: string; role: string },
+    @Param('id') id: string,
+  ) {
+    return this.attendanceService.getRecordHistory(
+      user.sub, user.role, user.organizationId!, id,
     );
   }
 

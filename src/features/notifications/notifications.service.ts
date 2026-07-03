@@ -370,6 +370,52 @@ export class NotificationsService {
     }
   }
 
+  /**
+   * SRS FR-TRUST-011 (Pass 7): any change to a member's attendance/billing by
+   * anyone other than the member notifies them immediately with the delta and
+   * reason. Fire-and-forget — never blocks or fails the write.
+   */
+  async notifyAttendanceChanged(params: {
+    organizationId: string;
+    userId: string;
+    newStatus: string;
+    dateStr: string;
+    reason?: string | null;
+    changedBy: 'admin' | 'system';
+  }): Promise<void> {
+    try {
+      const user = await this.prisma.user.findUnique({
+        where: { id: params.userId },
+        select: { fcmToken: true },
+      });
+      if (!user?.fcmToken) return;
+
+      const who =
+        params.changedBy === 'admin' ? 'an administrator' : 'group policy';
+      await this.queue.enqueuePush({
+        organizationId: params.organizationId,
+        userId: params.userId,
+        fcmToken: user.fcmToken,
+        title: 'Your attendance was updated',
+        body:
+          `Your ${params.dateStr} attendance was set to ${params.newStatus} by ${who}` +
+          (params.reason ? ` — ${params.reason}` : '') +
+          '. Tap to review or request a correction.',
+        route: '/attendance',
+        data: {
+          type: 'attendance_changed',
+          date: params.dateStr,
+          status: params.newStatus,
+          changedBy: params.changedBy,
+        },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `attendance-changed push enqueue failed: ${(err as Error).message}`,
+      );
+    }
+  }
+
   // ── DELIVERY DIAGNOSTICS (FR-NOTX-018 / ISSUE-16) ─────────────────────────
 
   /**

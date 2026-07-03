@@ -18,16 +18,22 @@ import { ExportWorker } from './export.worker';
 import { SchedulePublishWorker } from './schedule-publish.worker';
 import { StaleTokenWorker } from './stale-token.worker';
 import { OrphanWorker } from './orphan.worker';
+import { SystemDefaultWorker } from './system-default.worker';
+import { SystemDefaultSweepScheduler } from './system-default.scheduler';
 import { QueueModule } from '../queue/queue.module';
 import { NotificationsModule } from '../features/notifications/notifications.module';
 import { QUEUE_NAMES } from '../queue/constants/queue.constants';
 import { PrismaModule } from '../prisma/prisma.module';
+import { RedisModule } from '../redis/redis.module';
+import { AuditModule } from '../audit/audit.module';
 
 @Module({
   imports: [
     QueueModule,
     NotificationsModule,
     PrismaModule,
+    RedisModule,
+    AuditModule,
 
     // BullMQ requires queue registration in the consuming module as well
     BullModule.registerQueue(
@@ -37,6 +43,7 @@ import { PrismaModule } from '../prisma/prisma.module';
       { name: QUEUE_NAMES.EXPORT },
       { name: QUEUE_NAMES.CLEANUP },
       { name: QUEUE_NAMES.SCHEDULE_PUBLISH },
+      { name: QUEUE_NAMES.SYSTEM_DEFAULT },
     ),
   ],
 
@@ -49,6 +56,8 @@ import { PrismaModule } from '../prisma/prisma.module';
     SchedulePublishWorker,   // B6 gap: deferred schedule publish jobs
     StaleTokenWorker,        // B6 gap: expired refresh token + OTP cleanup
     OrphanWorker,            // B6 gap: auto-delete events + orphaned guest parties
+    SystemDefaultWorker,     // Pass 7 (FR-TRUST-001): opt-out materialization
+    SystemDefaultSweepScheduler, // Pass 7: registers the repeatable sweep job
   ],
 })
 export class WorkersModule {}

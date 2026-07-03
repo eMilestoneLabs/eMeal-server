@@ -21,6 +21,9 @@ export const QUEUE_NAMES = {
   EXPORT: 'export-queue',
   CLEANUP: 'cleanup-queue',
   SCHEDULE_PUBLISH: 'schedule-publish-queue',
+  // Pass 7 (FR-TRUST-001): opt-out system-default materialization. Own queue
+  // — a second processor on an existing queue would steal that queue's jobs.
+  SYSTEM_DEFAULT: 'system-default-queue',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -36,6 +39,8 @@ export const JOB_TYPES = {
   SCHEDULE_REMINDER: 'schedule-reminder',
   CANCEL_REMINDER: 'cancel-reminder',
   DISPATCH_REMINDER: 'dispatch-reminder',
+  // Pass 7 (FR-TRUST-001): opt-out group system-default materialization
+  SYSTEM_DEFAULT_SWEEP: 'system-default-sweep',
 
   // analytics-queue
   AGGREGATE_DAILY: 'aggregate-daily',

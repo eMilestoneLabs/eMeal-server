@@ -5,6 +5,7 @@ import {
   ForbiddenException,
   NotFoundException,
   HttpException,
+  UnprocessableEntityException,
 } from '@nestjs/common';
 import { PreferencesService } from '../../preferences/preferences.service';
 import { AttendanceService } from '../attendance.service';
@@ -13,6 +14,8 @@ import { MembersRepository } from '../../groups/repositories/members.repository'
 import { PrismaService } from '../../../prisma/prisma.service';
 import { RedisService } from '../../../redis/redis.service';
 import { AuditService } from '../../../audit/audit.service';
+import { BillingService } from '../../billing/billing.service';
+import { NotificationsService } from '../../notifications/notifications.service';
 import { AttendanceEntity } from '../entities/attendance.entity';
 
 /**
@@ -35,6 +38,9 @@ describe('AttendanceService', () => {
   let prisma: jest.Mocked<PrismaService>;
   let redis: jest.Mocked<RedisService>;
   let audit: jest.Mocked<AuditService>;
+  let billing: { isDateFinalized: jest.Mock };
+  let notifications: { notifyAttendanceChanged: jest.Mock };
+  let config: { get: jest.Mock };
 
   const mockMealRecord = new AttendanceEntity({
     id: 'att_01',
@@ -111,6 +117,14 @@ describe('AttendanceService', () => {
               findFirst: jest.fn().mockResolvedValue(null),
               create: jest.fn(),
             },
+            // Pass 7 — dedup lookups + FR-TRUST-010 history.
+            attendanceRecord: {
+              findFirst: jest.fn().mockResolvedValue(null),
+              findMany: jest.fn().mockResolvedValue([]),
+            },
+            auditLog: {
+              findMany: jest.fn().mockResolvedValue([]),
+            },
           },
         },
         {
@@ -137,6 +151,18 @@ describe('AttendanceService', () => {
             emitToUser: jest.fn(),
           },
         },
+        {
+          // Pass 7 — FR-DISP-010 period lock (unlocked by default).
+          provide: BillingService,
+          useValue: {
+            isDateFinalized: jest.fn().mockResolvedValue({ locked: false }),
+          },
+        },
+        {
+          // Pass 7 — FR-TRUST-011 member notify (fire-and-forget).
+          provide: NotificationsService,
+          useValue: { notifyAttendanceChanged: jest.fn() },
+        },
       ],
     }).compile();
 
@@ -146,6 +172,9 @@ describe('AttendanceService', () => {
     prisma = module.get(PrismaService);
     redis = module.get(RedisService);
     audit = module.get(AuditService);
+    billing = module.get(BillingService);
+    notifications = module.get(NotificationsService);
+    config = module.get(ConfigService);
   });
 
   // ── markAttendance ─────────────────────────────────────────────────────────
@@ -466,6 +495,243 @@ describe('AttendanceService', () => {
       expect(attendanceRepo.upsert).toHaveBeenCalledWith(
         expect.objectContaining({ status: 'present', markedBy: 'admin_01' }),
       );
+    });
+
+    // ── Pass 7: LOOP-024 bounded backfill + FR-DISP-010 period lock ─────────
+
+    const todayStr = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Kolkata',
+    }).format(new Date());
+
+    it('rejects overrides for future dates (LOOP-024)', async () => {
+      (prisma.meal.findFirst as jest.Mock).mockResolvedValue({
+        id: 'meal_01',
+        groupId: 'grp_01',
+      });
+      const future = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000)
+        .toISOString()
+        .slice(0, 10);
+
+      await expect(
+        service.adminOverride('admin_01', 'org_01', {
+          userId: 'usr_01',
+          mealId: 'meal_01',
+          attendanceDate: future,
+          status: 'absent',
+        }),
+      ).rejects.toThrow(UnprocessableEntityException);
+      expect(attendanceRepo.upsert).not.toHaveBeenCalled();
+    });
+
+    it('rejects overrides older than adminBackfillDays (LOOP-024)', async () => {
+      config.get.mockImplementation((key: string) =>
+        key === 'attendance.adminBackfillDays' ? 30 : undefined,
+      );
+      (prisma.meal.findFirst as jest.Mock).mockResolvedValue({
+        id: 'meal_01',
+        groupId: 'grp_01',
+      });
+
+      await expect(
+        service.adminOverride('admin_01', 'org_01', {
+          userId: 'usr_01',
+          mealId: 'meal_01',
+          attendanceDate: '2026-01-05', // ~180 days back
+          status: 'absent',
+        }),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'BACKFILL_LIMIT' }),
+      });
+    });
+
+    it('rejects writes into a FINALIZED billing period with 423 PERIOD_FINALIZED (FR-DISP-010)', async () => {
+      billing.isDateFinalized.mockResolvedValue({
+        locked: true,
+        periodEnd: todayStr,
+      });
+      (prisma.meal.findFirst as jest.Mock).mockResolvedValue({
+        id: 'meal_01',
+        groupId: 'grp_01',
+      });
+
+      await expect(
+        service.adminOverride('admin_01', 'org_01', {
+          userId: 'usr_01',
+          mealId: 'meal_01',
+          attendanceDate: todayStr,
+          status: 'absent',
+        }),
+      ).rejects.toMatchObject({
+        status: 423,
+        response: expect.objectContaining({ code: 'PERIOD_FINALIZED' }),
+      });
+      expect(attendanceRepo.upsert).not.toHaveBeenCalled();
+    });
+
+    // ── Pass 7: FR-TRUST-011 notify + LOOP-031 self-action flag ─────────────
+
+    it('notifies the member on a non-self change; flags admin self-actions in audit', async () => {
+      (prisma.meal.findFirst as jest.Mock).mockResolvedValue({
+        id: 'meal_01',
+        groupId: 'grp_01',
+      });
+      (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'usr_01' });
+      (attendanceRepo.upsert as jest.Mock).mockResolvedValue(mockMealRecord);
+      (redis.del as jest.Mock).mockResolvedValue(undefined);
+
+      await service.adminOverride('admin_01', 'org_01', {
+        userId: 'usr_01',
+        mealId: 'meal_01',
+        attendanceDate: todayStr,
+        status: 'absent',
+      });
+      expect(notifications.notifyAttendanceChanged).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: 'usr_01', newStatus: 'absent' }),
+      );
+
+      // Self-action: no member notify, but the audit row carries the flag.
+      notifications.notifyAttendanceChanged.mockClear();
+      (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'admin_01' });
+      await service.adminOverride('admin_01', 'org_01', {
+        userId: 'admin_01',
+        mealId: 'meal_01',
+        attendanceDate: todayStr,
+        status: 'absent',
+      });
+      expect(notifications.notifyAttendanceChanged).not.toHaveBeenCalled();
+      expect(audit.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          metadata: expect.objectContaining({ selfAction: true }),
+        }),
+      );
+    });
+  });
+
+  // ── Pass 7: FR-ATT-033 governed bulk override ──────────────────────────────
+
+  describe('adminBulkOverride', () => {
+    const todayStr = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Kolkata',
+    }).format(new Date());
+
+    it('applies decreases and holds increases per row (LOOP-025)', async () => {
+      // Priced meal → none→present is an increase; absent is a decrease.
+      (prisma.meal.findFirst as jest.Mock).mockResolvedValue({
+        id: 'meal_01',
+        groupId: 'grp_01',
+        price: 60,
+        group: { mealPricingEnabled: true },
+      });
+      (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'usr_01' });
+      (attendanceRepo.findByKey as jest.Mock).mockResolvedValue(null);
+      (attendanceRepo.upsert as jest.Mock).mockResolvedValue(mockMealRecord);
+      (redis.del as jest.Mock).mockResolvedValue(undefined);
+      ((prisma as any).attendanceCorrectionRequest.create as jest.Mock).mockResolvedValue({
+        id: 'acr_bulk_01',
+        status: 'pending',
+        requestType: 'claim_present',
+        sourceChannel: 'admin_prompt',
+        userId: 'usr_02',
+        mealId: 'meal_01',
+        attendanceDate: new Date(`${todayStr}T00:00:00.000Z`),
+        expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
+      });
+
+      const result = await service.adminBulkOverride('admin_01', 'org_01', {
+        rows: [
+          { userId: 'usr_01', mealId: 'meal_01', attendanceDate: todayStr, status: 'absent' },
+          { userId: 'usr_02', mealId: 'meal_01', attendanceDate: todayStr, status: 'present' },
+        ],
+      });
+
+      expect(result.applied).toBe(1);
+      expect(result.requiresConsent).toBe(1);
+      expect(result.failed).toBe(0);
+      expect(result.results[0]).toMatchObject({ outcome: 'applied' });
+      expect(result.results[1]).toMatchObject({
+        outcome: 'requiresConsent',
+        correctionRequestId: 'acr_bulk_01',
+      });
+    });
+
+    it('enforces the configurable row cap (LOOP-032 partial control)', async () => {
+      config.get.mockImplementation((key: string) =>
+        key === 'attendance.bulkOverrideMaxRows' ? 2 : undefined,
+      );
+      const row = {
+        userId: 'usr_01',
+        mealId: 'meal_01',
+        attendanceDate: todayStr,
+        status: 'absent',
+      };
+      await expect(
+        service.adminBulkOverride('admin_01', 'org_01', {
+          rows: [row, row, row],
+        }),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'BULK_ROW_LIMIT' }),
+      });
+    });
+  });
+
+  // ── Pass 7: FR-TRUST-010 record change history ─────────────────────────────
+
+  describe('getRecordHistory', () => {
+    it('members can only view their own record history', async () => {
+      ((prisma as any).attendanceRecord.findFirst as jest.Mock).mockResolvedValue({
+        id: 'att_01',
+        userId: 'someone_else',
+        groupId: 'grp_01',
+        mealId: 'meal_01',
+        attendanceDate: new Date('2026-07-01T00:00:00.000Z'),
+        status: 'present',
+        source: 'self',
+        sourceRequestId: null,
+        markedBy: null,
+        markedAt: new Date(),
+        price: null,
+      });
+
+      await expect(
+        service.getRecordHistory('usr_01', 'student', 'org_01', 'att_01'),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('renders system-default entries with a system actor (FR-TRUST-010)', async () => {
+      ((prisma as any).attendanceRecord.findFirst as jest.Mock).mockResolvedValue({
+        id: 'att_01',
+        userId: 'usr_01',
+        groupId: 'grp_01',
+        mealId: 'meal_01',
+        attendanceDate: new Date('2026-07-01T00:00:00.000Z'),
+        status: 'present',
+        source: 'system_default',
+        sourceRequestId: null,
+        markedBy: null,
+        markedAt: new Date(),
+        price: 60,
+      });
+      ((prisma as any).auditLog.findMany as jest.Mock).mockResolvedValue([
+        {
+          actorId: null,
+          action: 'create',
+          metadata: {
+            source: 'system_default',
+            status: 'present',
+            reason: 'Group opt-out policy — unmarked at window close',
+          },
+          createdAt: new Date('2026-07-01T09:05:00.000Z'),
+        },
+      ]);
+
+      const result = await service.getRecordHistory(
+        'usr_01', 'student', 'org_01', 'att_01',
+      );
+      expect(result.record.source).toBe('system_default');
+      expect(result.history[0]).toMatchObject({
+        actorKind: 'system',
+        status: 'present',
+      });
     });
   });
 

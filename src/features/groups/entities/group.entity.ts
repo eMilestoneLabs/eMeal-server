@@ -33,6 +33,10 @@ export class GroupEntity {
   mealPricingEnabled: boolean;
   // SRS FR-TIME-005: per-group late-marking grace (minutes). Null = 0.
   attendanceGraceMinutes: number | null;
+  // SRS FR-TRUST-001: group trust model ('absent' opt-in | 'present' opt-out).
+  attendanceDefault: string | null;
+  // SRS FR-TRUST-003: fair-opportunity floor (minutes). Null = server default.
+  minOptOutMinutes: number | null;
 
   // ── Computed from GroupMember at query time ───────────────────────────────
   memberCount: number;

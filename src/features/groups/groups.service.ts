@@ -225,6 +225,14 @@ export class GroupsService {
       if (mc.attendanceGraceMinutes !== undefined) {
         updateData.attendanceGraceMinutes = mc.attendanceGraceMinutes;
       }
+      // SRS FR-TRUST-001/003 (Pass 7): trust model + fair-opportunity floor —
+      // audited below via modeChanges like every other policy flag.
+      if (mc.attendanceDefault !== undefined) {
+        updateData.attendanceDefault = mc.attendanceDefault;
+      }
+      if (mc.minOptOutMinutes !== undefined) {
+        updateData.minOptOutMinutes = mc.minOptOutMinutes;
+      }
 
       // SRS FR-MODE-004 (LOOP): pricing requires the meal system. Evaluate the
       // FINAL EFFECTIVE state so partial patches can't create pricing-in-AO.
@@ -273,6 +281,9 @@ export class GroupsService {
       'mealPricingEnabled',
       // FR-TIME-005: grace changes are auditable (who/when/old→new).
       'attendanceGraceMinutes',
+      // FR-TRUST-001/003: trust-model changes are high-impact policy flips.
+      'attendanceDefault',
+      'minOptOutMinutes',
     ] as const;
     const modeChanges: Record<string, { from: unknown; to: unknown }> = {};
     for (const key of modeFlagKeys) {
@@ -775,6 +786,9 @@ export class GroupsService {
       mealPricingEnabled: group.mealPricingEnabled,
       // SRS FR-TIME-005: per-group late-marking grace (minutes, 0 = none).
       attendanceGraceMinutes: group.attendanceGraceMinutes ?? 0,
+      // SRS FR-TRUST-001/003: trust model (opt-in default) + fair floor.
+      attendanceDefault: group.attendanceDefault ?? 'absent',
+      minOptOutMinutes: group.minOptOutMinutes ?? null,
     };
   }
 

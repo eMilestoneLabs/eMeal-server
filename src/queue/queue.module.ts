@@ -32,7 +32,7 @@ import { QueueMetricsController } from './queue-metrics.controller';
       inject: [ConfigService],
     }),
 
-    // Register all 6 queues
+    // Register all 7 queues
     BullModule.registerQueue(
       { name: QUEUE_NAMES.NOTIFICATION },
       { name: QUEUE_NAMES.ATTENDANCE_REMINDER },
@@ -40,6 +40,7 @@ import { QueueMetricsController } from './queue-metrics.controller';
       { name: QUEUE_NAMES.EXPORT },
       { name: QUEUE_NAMES.CLEANUP },
       { name: QUEUE_NAMES.SCHEDULE_PUBLISH },
+      { name: QUEUE_NAMES.SYSTEM_DEFAULT },
     ),
   ],
 

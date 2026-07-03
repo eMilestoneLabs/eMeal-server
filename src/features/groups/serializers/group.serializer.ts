@@ -70,6 +70,9 @@ export class GroupSerializer {
         mealPricingEnabled: group.mealPricingEnabled,
         // SRS FR-TIME-005: per-group late-marking grace (minutes, 0 = none).
         attendanceGraceMinutes: group.attendanceGraceMinutes ?? 0,
+        // SRS FR-TRUST-001/003: trust model ('absent' opt-in default) + floor.
+        attendanceDefault: group.attendanceDefault ?? 'absent',
+        minOptOutMinutes: group.minOptOutMinutes ?? null,
       },
 
       createdAt: group.createdAt.toISOString(),

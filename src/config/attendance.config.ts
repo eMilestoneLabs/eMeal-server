@@ -1,17 +1,39 @@
 import { registerAs } from '@nestjs/config';
 
 /**
- * Attendance timing/concurrency configuration (SRS Pass 6) — centralizes the
- * FR-TIME/FR-CONC tunables so nothing is hardcoded. All values are
- * environment-overridable.
+ * Attendance timing/concurrency/governance configuration (SRS Pass 6 + 7) —
+ * centralizes the FR-TIME/FR-CONC/FR-TRUST tunables so nothing is hardcoded.
+ * All values are environment-overridable.
  *
  * Backed requirements:
- *   FR-CONC-003 — double-tap dedup window on POST /attendance (seconds;
- *                 0 disables the Redis dedup guard entirely).
+ *   FR-CONC-003  — double-tap dedup window on POST /attendance (seconds;
+ *                  0 disables the Redis dedup guard entirely).
+ *   FR-TRUST-001 — system-default sweep cadence for opt-out groups (minutes;
+ *                  0 disables the sweep entirely).
+ *   FR-TRUST-003 — fair-opportunity floor: minimum minutes an attendance
+ *                  window must have been open for opt-out auto-billing.
+ *   LOOP-024     — bounded admin backfill for override/bulk (days).
+ *   FR-ATT-033   — governed bulk-override row cap (LOOP-032 partial control).
  */
 export default registerAs('attendance', () => ({
   markDedupTtlSeconds: parseInt(
     process.env.ATTENDANCE_MARK_DEDUP_TTL_SECONDS ?? '3',
+    10,
+  ),
+  systemDefaultSweepMinutes: parseInt(
+    process.env.ATTENDANCE_SYSTEM_DEFAULT_SWEEP_MINUTES ?? '10',
+    10,
+  ),
+  minOptOutMinutes: parseInt(
+    process.env.ATTENDANCE_MIN_OPT_OUT_MINUTES ?? '30',
+    10,
+  ),
+  adminBackfillDays: parseInt(
+    process.env.ATTENDANCE_ADMIN_BACKFILL_DAYS ?? '30',
+    10,
+  ),
+  bulkOverrideMaxRows: parseInt(
+    process.env.ATTENDANCE_BULK_OVERRIDE_MAX_ROWS ?? '100',
     10,
   ),
 }));

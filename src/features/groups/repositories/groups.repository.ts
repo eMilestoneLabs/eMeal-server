@@ -211,6 +211,8 @@ export class GroupsRepository {
       vacationModeEnabled: boolean;
       mealPricingEnabled: boolean;
       attendanceGraceMinutes: number | null;
+      attendanceDefault: string | null;
+      minOptOutMinutes: number | null;
       isActive: boolean;
       joinToken: string;
       joinTokenExpiresAt: Date | null;

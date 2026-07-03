@@ -17,6 +17,8 @@ import { AuditService } from '../../audit/audit.service';
 import { AttendanceRepository } from './repositories/attendance.repository';
 import { MembersRepository } from '../groups/repositories/members.repository';
 import { PreferencesService } from '../preferences/preferences.service';
+import { BillingService } from '../billing/billing.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import {
   toUtcMidnight,
   getCurrentTimeInTimezone,
@@ -35,7 +37,7 @@ import {
 } from './entities/attendance.entity';
 import { MarkAttendanceDto } from './dto/mark-attendance.dto';
 import { BulkAttendanceDto } from './dto/bulk-attendance.dto';
-import { AdminOverrideDto } from './dto/admin-override.dto';
+import { AdminOverrideDto, AdminBulkOverrideDto } from './dto/admin-override.dto';
 import {
   QueryAttendanceDto,
   QuerySummaryDto,
@@ -106,7 +108,47 @@ export class AttendanceService {
       emitToGroup(groupId: string, event: string, payload: unknown): void;
       emitToUser(userId: string, event: string, payload: unknown): void;
     } | null,
+    // Pass 7 (FR-DISP-010): period-lock guard. Optional so existing unit-test
+    // modules without the billing provider keep working; production wiring
+    // always provides it via BillingModule. Explicit @Inject — a `| null`
+    // union erases the emitted param-type metadata.
+    @Optional() @Inject(BillingService)
+    private readonly billing: BillingService | null,
+    // Pass 7 (FR-TRUST-011): proactive member notify on non-self changes.
+    @Optional() @Inject(NotificationsService)
+    private readonly notifications: NotificationsService | null,
   ) {}
+
+  /**
+   * SRS FR-DISP-010 (LOOP-014): attendance/billing writes into a FINALIZED
+   * billing period are rejected — post-lock changes require an explicit,
+   * audited reopen. 423 with a machine-readable code, same flat contract.
+   */
+  private async assertPeriodNotFinalized(
+    organizationId: string,
+    groupId: string,
+    dateStr: string,
+  ): Promise<void> {
+    if (!this.billing) return;
+    const { locked, periodEnd } = await this.billing.isDateFinalized(
+      organizationId,
+      groupId,
+      toUtcMidnight(dateStr),
+    );
+    if (locked) {
+      throw new HttpException(
+        {
+          message:
+            'This billing period is finalized — reopen it before changing attendance',
+          code: 'PERIOD_FINALIZED',
+          errors: { attendanceDate: `Locked through ${periodEnd}` },
+          serverTime: new Date().toISOString(),
+          statusCode: 423,
+        },
+        423,
+      );
+    }
+  }
 
   /**
    * Resolves the ₹ price that applies to a meal on a date: the per-day published
@@ -254,6 +296,13 @@ export class AttendanceService {
         `Attendance can only be marked for today (${todayInTz})`,
       );
     }
+
+    // SRS FR-DISP-010: no writes into a finalized billing period.
+    await this.assertPeriodNotFinalized(
+      organizationId,
+      meal.groupId,
+      attendanceDate,
+    );
 
     // SRS FR-CONC-003 (LOOP double-tap): short-TTL Redis NX key de-duplicates
     // rapid re-submits. On a duplicate, the already-written record is returned
@@ -433,6 +482,10 @@ export class AttendanceService {
       action: AuditAction.create,
       metadata: {
         windowState,
+        // FR-TRUST-010: status/source ride on every write so the member's
+        // change history can render meaningful entries.
+        status,
+        source: 'self',
         ...(windowState === 'grace'
           ? { markedInGrace: true, graceMinutes, windowClose: effectiveClose }
           : {}),
@@ -507,6 +560,20 @@ export class AttendanceService {
       }),
     );
 
+    // SRS FR-DISP-010: bulk self-marks respect the period lock too — one
+    // check per distinct (group, date) pair, not per row.
+    const lockPairs = new Map<string, { groupId: string; dateStr: string }>();
+    for (const e of dto.entries) {
+      const groupId = mealMap.get(e.mealId)!.groupId;
+      lockPairs.set(`${groupId}:${e.attendanceDate}`, {
+        groupId,
+        dateStr: e.attendanceDate,
+      });
+    }
+    for (const { groupId, dateStr } of lockPairs.values()) {
+      await this.assertPeriodNotFinalized(organizationId, groupId, dateStr);
+    }
+
     const records = await this.attendanceRepo.bulkUpsert(entries);
 
     // Invalidate cache for all affected groups/dates
@@ -555,9 +622,43 @@ export class AttendanceService {
         groupId: true,
         price: true,
         group: { select: { mealPricingEnabled: true } },
+        organization: { select: { timezone: true } },
       },
     });
     if (!meal) throw new NotFoundException('Meal not found');
+
+    // SRS FR-TIME-006 (LOOP-024): bounded admin backfill — an override may not
+    // reach further back than adminBackfillDays, and never into the future.
+    const backfillDays = this.config.get<number>(
+      'attendance.adminBackfillDays',
+      30,
+    );
+    const orgTzForBound =
+      (meal as any).organization?.timezone ?? 'Asia/Kolkata';
+    const todayStr = getTodayInTimezone(orgTzForBound);
+    const dateStr = dto.attendanceDate;
+    if (dateStr > todayStr) {
+      throw new UnprocessableEntityException({
+        message: 'Attendance cannot be overridden for future dates',
+        errors: { attendanceDate: 'Must be today or a past date' },
+      });
+    }
+    const backfillAgeMs =
+      toUtcMidnight(todayStr).getTime() - toUtcMidnight(dateStr).getTime();
+    if (backfillAgeMs > backfillDays * 24 * 60 * 60 * 1000) {
+      throw new UnprocessableEntityException({
+        message: `Overrides are limited to the last ${backfillDays} days`,
+        code: 'BACKFILL_LIMIT',
+        errors: { attendanceDate: `Older than ${backfillDays} days` },
+      });
+    }
+
+    // SRS FR-DISP-010: no writes into a finalized billing period.
+    await this.assertPeriodNotFinalized(
+      organizationId,
+      meal.groupId,
+      dto.attendanceDate,
+    );
 
     // 2. Verify target user belongs to org
     const targetUser = await this.prisma.user.findFirst({
@@ -645,18 +746,251 @@ export class AttendanceService {
     this.emitAttendanceUpdated(meal.groupId, record, organizationId);
     this.emitAttendanceOverridden(meal.groupId, record);
 
-    // 6. Audit
+    // 6. Audit — LOOP-031: an admin acting on their OWN record is flagged.
     this.audit.log({
       organizationId,
       actorId: adminId,
       targetId: record.id,
       targetType: 'Attendance',
       action: AuditAction.update,
-      metadata: { override: true, targetUserId: dto.userId },
+      metadata: {
+        override: true,
+        targetUserId: dto.userId,
+        status: dto.status,
+        ...(dto.note ? { reason: dto.note } : {}),
+        ...(dto.userId === adminId ? { selfAction: true } : {}),
+      },
       requestId,
     });
 
+    // 7. SRS FR-TRUST-011: the member hears about every non-self change to
+    // their record — push with the delta (fire-and-forget, never blocks).
+    if (dto.userId !== adminId) {
+      void this.notifications?.notifyAttendanceChanged({
+        organizationId,
+        userId: dto.userId,
+        newStatus: dto.status,
+        dateStr: dto.attendanceDate,
+        reason: dto.note ?? null,
+        changedBy: 'admin',
+      });
+    }
+
     return AttendanceSerializer.toMarkResponse(record);
+  }
+
+  // ── Governed admin bulk override (FR-ATT-033 / LOOP-025) ──────────────────
+
+  /**
+   * SRS FR-ATT-033: bulk marking applies the FR-ATT-031 consent rule PER ROW —
+   * neutral/decrease rows apply immediately; liability-increasing rows are
+   * held as pending member confirmations and reported back as
+   * `requiresConsent`. Row-capped (LOOP-032 partial control: no unbounded
+   * mass changes in one action) and every row outcome is audited via the
+   * per-row paths plus one bulk summary entry.
+   */
+  async adminBulkOverride(
+    adminId: string,
+    organizationId: string,
+    dto: AdminBulkOverrideDto,
+    requestId?: string,
+  ) {
+    const maxRows = this.config.get<number>(
+      'attendance.bulkOverrideMaxRows',
+      100,
+    );
+    if (dto.rows.length > maxRows) {
+      throw new UnprocessableEntityException({
+        message: `Bulk override is limited to ${maxRows} rows per request`,
+        code: 'BULK_ROW_LIMIT',
+        errors: { rows: `Received ${dto.rows.length}, max ${maxRows}` },
+      });
+    }
+
+    const results: Array<Record<string, unknown>> = [];
+    let applied = 0;
+    let requiresConsent = 0;
+    let failed = 0;
+
+    // Sequential on purpose: each row reuses the full single-override path
+    // (classifier, period lock, backfill bound, cache, realtime, audit,
+    // member notify). Bulk is a rare admin action — correctness over speed.
+    for (const row of dto.rows) {
+      try {
+        const outcome: any = await this.adminOverride(
+          adminId,
+          organizationId,
+          { ...row, note: row.note ?? dto.reason ?? undefined },
+          requestId,
+        );
+        if (outcome?.requiresMemberConsent) {
+          requiresConsent += 1;
+          results.push({
+            userId: row.userId,
+            mealId: row.mealId,
+            attendanceDate: row.attendanceDate,
+            outcome: 'requiresConsent',
+            correctionRequestId: outcome.correctionRequest?.id ?? null,
+          });
+        } else {
+          applied += 1;
+          results.push({
+            userId: row.userId,
+            mealId: row.mealId,
+            attendanceDate: row.attendanceDate,
+            outcome: 'applied',
+            recordId: outcome?.id ?? null,
+          });
+        }
+      } catch (err) {
+        failed += 1;
+        const resp =
+          err instanceof HttpException ? (err.getResponse() as any) : null;
+        results.push({
+          userId: row.userId,
+          mealId: row.mealId,
+          attendanceDate: row.attendanceDate,
+          outcome: 'error',
+          message:
+            (typeof resp === 'object' ? resp?.message : resp) ??
+            (err as Error).message,
+          ...(typeof resp === 'object' && resp?.code
+            ? { code: resp.code }
+            : {}),
+        });
+      }
+    }
+
+    // One bulk summary audit row (per-row outcomes already audited above).
+    this.audit.log({
+      organizationId,
+      actorId: adminId,
+      targetType: 'Attendance',
+      action: AuditAction.update,
+      metadata: {
+        bulkOverride: true,
+        rows: dto.rows.length,
+        applied,
+        requiresConsent,
+        failed,
+        ...(dto.reason ? { reason: dto.reason } : {}),
+      },
+      requestId,
+    });
+
+    return { total: dto.rows.length, applied, requiresConsent, failed, results };
+  }
+
+  // ── Record change history (FR-TRUST-010) ──────────────────────────────────
+
+  /**
+   * SRS FR-TRUST-010: a member sees, per attendance record, WHO set/changed it
+   * (self / admin name / system default / verified), when, through what source
+   * artifact, and why — no change to billable data is hidden. Members may only
+   * view their own records; admins any record in the org.
+   */
+  async getRecordHistory(
+    requesterId: string,
+    requesterRole: string,
+    organizationId: string,
+    recordId: string,
+  ) {
+    const record = await this.prisma.attendanceRecord.findFirst({
+      where: { id: recordId, organizationId },
+      select: {
+        id: true,
+        userId: true,
+        groupId: true,
+        mealId: true,
+        attendanceDate: true,
+        status: true,
+        source: true,
+        sourceRequestId: true,
+        markedBy: true,
+        markedAt: true,
+        price: true,
+      },
+    });
+    if (!record) throw new NotFoundException('Attendance record not found');
+
+    const isAdmin = ADMIN_ROLES.includes(requesterRole);
+    if (!isAdmin && record.userId !== requesterId) {
+      throw new ForbiddenException('You can only view your own record history');
+    }
+
+    const logs = await this.prisma.auditLog.findMany({
+      where: { organizationId, targetType: 'Attendance', targetId: recordId },
+      orderBy: { createdAt: 'asc' },
+      take: 100,
+      select: {
+        actorId: true,
+        action: true,
+        metadata: true,
+        createdAt: true,
+      },
+    });
+
+    // Resolve actor display names in one query.
+    const actorIds = [
+      ...new Set(logs.map((l) => l.actorId).filter(Boolean) as string[]),
+    ];
+    const actors = actorIds.length
+      ? await this.prisma.user.findMany({
+          where: { id: { in: actorIds } },
+          select: { id: true, name: true, role: true },
+        })
+      : [];
+    const actorMap = new Map(actors.map((a) => [a.id, a]));
+
+    const describeActor = (
+      actorId: string | null,
+      meta: Record<string, unknown> | null,
+    ): { actorName: string; actorKind: string } => {
+      const source = (meta?.source as string) ?? null;
+      if (source === 'system_default' || actorId === null) {
+        return { actorName: 'Group policy (auto)', actorKind: 'system' };
+      }
+      if (source === 'verified') {
+        return { actorName: 'Verified scan', actorKind: 'verified' };
+      }
+      if (actorId === record.userId) {
+        return { actorName: 'You', actorKind: 'self' };
+      }
+      const actor = actorMap.get(actorId);
+      return {
+        actorName: actor?.name ?? 'An administrator',
+        actorKind: 'admin',
+      };
+    };
+
+    return {
+      record: {
+        id: record.id,
+        userId: record.userId,
+        mealId: record.mealId,
+        attendanceDate: record.attendanceDate.toISOString().slice(0, 10),
+        status: record.status,
+        source: record.source ?? 'self',
+        sourceRequestId: record.sourceRequestId ?? null,
+        markedBy: record.markedBy ?? null,
+        markedAt: record.markedAt?.toISOString() ?? null,
+        price: record.price ?? null,
+      },
+      history: logs.map((l) => {
+        const meta = (l.metadata ?? {}) as Record<string, unknown>;
+        const { actorName, actorKind } = describeActor(l.actorId, meta);
+        return {
+          at: l.createdAt.toISOString(),
+          action: l.action,
+          actorName,
+          actorKind,
+          status: (meta.status as string) ?? null,
+          source: (meta.source as string) ?? null,
+          reason: (meta.reason as string) ?? null,
+          sourceRequestId: (meta.sourceRequestId as string) ?? null,
+        };
+      }),
+    };
   }
 
   // ── Module 33: member confirmation + consented-change write path ──────────
@@ -776,6 +1110,14 @@ export class AttendanceService {
     auditMetadata?: Record<string, unknown>;
     requestId?: string;
   }) {
+    // SRS FR-DISP-010: consented changes also respect the period lock — a
+    // late ACR approval into a locked month requires an audited reopen first.
+    await this.assertPeriodNotFinalized(
+      params.organizationId,
+      params.groupId,
+      params.attendanceDate,
+    );
+
     const meal = await this.prisma.meal.findFirst({
       where: { id: params.mealId, organizationId: params.organizationId },
       select: { price: true },

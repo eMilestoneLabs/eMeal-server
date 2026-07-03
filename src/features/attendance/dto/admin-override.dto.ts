@@ -1,11 +1,16 @@
 import {
+  ArrayMaxSize,
+  ArrayNotEmpty,
+  IsArray,
   IsString,
   IsNotEmpty,
   IsOptional,
   IsIn,
   Matches,
   MaxLength,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 
 /**
  * DTO for POST /attendance/admin/override — admin marks attendance for any user.
@@ -46,4 +51,25 @@ export class AdminOverrideDto {
   @IsString()
   @MaxLength(500)
   note?: string;
+}
+
+/**
+ * SRS FR-ATT-033 (Pass 7): governed bulk override. Each row is classified
+ * independently (FR-OVR-001) — increases are held for member consent, never
+ * applied. The service enforces the configurable row cap (LOOP-032 partial
+ * control against unbounded mass changes).
+ */
+export class AdminBulkOverrideDto {
+  @IsArray()
+  @ArrayNotEmpty()
+  @ArrayMaxSize(500)
+  @ValidateNested({ each: true })
+  @Type(() => AdminOverrideDto)
+  rows: AdminOverrideDto[];
+
+  /** Applied as the per-row note when a row has none (audited). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  reason?: string;
 }

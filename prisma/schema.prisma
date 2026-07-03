@@ -234,6 +234,15 @@ model Group {
   // SRS FR-TIME-005 (LOOP-090): per-group grace period (minutes) that extends
   // the attendance-window close for late marking. Null = 0 (no grace).
   attendanceGraceMinutes Int?
+  // SRS FR-TRUST-001 (Module 33): group trust model. 'absent' (opt-in, the
+  // legacy behavior — not marking means not counted/billed) or 'present'
+  // (opt-out — unmarked members are auto-marked Present at window close by the
+  // system-default sweep, source='system_default'). Null = 'absent'.
+  attendanceDefault String?
+  // SRS FR-TRUST-003: fair-opportunity floor for opt-out — the window must
+  // have been open at least this many minutes for auto-billing to be valid.
+  // Null = server default (ATTENDANCE_MIN_OPT_OUT_MINUTES, 30).
+  minOptOutMinutes Int?
 
   maxMembers Int?
   isActive   Boolean  @default(true)
@@ -775,6 +784,36 @@ model VacationRequest {
   @@index([groupId])
   @@index([organizationId, status])
   @@map("vacation_requests")
+}
+
+/// SRS FR-DISP-010 (Pass 7) — Billing period finalization & controlled reopen.
+/// Self-contained, scalar-only (no Prisma relations) — purely additive.
+/// A 'finalized' period locks all attendance/billing writes for dates inside
+/// [periodStart, periodEnd] (423 PERIOD_FINALIZED); 'reopened' lifts the lock
+/// (audited, reason mandatory) until an admin re-finalizes.
+model BillingPeriod {
+  id             String   @id @default(cuid())
+  organizationId String   // tenant isolation (from JWT, never client)
+  groupId        String
+  periodStart    DateTime // UTC midnight, inclusive
+  periodEnd      DateTime // UTC midnight, inclusive
+  status         String   @default("finalized") // finalized | reopened
+
+  finalizedBy String
+  finalizedAt DateTime @default(now())
+  reopenedBy  String?
+  reopenedAt  DateTime?
+  reopenReason String?
+  // Immutable reprint snapshot captured at finalize time (member totals).
+  totalsSnapshot Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([groupId, status])
+  @@index([groupId, periodStart, periodEnd])
+  @@map("billing_periods")
 }
 
 /// Module 33 (MIG-010) — Attendance Correction Request: the member-initiated

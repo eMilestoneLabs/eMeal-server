@@ -91,6 +91,25 @@ export class MealConfigDto {
   @Min(0)
   @Max(240)
   attendanceGraceMinutes?: number;
+
+  /**
+   * SRS FR-TRUST-001 (Module 33): group trust model. 'absent' = opt-in
+   * (legacy default — unmarked means not counted/billed); 'present' = opt-out
+   * (unmarked members are auto-marked Present at window close, reversibly).
+   */
+  @IsOptional()
+  @IsIn(['absent', 'present'])
+  attendanceDefault?: string;
+
+  /**
+   * SRS FR-TRUST-003: fair-opportunity floor — minutes the window must have
+   * been open for opt-out auto-billing to be valid. Null = server default.
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(240)
+  minOptOutMinutes?: number;
 }
 
 export class CreateGroupDto {
