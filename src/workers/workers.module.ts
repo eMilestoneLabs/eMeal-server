@@ -26,6 +26,7 @@ import { QUEUE_NAMES } from '../queue/constants/queue.constants';
 import { PrismaModule } from '../prisma/prisma.module';
 import { RedisModule } from '../redis/redis.module';
 import { AuditModule } from '../audit/audit.module';
+import { RealtimeModule } from '../realtime/realtime.module';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { AuditModule } from '../audit/audit.module';
     PrismaModule,
     RedisModule,
     AuditModule,
+    RealtimeModule, // 'ATTENDANCE_GATEWAY' for sweep realtime emits (@Optional)
 
     // BullMQ requires queue registration in the consuming module as well
     BullModule.registerQueue(

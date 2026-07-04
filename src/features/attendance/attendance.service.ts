@@ -1473,6 +1473,7 @@ export class AttendanceService {
       skippedCount: counts.skippedCount,
       snapshotPrice: counts.snapshotPrice,
       preferenceBreakdown: counts.preferenceBreakdown,
+      preferenceGroupBreakdown: counts.preferenceGroupBreakdown,
     });
 
     // Module 22 (FR-HG-060/061): kitchen counts include booked+approved
@@ -1530,6 +1531,12 @@ export class AttendanceService {
         organization: { select: { timezone: true } },
       },
     });
+
+    // Unknown or foreign-org groupId → explicit 404 instead of a 200-empty
+    // summary (org isolation already held; this surfaces typos/stale IDs).
+    if (!groupPolicy) {
+      throw new NotFoundException('Group not found');
+    }
 
     // FR-BILLX-020/041: no explicit range → the group's CURRENT billing
     // period in ORG TIME (cycle start day, or calendar month), replacing the

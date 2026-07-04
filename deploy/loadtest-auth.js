@@ -48,9 +48,14 @@ export const options = {
 
 // ── setup(): authenticate once, hand the token to every VU ───────────────────
 export function setup() {
+  // The API login DTO expects `identifier` (email OR phone), NOT `email`.
+  // LOGIN_IDENTIFIER is preferred; LOGIN_EMAIL kept as a value alias.
   const body = __ENV.LOGIN_JSON
     ? __ENV.LOGIN_JSON
-    : JSON.stringify({ email: __ENV.LOGIN_EMAIL, password: __ENV.LOGIN_PASSWORD });
+    : JSON.stringify({
+        identifier: __ENV.LOGIN_IDENTIFIER || __ENV.LOGIN_EMAIL,
+        password: __ENV.LOGIN_PASSWORD,
+      });
 
   const res = http.post(`${PREFIX}/auth/login`, body, {
     headers: { 'Content-Type': 'application/json' },

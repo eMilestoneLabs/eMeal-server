@@ -26,7 +26,7 @@
  */
 
 import { Processor, WorkerHost, OnWorkerEvent } from '@nestjs/bullmq';
-import { Logger } from '@nestjs/common';
+import { Inject, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Job } from 'bullmq';
 import { AuditAction } from '@prisma/client';
@@ -70,6 +70,13 @@ export class SystemDefaultWorker extends WorkerHost {
     private readonly queue: QueueService,
     private readonly audit: AuditService,
     private readonly config: ConfigService,
+    // Same optional structural pattern as corrections/guests — live dashboards
+    // refresh on auto-marks; absent in tests → emits silently skipped.
+    @Optional()
+    @Inject('ATTENDANCE_GATEWAY')
+    private readonly gateway?: {
+      emitToGroup(groupId: string, event: string, payload: unknown): void;
+    } | null,
   ) {
     super();
   }
@@ -735,19 +742,45 @@ export class SystemDefaultWorker extends WorkerHost {
       });
     }
 
-    // Invalidate the same read caches the attendance service maintains.
+    // Invalidate the same read caches the attendance service maintains —
+    // INCLUDING the admin/student dashboard composites and the billing
+    // version key (cache-parity with invalidateAttendanceCache; previously
+    // auto-marks stayed invisible on dashboards for up to the 5-min TTL).
     const cacheKeys = [
       `attendance:group:${group.organizationId}:${group.id}:${dateStr}`,
       `attendance:meal:${group.organizationId}:${mealId}:${dateStr}`,
-      ...created.map(
-        (r) =>
-          `attendance:summary:${group.organizationId}:${r.userId}:${group.id}`,
-      ),
+      `dashboard:admin:${group.organizationId}`,
+      ...created.flatMap((r) => [
+        `attendance:summary:${group.organizationId}:${r.userId}:${group.id}`,
+        `dashboard:student:${group.organizationId}:${r.userId}`,
+      ]),
     ];
     try {
       await this.redis.del(...cacheKeys);
     } catch (_) {
       /* cache invalidation is best-effort */
+    }
+    // Pass 12 (FR-BILLX-050): attendance writes bump the group's billing
+    // version so cached billing summaries can never serve pre-sweep figures.
+    try {
+      await this.redis.set(`bill:ver:${group.id}`, Date.now().toString());
+    } catch (_) {
+      /* best-effort */
+    }
+
+    // Live dashboards: one group-room event per sweep batch (same event name
+    // the attendance service emits) so open admin/student screens refresh
+    // within seconds instead of waiting for the next cold load.
+    try {
+      this.gateway?.emitToGroup(group.id, 'attendance.updated.v1', {
+        groupId: group.id,
+        mealId,
+        date: dateStr,
+        source: 'system_default',
+        count: created.length,
+      });
+    } catch (_) {
+      /* realtime is best-effort */
     }
 
     // FR-TRUST-011: tell each affected member, with the easy way out.

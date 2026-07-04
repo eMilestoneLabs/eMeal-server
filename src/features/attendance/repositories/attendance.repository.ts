@@ -476,8 +476,9 @@ export class AttendanceRepository {
     skippedCount: number;
     snapshotPrice: number | null;
     preferenceBreakdown: Record<string, number>;
+    preferenceGroupBreakdown: Record<string, Record<string, number>>;
   }> {
-    const [statusGroups, prefGroups, priceGroups] = await Promise.all([
+    const [statusGroups, prefGroups, priceGroups, selectionGroups] = await Promise.all([
       this.prisma.attendanceRecord.groupBy({
         by: ['status'],
         where: { mealId, organizationId, attendanceDate },
@@ -507,6 +508,17 @@ export class AttendanceRepository {
           price: { not: null },
         },
         _count: { price: true },
+      }),
+      // Module 36 (FR-PG-050): multi-preference-group selections of PRESENT
+      // members, aggregated by snapshotted group + option labels so the admin
+      // dashboard shows per-option plate counts (label snapshots are immutable
+      // — later edits to a preference group never rewrite past summaries).
+      this.prisma.attendancePreferenceSelection.groupBy({
+        by: ['groupLabelSnapshot', 'optionLabelSnapshot'],
+        where: {
+          record: { mealId, organizationId, attendanceDate, status: 'present' },
+        },
+        _sum: { quantity: true },
       }),
     ]);
 
@@ -539,12 +551,25 @@ export class AttendanceRepository {
       }
     }
 
+    // Nested { groupLabel: { optionLabel: totalQuantity } } — empty for groups
+    // that only use the legacy flat preference (additive, never breaks old UI).
+    const preferenceGroupBreakdown: Record<string, Record<string, number>> = {};
+    for (const row of selectionGroups) {
+      const qty = row._sum.quantity ?? 0;
+      if (qty <= 0) continue;
+      const groupLabel = row.groupLabelSnapshot;
+      preferenceGroupBreakdown[groupLabel] ??= {};
+      preferenceGroupBreakdown[groupLabel][row.optionLabelSnapshot] =
+        (preferenceGroupBreakdown[groupLabel][row.optionLabelSnapshot] ?? 0) + qty;
+    }
+
     return {
       presentCount: statusCounts.present,
       absentCount: statusCounts.absent,
       skippedCount: statusCounts.skipped,
       snapshotPrice,
       preferenceBreakdown,
+      preferenceGroupBreakdown,
     };
   }
 

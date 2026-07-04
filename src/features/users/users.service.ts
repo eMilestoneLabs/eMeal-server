@@ -114,6 +114,24 @@ export class UsersService {
       });
     }
 
+    // Pass 11 (FR-VACX-001) parity: PATCH /users/me previously wrote
+    // isVacationMode UNGUARDED, silently bypassing the approval workflow that
+    // the dedicated vacation endpoint enforces. Turning vacation ON via
+    // profile update now applies the same self-service guard; turning OFF
+    // (early return) stays always allowed.
+    if (dto.isVacationMode === true && user.isVacationMode !== true) {
+      const needsApproval =
+        await this.usersRepo.vacationRequiresApproval(userId);
+      if (needsApproval) {
+        throw new UnprocessableEntityException({
+          message:
+            'Your group requires admin approval for vacation — submit a vacation request instead',
+          code: 'VACATION_REQUIRES_APPROVAL',
+          errors: { isVacationMode: 'Create a dated vacation request for approval' },
+        });
+      }
+    }
+
     // Additive: a base64 data-URI avatar is uploaded to MinIO and stored as a
     // URL (single current file per user; previous object deleted). Already-URL
     // or null values pass through unchanged.

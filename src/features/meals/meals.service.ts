@@ -23,6 +23,7 @@ import { PaginatedResponseDto } from '../../common/dto/paginated-response.dto';
 import { GroupsRepository } from '../groups/repositories/groups.repository';
 import {
   getCurrentTimeInTimezone,
+  getTodayInTimezone,
   getWindowState,
 } from '../../common/utils/date.utils';
 import { hhmmToMinutes } from './utils/entry-chrono.util';
@@ -232,7 +233,23 @@ export class MealsService {
       });
     }
 
-    const result = await this.mealsRepo.findByGroup(query.groupId, organizationId, {
+    return this.listGroupMeals(organizationId, query, page, limit, isAdmin);
+  }
+
+  /**
+   * Perf (hot path): the meal listing AFTER tenant verification. getTodayMeals
+   * already holds the verified group from its own lookup, so it calls this
+   * directly instead of paying getMeals' duplicate groupsRepo.findById —
+   * response bytes and semantics are identical to the legacy path.
+   */
+  private async listGroupMeals(
+    organizationId: string,
+    query: QueryMealsDto,
+    page: number,
+    limit: number,
+    isAdmin: boolean,
+  ) {
+    const result = await this.mealsRepo.findByGroup(query.groupId!, organizationId, {
       page,
       limit,
       slotKey: query.slotKey,
@@ -279,26 +296,44 @@ export class MealsService {
     // attendance-only fallback AND window-state decoration (grace) below —
     // collapses what used to be up to three identical lookups.
     const planGroup = await this.groupsRepo.findById(groupId, organizationId);
+    if (!planGroup) {
+      // Same 404 shape getMeals raised on the legacy path (its duplicate
+      // group lookup used to produce this error).
+      throw new NotFoundException({
+        message: 'Group not found',
+        errors: { groupId: 'Group does not exist in your organization' },
+      });
+    }
 
-    const result = await this.getMeals(userId, role, organizationId, {
-      groupId,
-      page: 1,
-      limit: 50,
-    } as QueryMealsDto);
+    // Perf (authorized hot path, ~47–176ms warm): the meal list and the
+    // planner overlay are independent reads — run them CONCURRENTLY, and skip
+    // getMeals' duplicate group verification (planGroup above already proves
+    // tenant ownership). 5 sequential query waves → 3.
+    const plannerOn =
+      planGroup.weeklyMenuEnabled || planGroup.dayWiseMealsEnabled;
+    const isAdmin = ADMIN_ROLES.includes(role as any);
+    const [result, plannerOverlay] = await Promise.all([
+      this.listGroupMeals(
+        organizationId,
+        { groupId, page: 1, limit: 50 } as QueryMealsDto,
+        1,
+        50,
+        isAdmin,
+      ),
+      plannerOn
+        ? this.schedulesRepo.findTodayOverlay(groupId, organizationId)
+        : Promise.resolve(new Map() as Awaited<
+            ReturnType<SchedulesRepository['findTodayOverlay']>
+          >),
+    ]);
 
     if (result.data.length > 0) {
       // Additive: overlay the active planner schedule (Weekly / Day-Wise Meal
       // Mode) onto today's meals so per-day attendance window, preference
       // enforcement and meal visibility follow admin configuration. Attendance,
       // analytics, history and notifications stay unchanged (same mealId/date).
-      if (
-        planGroup &&
-        (planGroup.weeklyMenuEnabled || planGroup.dayWiseMealsEnabled)
-      ) {
-        const overlay = await this.schedulesRepo.findTodayOverlay(
-          groupId,
-          organizationId,
-        );
+      if (plannerOn) {
+        const overlay = plannerOverlay;
         const overlaid =
           overlay.size > 0
             ? result.data
@@ -399,6 +434,17 @@ export class MealsService {
       await this.groupsRepo.getOrganizationTimezone(organizationId);
     const nowHHmm = getCurrentTimeInTimezone(timezone);
     const graceMinutes = Math.max(0, group?.attendanceGraceMinutes ?? 0);
+    // Minutes since org-midnight at serialization time. Clients evaluate the
+    // attendance window against THIS clock (advanced by device-side elapsed
+    // time), never the device wall clock — a wrong phone timezone/clock can
+    // no longer enable a button the server will 423, or disable one the
+    // server would accept (grace included).
+    const [nowH, nowM] = nowHHmm.split(':').map(Number);
+    const orgClockMinutes = nowH * 60 + nowM;
+    // Org-timezone business date — clients mark attendance with THIS date so a
+    // wrong phone calendar can no longer produce the "can only mark for today"
+    // 400 (mark validation compares against the same org-TZ today).
+    const orgDate = getTodayInTimezone(timezone);
     for (const m of response.data ?? []) {
       m.windowState = getWindowState(
         nowHHmm,
@@ -406,10 +452,16 @@ export class MealsService {
         m?.attendanceWindow?.closeTime ?? null,
         graceMinutes,
       );
+      // Per-meal copies so they survive per-item model parsing on clients.
+      m.orgClockMinutes = orgClockMinutes;
+      m.graceMinutes = graceMinutes;
+      m.orgDate = orgDate;
     }
     response.serverTime = new Date().toISOString();
     response.timezone = timezone;
     response.graceMinutes = graceMinutes;
+    response.orgClockMinutes = orgClockMinutes;
+    response.orgDate = orgDate;
     return response;
   }
 

@@ -118,6 +118,11 @@ export class MealAttendanceSummaryEntity {
   // Preference breakdown (only populated when meal has preferencesEnabled)
   preferenceBreakdown: Record<string, number>; // { "veg": 5, "chicken": 3, ... }
 
+  // Module 36 (FR-PG-050): multi-preference-group selections of present members,
+  // keyed by snapshotted labels: { "Roti/Rice": { "Roti": 4, "Rice": 2 } }.
+  // Empty for groups using only the legacy flat preference (additive).
+  preferenceGroupBreakdown?: Record<string, Record<string, number>>;
+
   constructor(data: Partial<MealAttendanceSummaryEntity>) {
     Object.assign(this, data);
   }
