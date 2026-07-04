@@ -240,4 +240,59 @@ export class UsersRepository {
   async countByOrg(organizationId: string): Promise<number> {
     return this.prisma.user.count({ where: { organizationId, isActive: true } });
   }
+
+  // ── Pass 14 (FR-DEL-011 / FR-DLC-002/003, LOOP-080, SC-082) ────────────────
+
+  /** Auth-sensitive fields for the account-deletion password check. */
+  async findAuthById(userId: string) {
+    return this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        organizationId: true,
+        passwordHash: true,
+        avatarUrl: true,
+        isActive: true,
+        name: true,
+      },
+    });
+  }
+
+  /**
+   * The full account-deletion transaction — revoke, soft-remove, anonymize.
+   * The user ROW is retained so attendance/billing/audit foreign keys stay
+   * intact (financial integrity, LOOP-080); only PII is erased in place.
+   */
+  async deleteAccount(userId: string): Promise<void> {
+    const now = new Date();
+    await this.prisma.$transaction([
+      // 1. Revoke every session on every device (all token families).
+      this.prisma.refreshToken.updateMany({
+        where: { userId, isRevoked: false },
+        data: { isRevoked: true },
+      }),
+      // 2. Soft-remove all group memberships (rows retained for history).
+      this.prisma.groupMember.updateMany({
+        where: { userId, status: 'active' },
+        data: { status: 'removed', removedAt: now, removedBy: userId },
+      }),
+      // 3. Anonymize PII in place. Email stays unique per org via a
+      //    deterministic placeholder; phone null clears the unique slot.
+      this.prisma.user.update({
+        where: { id: userId },
+        data: {
+          name: 'Deleted User',
+          email: `deleted-${userId}@anonymized.invalid`,
+          phone: null,
+          avatarUrl: null,
+          fcmToken: null,
+          passwordHash: null,
+          gender: null,
+          age: null,
+          isActive: false,
+          deletedAt: now,
+        } as any,
+      }),
+    ]);
+  }
 }

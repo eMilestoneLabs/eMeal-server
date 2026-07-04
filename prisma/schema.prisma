@@ -139,6 +139,9 @@ model User {
 
   isActive    Boolean   @default(true)
   lastLoginAt DateTime?
+  // Pass 14 (FR-DEL-011/FR-DLC-003): set when the account was deleted and its
+  // PII anonymized in place — the row itself is retained for financial/audit FKs.
+  deletedAt   DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
@@ -682,12 +685,16 @@ model EventGuestParty {
   adultsCount    Int      @default(1)  // M-16 fix: "adultsCount" NOT "adultCount"
   childrenCount  Int      @default(0)  // M-16 fix: "childrenCount" NOT "childCount"
   joinedAt       DateTime @default(now()) // M-16 fix: was missing
+  // Pass 14 (FR-EVTX-002): stable client key for party resume on app re-open.
+  // Uniqueness per event enforced by a partial index in the migration.
+  deviceKey      String?
 
   event   Event         @relation(fields: [eventId], references: [id], onDelete: Cascade)
   persons EventPerson[]
 
   @@index([organizationId])
   @@index([eventId])
+  @@index([eventId, deviceKey])
   @@map("event_guest_parties")
 }
 
@@ -710,6 +717,8 @@ model EventPerson {
   mealPreference     String? // M-17 fix: "mealPreference" NOT "preference"
 
   createdAt DateTime @default(now())
+  // Pass 14 (FR-EVTX-031): last-writer-wins resolves by this server timestamp.
+  updatedAt DateTime @default(now()) @updatedAt
 
   party    EventGuestParty @relation(fields: [partyId], references: [id], onDelete: Cascade)
   mealType EventMealType?  @relation(fields: [mealTypeId], references: [id], onDelete: SetNull)
@@ -732,6 +741,9 @@ model AuditLog {
   metadata       Json?       // Additional context (before/after snapshot)
   requestId      String?
   ipAddress      String?
+  // Pass 14 (FR-DLC-006): HMAC-SHA256 over the row's canonical content,
+  // keyed by AUDIT_HMAC_SECRET. Null = written while unsigned (key absent).
+  integrityHmac  String?
   createdAt      DateTime    @default(now())
 
   // NOTE: targetId is intentionally NOT a FK — it can reference any entity type

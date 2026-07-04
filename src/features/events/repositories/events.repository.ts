@@ -1,4 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  UnprocessableEntityException,
+} from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import {
   EventEntity,
@@ -319,9 +323,27 @@ export class EventsRepository {
    * Person names default to "Guest-N" and can be edited later.
    * Primary person is isPrimary=true with the supplied name.
    */
+  /** Pass 14 (FR-EVTX-002): resume lookup — the party this device already created. */
+  async findPartyByDeviceKey(
+    eventId: string,
+    deviceKey: string,
+  ): Promise<EventGuestPartyEntity | null> {
+    const party = await this.prisma.eventGuestParty.findFirst({
+      where: { eventId, deviceKey },
+      include: { persons: { orderBy: { createdAt: 'asc' } } },
+    });
+    if (!party) return null;
+    return this.buildPartyEntity(party);
+  }
+
   async createParty(
     eventId: string,
-    data: { primaryName: string; adultsCount: number; childrenCount: number },
+    data: {
+      primaryName: string;
+      adultsCount: number;
+      childrenCount: number;
+      deviceKey?: string | null;
+    },
   ): Promise<EventGuestPartyEntity> {
     const { primaryName, adultsCount, childrenCount } = data;
 
@@ -337,7 +359,9 @@ export class EventsRepository {
           primaryName,
           adultsCount,
           childrenCount,
-        },
+          // Pass 14 (FR-EVTX-002): remember which device created the party.
+          ...(data.deviceKey ? { deviceKey: data.deviceKey } : {}),
+        } as any,
       });
 
       // Auto-generate person rows
@@ -418,19 +442,93 @@ export class EventsRepository {
     };
   }
 
+  /**
+   * Pass 14 (FR-EVTX-004): count edits RECONCILE person rows in the same
+   * transaction — placeholders are added/removed so counts and persons never
+   * diverge, and already-named or attending persons are never lost silently.
+   * Removal picks unnamed non-primary placeholders, not-attending first; if
+   * the reduction would require deleting a named/edited person, the caller
+   * gets a 422 telling the user to remove that person explicitly.
+   */
   async updateParty(
     partyId: string,
     eventId: string,
     data: { primaryName?: string; adultsCount?: number; childrenCount?: number },
   ): Promise<EventGuestPartyEntity> {
-    const party = await this.prisma.eventGuestParty.update({
-      where: { id: partyId },
-      data: {
-        ...(data.primaryName !== undefined && { primaryName: data.primaryName }),
-        ...(data.adultsCount !== undefined && { adultsCount: data.adultsCount }),
-        ...(data.childrenCount !== undefined && { childrenCount: data.childrenCount }),
-      },
-      include: { persons: { orderBy: { createdAt: 'asc' } } },
+    const party = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.eventGuestParty.update({
+        where: { id: partyId },
+        data: {
+          ...(data.primaryName !== undefined && { primaryName: data.primaryName }),
+          ...(data.adultsCount !== undefined && { adultsCount: data.adultsCount }),
+          ...(data.childrenCount !== undefined && { childrenCount: data.childrenCount }),
+        },
+        include: { persons: { orderBy: { createdAt: 'asc' } } },
+      });
+
+      if (data.adultsCount === undefined && data.childrenCount === undefined) {
+        return updated;
+      }
+
+      // Placeholder numbering continues from the highest existing "Guest-N".
+      let nextGuestNumber =
+        updated.persons.reduce((max: number, per: any) => {
+          const m = /^Guest-(\d+)$/.exec(per.displayName);
+          return m ? Math.max(max, parseInt(m[1], 10)) : max;
+        }, updated.persons.length) + 1;
+
+      const toCreate: any[] = [];
+      const toDelete: string[] = [];
+
+      for (const isAdult of [true, false]) {
+        const target = isAdult ? updated.adultsCount : updated.childrenCount;
+        const group = updated.persons.filter((per: any) => per.isAdult === isAdult);
+        const diff = target - group.length;
+        if (diff > 0) {
+          for (let i = 0; i < diff; i++) {
+            toCreate.push({
+              partyId: updated.id,
+              displayName: `Guest-${nextGuestNumber++}`,
+              isAdult,
+              isPrimary: false,
+              isNameEdited: false,
+              isPresent: true,
+            });
+          }
+        } else if (diff < 0) {
+          // Only unedited, non-primary placeholders are removable;
+          // not-attending ones go first (least information lost).
+          const removable = group
+            .filter((per: any) => !per.isPrimary && !per.isNameEdited)
+            .sort(
+              (a: any, b: any) => Number(a.isPresent) - Number(b.isPresent),
+            );
+          if (removable.length < -diff) {
+            throw new UnprocessableEntityException({
+              message:
+                'Cannot reduce the count below your named guests — remove a specific person instead',
+              code: 'PARTY_PERSONS_CONFLICT',
+              errors: {
+                [isAdult ? 'adultsCount' : 'childrenCount']:
+                  'Named or attending persons are never deleted silently',
+              },
+            });
+          }
+          for (const per of removable.slice(0, -diff)) toDelete.push(per.id);
+        }
+      }
+
+      if (toDelete.length > 0) {
+        await tx.eventPerson.deleteMany({ where: { id: { in: toDelete } } });
+      }
+      if (toCreate.length > 0) {
+        await tx.eventPerson.createMany({ data: toCreate });
+      }
+
+      return tx.eventGuestParty.findUnique({
+        where: { id: partyId },
+        include: { persons: { orderBy: { createdAt: 'asc' } } },
+      });
     });
     return this.buildPartyEntity(party);
   }

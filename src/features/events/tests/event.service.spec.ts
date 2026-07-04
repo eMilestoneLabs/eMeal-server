@@ -187,6 +187,7 @@ describe('EventsService', () => {
         primaryName: 'Rahul Mahanta',
         adultsCount: 2,
         childrenCount: 1,
+        deviceKey: null, // Pass 14 (FR-EVTX-002): no device key on legacy joins
       });
       // GAP-WS-1: source-of-truth event name emitted (additive to event.updated.v1)
       expect(realtime.emitGuestJoined).toHaveBeenCalledWith(

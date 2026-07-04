@@ -26,6 +26,10 @@ import { Job } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { QUEUE_NAMES, JOB_TYPES } from '../queue/constants/queue.constants';
+import {
+  getTodayInTimezone,
+  toUtcMidnight,
+} from '../common/utils/date.utils';
 import type {
   CleanupStaleTokensPayload,
   CleanupExpiredEventsPayload,
@@ -136,8 +140,87 @@ export class CleanupWorker extends WorkerHost {
       data: { isActive: false },
     });
 
+    // ── Pass 14 (FR-EVTX-023 / FR-DLC-004 / LOOP-073 / SC-074) ───────────────
+    // Stage 2: HARD-purge. The authoritative instant is date-based in the
+    // EVENT's timezone (= org timezone): once the org-local date is more than
+    // 7 days past eventDate, the event row is deleted — cascades wipe meal
+    // types, guest parties, persons, and the QR join token dies with the row.
+    // Date math (not instant math) makes this DST-robust, and deleteMany is
+    // naturally idempotent if the job runs late or twice (LOOP-073).
+    let purged = 0;
+    try {
+      const org = await this.prisma.organization.findUnique({
+        where: { id: organizationId },
+        select: { timezone: true },
+      });
+      const tz = org?.timezone ?? 'Asia/Kolkata';
+      const orgToday = toUtcMidnight(getTodayInTimezone(tz));
+      const purgeCutoff = new Date(orgToday.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+      const purgeResult = await this.prisma.event.deleteMany({
+        where: {
+          organizationId,
+          autoDeleteAfter7Days: true,
+          eventDate: { lt: purgeCutoff },
+        },
+      });
+      purged = purgeResult.count;
+
+      if (purged > 0) {
+        // Append-only trace that the purge happened (the data itself is gone).
+        await this.prisma.auditLog.create({
+          data: {
+            organizationId,
+            targetType: 'Event',
+            action: 'delete',
+            metadata: {
+              autoDeleteHardPurge: true,
+              purgedEvents: purged,
+              timezone: tz,
+              purgeCutoff: purgeCutoff.toISOString(),
+            } as any,
+          },
+        });
+      }
+    } catch (err) {
+      // Purge failure must never fail the whole cleanup job — next run retries.
+      this.logger.error(
+        `Event hard-purge failed org=${organizationId}: ${(err as Error).message}`,
+      );
+    }
+
+    // ── Pass 14 (LOOP-081 / FR-HG-075): hosted-guest PII retention ──────────
+    // Guest display names are minimized after the retention window (billing
+    // keeps working — amounts live in priceSnapshot, not the name).
+    let piiCleared = 0;
+    const retentionDays = parseInt(
+      process.env.GUEST_PII_RETENTION_DAYS ?? '180',
+      10,
+    );
+    if (retentionDays > 0) {
+      try {
+        const piiCutoff = new Date(
+          Date.now() - retentionDays * 24 * 60 * 60 * 1000,
+        );
+        const piiResult = await (this.prisma as any).mealGuest.updateMany({
+          where: {
+            organizationId,
+            attendanceDate: { lt: piiCutoff },
+            displayName: { not: null },
+          },
+          data: { displayName: null },
+        });
+        piiCleared = piiResult.count;
+      } catch (err) {
+        this.logger.error(
+          `Guest PII retention failed org=${organizationId}: ${(err as Error).message}`,
+        );
+      }
+    }
+
     this.logger.log(
-      `Expired event cleanup org=${organizationId} eventsDeactivated=${result.count} cutoff=${cutoffDate}`,
+      `Expired event cleanup org=${organizationId} eventsDeactivated=${result.count} ` +
+        `hardPurged=${purged} guestNamesMinimized=${piiCleared} cutoff=${cutoffDate}`,
     );
   }
 

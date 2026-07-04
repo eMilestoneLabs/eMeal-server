@@ -9,6 +9,7 @@ import {
   HttpStatus,
   UseGuards,
   Query,
+  Req,
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
@@ -18,6 +19,7 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles, ALL_ADMIN_ROLES } from '../../common/decorators/roles.decorator';
 import { CurrentUser, JwtPayload } from '../../common/decorators/current-user.decorator';
 import { UpdateUserDto, VacationModeDto, DefaultAttendanceDto } from './dto/update-user.dto';
+import { DeleteAccountDto } from './dto/delete-account.dto';
 
 @UseGuards(JwtAuthGuard)
 @Controller('users')
@@ -29,6 +31,18 @@ export class UsersController {
   @Get('me')
   async getMe(@CurrentUser() user: JwtPayload) {
     return this.usersService.getMe(user.sub);
+  }
+
+  // Pass 14 (FR-DEL-011): self-service account deletion. Declared BEFORE
+  // @Delete(':userId') so Nest never treats "me" as a userId param.
+  @Delete('me')
+  @HttpCode(HttpStatus.OK)
+  async deleteMyAccount(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: DeleteAccountDto,
+    @Req() req: any,
+  ) {
+    return this.usersService.deleteMyAccount(user.sub, dto, req.requestId);
   }
 
   @Patch('me')

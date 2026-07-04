@@ -174,6 +174,7 @@ export class EventsService {
     primaryName: string,
     adultsCount: number,
     childrenCount: number,
+    deviceKey?: string,
   ) {
     const event = await this.eventsRepo.findByJoinToken(joinCode);
     if (!event || !event.isActive) {
@@ -182,6 +183,22 @@ export class EventsService {
         errors: { joinCode: 'No active event found with this join code' },
         statusCode: 404,
       });
+    }
+
+    // Pass 14 (FR-EVTX-002 / LOOP-072): RESUME before any status gate — a
+    // guest re-opening the app lands on their existing party (no duplicate),
+    // even after the event closed to NEW joins.
+    if (deviceKey) {
+      const existing = await this.eventsRepo.findPartyByDeviceKey(
+        event.id,
+        deviceKey,
+      );
+      if (existing) {
+        return {
+          ...EventGuestPartySerializer.toResponse(existing, true),
+          resumed: true,
+        };
+      }
     }
 
     // GAP-EVT-1 (RESOLVED): closed/expired/archived events accept no new guests
@@ -196,11 +213,31 @@ export class EventsService {
       );
     }
 
-    const party = await this.eventsRepo.createParty(event.id, {
-      primaryName,
-      adultsCount: Math.max(1, adultsCount),
-      childrenCount: Math.max(0, childrenCount),
-    });
+    let party;
+    try {
+      party = await this.eventsRepo.createParty(event.id, {
+        primaryName,
+        adultsCount: Math.max(1, adultsCount),
+        childrenCount: Math.max(0, childrenCount),
+        deviceKey: deviceKey || null,
+      });
+    } catch (err) {
+      // Race-proof resume: two simultaneous joins from the same device hit
+      // the partial unique index — the loser returns the winner's party.
+      if (deviceKey && (err as any)?.code === 'P2002') {
+        const existing = await this.eventsRepo.findPartyByDeviceKey(
+          event.id,
+          deviceKey,
+        );
+        if (existing) {
+          return {
+            ...EventGuestPartySerializer.toResponse(existing, true),
+            resumed: true,
+          };
+        }
+      }
+      throw err;
+    }
 
     await this.invalidateEventStats(event.id);
 
@@ -548,6 +585,8 @@ export class EventsService {
     personId: string,
     organizationId: string,
     dto: { displayName?: string; selectedMealTypeId?: string | null; mealPreference?: string | null },
+    actorId?: string,
+    requestId?: string,
   ) {
     await this.assertEventModifiable(eventId, organizationId);
 
@@ -560,6 +599,26 @@ export class EventsService {
     }
 
     await this.invalidateEventStats(eventId);
+
+    // Pass 14 (FR-EVTX-031): concurrent edits resolve last-writer-wins by
+    // server timestamp; every authenticated edit is audited so admin actions
+    // on guest data are traceable.
+    if (actorId) {
+      this.audit.log({
+        organizationId,
+        actorId,
+        targetId: personId,
+        targetType: 'EventPerson',
+        action: 'update',
+        metadata: {
+          eventId,
+          partyId: person.partyId,
+          ...(dto.displayName !== undefined ? { renamed: true } : {}),
+          ...(dto.selectedMealTypeId !== undefined ? { mealChanged: true } : {}),
+        },
+        requestId,
+      });
+    }
 
     // GAP-WS-1 (RESOLVED): guest.updated.v1
     this.realtime?.emitGuestUpdated(organizationId, {
@@ -575,6 +634,8 @@ export class EventsService {
       displayName: person.displayName,
       selectedMealTypeId: person.selectedMealTypeId,
       mealPreference: person.mealPreference,
+      // FR-EVTX-031: the LWW-resolving server timestamp, surfaced to clients.
+      updatedAt: (person as any).updatedAt ?? undefined,
     };
   }
 

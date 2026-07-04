@@ -86,13 +86,24 @@ export class EventsController {
   @HttpCode(HttpStatus.CREATED)
   @Public()
   async joinEvent(
-    @Body() body: { joinCode: string; primaryName: string; adultsCount?: number; childrenCount?: number },
+    @Body()
+    body: {
+      joinCode: string;
+      primaryName: string;
+      adultsCount?: number;
+      childrenCount?: number;
+      // Pass 14 (FR-EVTX-002): stable client key → resume instead of duplicate.
+      deviceKey?: string;
+    },
   ) {
     return this.eventsService.joinEventByCode(
       body.joinCode,
       body.primaryName,
       body.adultsCount ?? 1,
       body.childrenCount ?? 0,
+      typeof body.deviceKey === 'string' && body.deviceKey.length <= 80
+        ? body.deviceKey.trim() || undefined
+        : undefined,
     );
   }
 
@@ -405,6 +416,8 @@ export class EventsController {
       personId,
       user.organizationId!,
       dto,
+      // Pass 14 (FR-EVTX-031): audited last-writer-wins.
+      user.sub,
     );
   }
 

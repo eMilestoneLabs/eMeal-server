@@ -253,4 +253,69 @@ export class UsersService {
     return { message: 'User removed successfully' };
   }
 
+  /**
+   * Pass 14 (FR-DEL-011 / FR-DLC-002/003, LOOP-080, SC-082) — self-service
+   * account deletion. Revokes every session, soft-removes memberships, and
+   * anonymizes PII in place; attendance, billing and audit history required
+   * for group reporting/financial integrity is RETAINED (the user row
+   * survives as "Deleted User"). Owed/consumed charges can never be erased
+   * by deleting an account. Distinct from admin member-removal (FR-DEL-012).
+   */
+  async deleteMyAccount(
+    userId: string,
+    dto: { password?: string },
+    requestId?: string,
+  ) {
+    const user = await this.usersRepo.findAuthById(userId);
+    if (!user || !user.isActive) {
+      throw new NotFoundException('User not found');
+    }
+
+    // Accounts with a password must present it; OTP-only accounts rely on
+    // the DTO's mandatory confirm phrase (validated before we get here).
+    if (user.passwordHash) {
+      const bcrypt = await import('bcryptjs');
+      const ok = await bcrypt.compare(dto.password ?? '', user.passwordHash);
+      if (!ok) {
+        throw new UnprocessableEntityException({
+          message: 'Incorrect password',
+          errors: { password: 'Enter your current password to delete the account' },
+        });
+      }
+    }
+
+    const avatarKey = this.storage.keyFromUrl(user.avatarUrl);
+    await this.usersRepo.deleteAccount(userId);
+
+    // Best-effort PII cleanup of the stored avatar object; never blocks.
+    if (avatarKey) {
+      this.storage
+        .deleteImage(avatarKey)
+        .catch((err) =>
+          this.logger.warn(`avatar purge failed: ${(err as Error).message}`),
+        );
+    }
+
+    this.audit?.log({
+      organizationId: user.organizationId ?? undefined,
+      actorId: userId,
+      targetId: userId,
+      targetType: 'User',
+      action: 'delete',
+      metadata: {
+        selfDeletion: true,
+        sessionsRevoked: true,
+        membershipsSoftRemoved: true,
+        piiAnonymized: true,
+        financialRecordsRetained: true,
+      },
+      requestId,
+    });
+
+    return {
+      message:
+        'Account deleted. Your personal data has been anonymized; attendance and billing history required for group records is retained per policy.',
+    };
+  }
+
 }
