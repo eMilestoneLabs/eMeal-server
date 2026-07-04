@@ -1,9 +1,11 @@
 import {
   Injectable,
+  Inject,
   Logger,
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  Optional,
   UnprocessableEntityException,
   HttpException,
 } from '@nestjs/common';
@@ -91,7 +93,49 @@ export class GuestsService {
     private readonly membersRepo: MembersRepository,
     private readonly billing: BillingService,
     private readonly notifications: NotificationsService,
+    // Same pattern as corrections.service — string token keeps this module
+    // decoupled from RealtimeModule; null in unit tests.
+    @Optional() @Inject('ATTENDANCE_GATEWAY')
+    private readonly gateway: {
+      emitToGroup(groupId: string, event: string, payload: unknown): void;
+      emitToUser(userId: string, event: string, payload: unknown): void;
+      emitToAdmin(organizationId: string, event: string, payload: unknown): void;
+    } | null,
   ) {}
+
+  /**
+   * meal.guest.updated.v1 (FR-HG-063/064, Pass 9) — one versioned event for
+   * every hosted-guest mutation. Group room (live kitchen/dashboards) + host
+   * user room (their own devices) + admin room (approval queues). Additive,
+   * fire-and-forget — never blocks or fails the mutation.
+   */
+  private emitGuestEvent(payload: {
+    organizationId: string;
+    groupId: string;
+    mealId: string;
+    date: string; // YYYY-MM-DD
+    hostUserId: string;
+    action:
+      | 'booked'
+      | 'proposed'
+      | 'updated'
+      | 'cancelled'
+      | 'approved'
+      | 'confirmed'
+      | 'rejected'
+      | 'declined'
+      | 'auto_cancelled';
+    count?: number;
+    guestId?: string;
+  }): void {
+    try {
+      this.gateway?.emitToGroup(payload.groupId, 'meal.guest.updated.v1', payload);
+      this.gateway?.emitToUser(payload.hostUserId, 'meal.guest.updated.v1', payload);
+      this.gateway?.emitToAdmin(payload.organizationId, 'meal.guest.updated.v1', payload);
+    } catch (_) {
+      /* realtime is best-effort */
+    }
+  }
 
   /** Kitchen/dashboard read caches go stale on any guest mutation. */
   private async invalidateKitchenCache(
@@ -336,6 +380,15 @@ export class GuestsService {
     });
 
     await this.invalidateKitchenCache(organizationId, group.id, mealId, dateUtc);
+    this.emitGuestEvent({
+      organizationId,
+      groupId: group.id,
+      mealId,
+      date: dateStr,
+      hostUserId,
+      action: pendingApproval ? 'proposed' : 'booked',
+      count: dto.guests.length,
+    });
 
     this.audit.log({
       organizationId,
@@ -455,6 +508,15 @@ export class GuestsService {
       metadata: { edited: Object.keys(dto) },
       requestId,
     });
+    this.emitGuestEvent({
+      organizationId,
+      groupId: updated.groupId,
+      mealId: updated.mealId,
+      date: updated.attendanceDate.toISOString().slice(0, 10),
+      hostUserId: updated.hostUserId,
+      action: 'updated',
+      guestId: id,
+    });
     return this.toResponse(updated);
   }
 
@@ -522,6 +584,15 @@ export class GuestsService {
         changedBy: 'admin',
       });
     }
+    this.emitGuestEvent({
+      organizationId,
+      groupId: guest.groupId,
+      mealId: guest.mealId,
+      date: guest.attendanceDate.toISOString().slice(0, 10),
+      hostUserId: guest.hostUserId,
+      action: 'cancelled',
+      guestId: id,
+    });
     return this.toResponse(updated);
   }
 
@@ -575,6 +646,15 @@ export class GuestsService {
       metadata: { decision: 'rejected', note: dto.note ?? null },
       requestId,
     });
+    this.emitGuestEvent({
+      organizationId,
+      groupId: updated.groupId,
+      mealId: guest.mealId,
+      date: guest.attendanceDate.toISOString().slice(0, 10),
+      hostUserId: guest.hostUserId,
+      action: 'rejected',
+      guestId: id,
+    });
     return this.toResponse(updated);
   }
 
@@ -616,6 +696,15 @@ export class GuestsService {
       data: { status: 'cancelled', cancelledBy: hostId, cancelledAt: new Date() },
     });
     this.auditDecision(organizationId, hostId, id, 'declined', requestId);
+    this.emitGuestEvent({
+      organizationId,
+      groupId: updated.groupId,
+      mealId: guest.mealId,
+      date: guest.attendanceDate.toISOString().slice(0, 10),
+      hostUserId: guest.hostUserId,
+      action: 'declined',
+      guestId: id,
+    });
     return this.toResponse(updated);
   }
 
@@ -692,6 +781,15 @@ export class GuestsService {
             newHostStatus: params.newStatus,
           },
           requestId: params.requestId,
+        });
+        this.emitGuestEvent({
+          organizationId: params.organizationId,
+          groupId: params.groupId,
+          mealId: params.mealId,
+          date: params.attendanceDate.toISOString().slice(0, 10),
+          hostUserId: params.hostUserId,
+          action: 'auto_cancelled',
+          count: cancelled,
         });
       }
       return cancelled;
@@ -1026,6 +1124,15 @@ export class GuestsService {
       organizationId, updated.groupId, guest.mealId, guest.attendanceDate,
     );
     this.auditDecision(organizationId, actorId, guest.id, decision, requestId);
+    this.emitGuestEvent({
+      organizationId,
+      groupId: updated.groupId,
+      mealId: guest.mealId,
+      date: guest.attendanceDate.toISOString().slice(0, 10),
+      hostUserId: guest.hostUserId,
+      action: decision,
+      guestId: guest.id,
+    });
     return this.toResponse(updated);
   }
 

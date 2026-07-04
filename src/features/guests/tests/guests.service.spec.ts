@@ -56,6 +56,7 @@ describe('GuestsService (Module 22)', () => {
   let prisma: any;
   let tx: any;
   let membersRepo: { findMembership: jest.Mock };
+  let gateway: { emitToGroup: jest.Mock; emitToUser: jest.Mock; emitToAdmin: jest.Mock };
 
   beforeEach(async () => {
     tx = {
@@ -111,6 +112,14 @@ describe('GuestsService (Module 22)', () => {
           provide: NotificationsService,
           useValue: { notifyAttendanceChanged: jest.fn() },
         },
+        {
+          provide: 'ATTENDANCE_GATEWAY',
+          useValue: (gateway = {
+            emitToGroup: jest.fn(),
+            emitToUser: jest.fn(),
+            emitToAdmin: jest.fn(),
+          }),
+        },
       ],
     }).compile();
 
@@ -142,6 +151,18 @@ describe('GuestsService (Module 22)', () => {
     );
     // FR-HG-012: counters recomputed in the SAME transaction.
     expect(tx.attendanceRecord.updateMany).toHaveBeenCalled();
+    // FR-HG-063/064 (Pass 9): one versioned realtime event to group + host + admin.
+    expect(gateway.emitToGroup).toHaveBeenCalledWith(
+      'grp_01',
+      'meal.guest.updated.v1',
+      expect.objectContaining({ action: 'booked', hostUserId: 'usr_host', count: 1 }),
+    );
+    expect(gateway.emitToUser).toHaveBeenCalledWith(
+      'usr_host', 'meal.guest.updated.v1', expect.anything(),
+    );
+    expect(gateway.emitToAdmin).toHaveBeenCalledWith(
+      'org_01', 'meal.guest.updated.v1', expect.anything(),
+    );
   });
 
   it('prices adult/child via perGuestPrice mode (FR-HG-051)', async () => {

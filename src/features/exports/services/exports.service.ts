@@ -119,6 +119,11 @@ export class ExportsService {
       status: r.status,
       preference: r.preference ?? '',
       markedAt: r.markedAt ? r.markedAt.toISOString() : '',
+      // FR-HG-060 (Pass 9): hosted-guest counters ride the same record —
+      // denormalised on AttendanceRecord in Pass 8, so no extra query.
+      guestAdults: String(r.guestAdults ?? 0),
+      guestChildren: String(r.guestChildren ?? 0),
+      guestsTotal: String((r.guestAdults ?? 0) + (r.guestChildren ?? 0)),
     }));
 
     this.audit.log({
@@ -336,6 +341,9 @@ interface AttendanceExportRow {
   status: string;
   preference: string;
   markedAt: string;
+  guestAdults: string;
+  guestChildren: string;
+  guestsTotal: string;
 }
 
 interface EventGuestExportRow {
@@ -360,6 +368,10 @@ const ATTENDANCE_HEADERS: ExportHeader[] = [
   { key: 'status', label: 'Status', width: 12 },
   { key: 'preference', label: 'Preference', width: 14 },
   { key: 'markedAt', label: 'Marked At', width: 24 },
+  // Additive (Pass 9) — appended LAST so existing column positions never move.
+  { key: 'guestAdults', label: 'Guest Adults', width: 13 },
+  { key: 'guestChildren', label: 'Guest Children', width: 14 },
+  { key: 'guestsTotal', label: 'Guests Total', width: 13 },
 ];
 
 const EVENT_HEADERS: ExportHeader[] = [
