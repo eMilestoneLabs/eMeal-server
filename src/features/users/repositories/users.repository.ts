@@ -136,9 +136,26 @@ export class UsersRepository {
       : null;
   }
 
+  /**
+   * Emails are matched CASE-INSENSITIVELY everywhere (login, signup dup-check,
+   * password reset). Rows created before 2026-07-04 may store mixed case
+   * (e.g. "Manas.B…@gmail.com"), so exact matching locked users out when they
+   * typed lowercase. Writes normalize to lowercase via normalizeEmail below.
+   */
+  private static emailWhere(email: string) {
+    return { email: { equals: email.trim(), mode: 'insensitive' as const } };
+  }
+
+  private static normalizeEmail<T extends string | undefined>(email: T): T {
+    return (email ? email.trim().toLowerCase() : email) as T;
+  }
+
   async findByEmail(email: string, organizationId?: string): Promise<UserEntity | null> {
     const user = await this.prisma.user.findFirst({
-      where: { email, ...(organizationId ? { organizationId } : {}) },
+      where: {
+        ...UsersRepository.emailWhere(email),
+        ...(organizationId ? { organizationId } : {}),
+      },
       include: this.memberInclude,
     });
     if (!user) return null;
@@ -157,7 +174,9 @@ export class UsersRepository {
   async findByIdentifier(identifier: string): Promise<UserEntity | null> {
     const isEmail = identifier.includes('@');
     const user = await this.prisma.user.findFirst({
-      where: isEmail ? { email: identifier } : { phone: identifier },
+      where: isEmail
+        ? UsersRepository.emailWhere(identifier)
+        : { phone: identifier.trim() },
       include: this.memberInclude,
     });
     if (!user) return null;
@@ -176,7 +195,7 @@ export class UsersRepository {
     loginPreference?: string;
   }): Promise<UserEntity> {
     const user = await this.prisma.user.create({
-      data,
+      data: { ...data, email: UsersRepository.normalizeEmail(data.email) },
       include: this.memberInclude,
     });
     return this.buildEntityFromInclude(user);
@@ -202,7 +221,10 @@ export class UsersRepository {
   }>): Promise<UserEntity> {
     const user = await this.prisma.user.update({
       where: { id },
-      data,
+      data:
+        data.email !== undefined
+          ? { ...data, email: UsersRepository.normalizeEmail(data.email) }
+          : data,
       include: this.memberInclude,
     });
     return this.buildEntityFromInclude(user);
@@ -210,7 +232,10 @@ export class UsersRepository {
 
   async existsByEmail(email: string, organizationId?: string): Promise<boolean> {
     const count = await this.prisma.user.count({
-      where: { email, ...(organizationId ? { organizationId } : {}) },
+      where: {
+        ...UsersRepository.emailWhere(email),
+        ...(organizationId ? { organizationId } : {}),
+      },
     });
     return count > 0;
   }

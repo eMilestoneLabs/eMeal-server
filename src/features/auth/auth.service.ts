@@ -232,7 +232,19 @@ export class AuthService {
 
   // ── LOGIN ─────────────────────────────────────────────────────────────────
 
+  /**
+   * Emails are case-insensitive identifiers: normalize once at every auth
+   * entry point so login, OTP request/verify and reset all agree regardless
+   * of how the user typed it (repo lookups are insensitive too — accounts
+   * created before 2026-07-04 store mixed case).
+   */
+  private static normalizeIdentifier(identifier: string): string {
+    const trimmed = identifier.trim();
+    return trimmed.includes('@') ? trimmed.toLowerCase() : trimmed;
+  }
+
   async login(dto: LoginDto, meta: { userAgent?: string; ip?: string; requestId?: string }) {
+    dto.identifier = AuthService.normalizeIdentifier(dto.identifier ?? '');
     // SEC-005 / ERR-003: a single generic credential error for every "wrong
     // email/mobile OR wrong password" case so the endpoint cannot be used to
     // enumerate which accounts exist.
@@ -311,6 +323,7 @@ export class AuthService {
   // ── OTP (Phase B1 placeholder — Firebase integration in Phase B7) ─────────
 
   async requestOtp(dto: OtpRequestDto, requestId?: string) {
+    dto.identifier = AuthService.normalizeIdentifier(dto.identifier ?? '');
     const cfg = this.authConfig();
     const isEmail = dto.identifier.includes('@');
     const purpose = dto.purpose ?? 'login';
@@ -418,6 +431,7 @@ export class AuthService {
   }
 
   async verifyOtp(dto: OtpVerifyDto, meta: { userAgent?: string; ip?: string; requestId?: string }) {
+    dto.identifier = AuthService.normalizeIdentifier(dto.identifier ?? '');
     const cfg = this.authConfig();
     const otpRecord = await this.authRepo.findValidOtpRequest(
       dto.identifier,
@@ -505,6 +519,7 @@ export class AuthService {
     newPassword: string,
     meta: { userAgent?: string; ip?: string; requestId?: string } = {},
   ): Promise<{ message: string }> {
+    identifier = AuthService.normalizeIdentifier(identifier ?? '');
     // AUTH-017: Forgot/Reset Password is Email OTP only in the current release.
     if (!identifier.includes('@')) {
       throw new BadRequestException({
