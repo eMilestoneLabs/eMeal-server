@@ -30,7 +30,9 @@ export class DashboardRepository {
   private static readonly _tzCache = new Map<string, { tz: string; expires: number }>();
   private static readonly _TZ_TTL_MS = 5 * 60 * 1000;
 
-  private async getOrgTimezone(organizationId: string): Promise<string> {
+  // Pass 15 (FR-ANL-011): public — the service layer uses this to default
+  // analytics date ranges in the ORG timezone instead of device/UTC time.
+  async getOrgTimezone(organizationId: string): Promise<string> {
     const now = Date.now();
     const hit = DashboardRepository._tzCache.get(organizationId);
     if (hit && hit.expires > now) return hit.tz;

@@ -94,6 +94,8 @@ export class DashboardService {
     this.logger.debug(`Admin dashboard cache MISS: ${cacheKey}`);
     const entity = await this.dashboardRepo.buildAdminDashboard(organizationId);
     const response = AdminDashboardSerializer.toResponse(entity);
+    // Pass 15 (FR-ANL-022): freshness timestamp on the cached analytics payload.
+    (response as Record<string, unknown>).generatedAt = new Date().toISOString();
 
     await this.redis.set(cacheKey, JSON.stringify(response), ADMIN_DASHBOARD_TTL);
 
@@ -106,8 +108,8 @@ export class DashboardService {
     organizationId: string,
     role: string,
     groupId: string,
-    fromDateStr: string,
-    toDateStr: string,
+    fromDateStrIn?: string,
+    toDateStrIn?: string,
   ) {
     if (!ADMIN_ROLES.includes(role)) {
       throw new ForbiddenException({
@@ -122,6 +124,27 @@ export class DashboardService {
         errors: { groupId: 'groupId is required for attendance analytics' },
         statusCode: 422,
       });
+    }
+
+    // Pass 15 (FR-ANL-011): omitted bounds default to the last 30 days ending
+    // at the ORG-timezone "today" — never the server/device UTC date, which
+    // is off by one around midnight for +/- UTC offsets.
+    let fromDateStr = fromDateStrIn;
+    let toDateStr = toDateStrIn;
+    if (!fromDateStr || !toDateStr) {
+      const tz = await this.dashboardRepo.getOrgTimezone(organizationId);
+      const todayOrg = new Intl.DateTimeFormat('en-CA', {
+        timeZone: tz,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(new Date());
+      toDateStr = toDateStr ?? todayOrg;
+      if (!fromDateStr) {
+        const d = new Date(`${todayOrg}T00:00:00Z`);
+        d.setUTCDate(d.getUTCDate() - 30);
+        fromDateStr = d.toISOString().slice(0, 10);
+      }
     }
 
     const fromDate = parseLocalDate(fromDateStr);
@@ -156,6 +179,9 @@ export class DashboardService {
       toDate,
     );
     const response = AttendanceAnalyticsSerializer.toResponse(entity);
+    // Pass 15 (FR-ANL-022): computation timestamp rides the cached payload —
+    // a cache HIT keeps the original value, so clients can show data freshness.
+    (response as Record<string, unknown>).generatedAt = new Date().toISOString();
 
     await this.redis.set(cacheKey, JSON.stringify(response), ANALYTICS_TTL);
 

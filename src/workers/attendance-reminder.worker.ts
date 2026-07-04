@@ -14,6 +14,16 @@
  *
  * Idempotency: Redis key `reminder:dispatched:{dedupKey}` with 4-hour TTL.
  * If the key exists, the job was already processed — skip silently.
+ *
+ * LOOP-083 (Pass 15 verified): remindersEnabled is the per-user consent gate,
+ * the Redis dedup key is the anti-spam suppressor, and already-marked members
+ * are never pinged — no reminder fires without consent or twice per window.
+ *
+ * FR-MODE-050 (Pass 15 verified): reminders are scheduled per published
+ * schedule entry / meal window — Attendance-Only groups (mealsEnabled=false)
+ * have no published meal windows, so meal-driven reminders structurally
+ * cannot fire for them; this worker's output is the attendance reminder,
+ * which is the only reminder type AO groups may receive.
  */
 
 import { Processor, WorkerHost, OnWorkerEvent } from '@nestjs/bullmq';
@@ -110,9 +120,17 @@ export class AttendanceReminderWorker extends WorkerHost {
       return;
     }
 
+    // Pass 15 (FR-NOTX-013): opt-out groups get "mark if absent" copy —
+    // unmarked members are auto-marked Present at close (FR-TRUST-001).
+    const group = await this.prisma.group.findUnique({
+      where: { id: groupId },
+      select: { attendanceDefault: true },
+    });
+
     const payload = this.payloadBuilder.buildAttendanceReminderPayload({
       mealSlotKey,
       minutesRemaining: minutesBefore,
+      defaultPresent: group?.attendanceDefault === 'present',
     });
 
     // Enqueue batch push to all eligible recipients

@@ -111,12 +111,15 @@ export class ReportsController {
     @Query('toDate') toDate?: string,
   ) {
     if (groupId) {
+      // Pass 15 (FR-ANL-011): omitted dates default INSIDE the service using
+      // the org timezone — the old UTC defaulting here was off by one day
+      // around midnight for non-UTC orgs.
       return this.dashboardService.getAttendanceAnalytics(
         user.organizationId!,
         user.role,
         groupId,
-        fromDate ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
-        toDate ?? new Date().toISOString().slice(0, 10),
+        fromDate,
+        toDate,
       );
     }
     // No groupId — fall back to org-level admin dashboard summary

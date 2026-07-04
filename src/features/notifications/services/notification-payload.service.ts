@@ -33,15 +33,22 @@ export class NotificationPayloadService {
   /**
    * Reminder: attendance window closes in N minutes.
    * Route: /student/attendance
+   *
+   * Pass 15 (FR-NOTX-013): defaultPresent=true means the group runs opt-out
+   * attendance — unmarked members are auto-marked Present at close
+   * (FR-TRUST-001) — so the copy asks members to mark only if absent.
    */
   buildAttendanceReminderPayload(params: {
     mealSlotKey: string;
     minutesRemaining: number;
+    defaultPresent?: boolean;
   }): NotificationPayload {
     const slot = this.formatSlot(params.mealSlotKey);
     return {
       title: 'Attendance Reminder',
-      body: `${slot} attendance closes in ${params.minutesRemaining} minutes. Mark now!`,
+      body: params.defaultPresent
+        ? `${slot} attendance closes in ${params.minutesRemaining} minutes. You'll be marked present — update only if you're skipping.`
+        : `${slot} attendance closes in ${params.minutesRemaining} minutes. Mark now!`,
       route: '/student/attendance',
       data: {
         type: 'attendance_reminder',

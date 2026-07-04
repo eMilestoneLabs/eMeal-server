@@ -55,10 +55,17 @@ export class ExportsService {
   ): Promise<void> {
     this.assertAdmin(role);
 
-    // Validate group ownership
+    // Validate group ownership. Pass 15 (FR-MODE-042): mode flags ride the
+    // same query — they decide which columns the export carries.
     const group = await this.prisma.group.findFirst({
       where: { id: dto.groupId, organizationId },
-      select: { id: true, name: true },
+      select: {
+        id: true,
+        name: true,
+        mealsEnabled: true,
+        mealPricingEnabled: true,
+        guestAttendanceEnabled: true,
+      },
     });
     if (!group) {
       throw new NotFoundException({
@@ -108,23 +115,63 @@ export class ExportsService {
       },
     });
 
-    // Build export rows
-    const rows: AttendanceExportRow[] = records.map((r: any) => ({
-      date: toDateString(r.attendanceDate),
-      memberName: r.user?.name ?? 'Unknown',
-      memberEmail: r.user?.email ?? '',
-      memberPhone: r.user?.phone ?? '',
-      mealSlot: r.meal?.slotKey ?? '',
-      mealName: r.meal?.displayName ?? r.meal?.name ?? '',
-      status: r.status,
-      preference: r.preference ?? '',
-      markedAt: r.markedAt ? r.markedAt.toISOString() : '',
-      // FR-HG-060 (Pass 9): hosted-guest counters ride the same record —
-      // denormalised on AttendanceRecord in Pass 8, so no extra query.
-      guestAdults: String(r.guestAdults ?? 0),
-      guestChildren: String(r.guestChildren ?? 0),
-      guestsTotal: String((r.guestAdults ?? 0) + (r.guestChildren ?? 0)),
-    }));
+    // Build export rows. Pass 15 (FR-ANL-030): rows always carry every value
+    // (price, per-preference-group selections) — the HEADER set decides what
+    // is actually emitted, so gating costs nothing per row.
+    // Multi-preference columns come from the SNAPSHOTTED selection JSON
+    // (FR-PG-013/FR-ANL-022) — renamed options never corrupt past exports.
+    const prefGroupLabels: string[] = [];
+    const seenPrefGroups = new Set<string>();
+
+    const rows: AttendanceExportRow[] = records.map((r: any) => {
+      const row: AttendanceExportRow = {
+        date: toDateString(r.attendanceDate),
+        memberName: r.user?.name ?? 'Unknown',
+        memberEmail: r.user?.email ?? '',
+        memberPhone: r.user?.phone ?? '',
+        mealSlot: r.meal?.slotKey ?? '',
+        mealName: r.meal?.displayName ?? r.meal?.name ?? '',
+        status: r.status,
+        preference: r.preference ?? '',
+        markedAt: r.markedAt ? r.markedAt.toISOString() : '',
+        // FR-ANL-030: ₹ from the paise snapshot at mark time (blank = unpriced).
+        price: r.price != null ? (r.price / 100).toFixed(2) : '',
+        // FR-HG-060 (Pass 9): hosted-guest counters ride the same record —
+        // denormalised on AttendanceRecord in Pass 8, so no extra query.
+        guestAdults: String(r.guestAdults ?? 0),
+        guestChildren: String(r.guestChildren ?? 0),
+        guestsTotal: String((r.guestAdults ?? 0) + (r.guestChildren ?? 0)),
+      };
+      if (Array.isArray(r.preferences)) {
+        for (const sel of r.preferences as Array<Record<string, unknown>>) {
+          const label = typeof sel?.groupLabel === 'string' ? sel.groupLabel : null;
+          if (!label) continue;
+          if (!seenPrefGroups.has(label)) {
+            seenPrefGroups.add(label);
+            prefGroupLabels.push(label);
+          }
+          const key = `prefGroup:${label}`;
+          const qty = typeof sel.quantity === 'number' && sel.quantity > 1 ? ` ×${sel.quantity}` : '';
+          const value = `${sel.optionLabel ?? sel.optionKey ?? ''}${qty}`;
+          row[key] = row[key] ? `${row[key]}; ${value}` : value;
+        }
+      }
+      return row;
+    });
+
+    // Pass 15 (FR-MODE-042): mode-appropriate columns — AO omits meal /
+    // preference / price; pricing adds the ₹ column; guest hosting adds the
+    // guest columns; multi-preference selections add per-group columns.
+    // Column ORDER for a priced-off MM group with guest hosting is byte-
+    // identical to the legacy fixed header (existing consumers unaffected).
+    const headers = buildAttendanceHeaders(
+      {
+        mealsEnabled: group.mealsEnabled !== false,
+        pricingEnabled: group.mealPricingEnabled === true,
+        guestsEnabled: group.guestAttendanceEnabled === true,
+      },
+      prefGroupLabels,
+    );
 
     this.audit.log({
       organizationId,
@@ -139,9 +186,9 @@ export class ExportsService {
     const filename = `attendance_${group.name.replace(/\s+/g, '_')}_${dto.fromDate}_${dto.toDate}`;
 
     if (format === 'xlsx') {
-      await this.streamXlsx(res, rows, ATTENDANCE_HEADERS, filename);
+      await this.streamXlsx(res, rows, headers, filename);
     } else {
-      this.streamCsv(res, rows, ATTENDANCE_HEADERS, filename);
+      this.streamCsv(res, rows, headers, filename);
     }
   }
 
@@ -519,6 +566,7 @@ interface AttendanceExportRow {
   status: string;
   preference: string;
   markedAt: string;
+  price: string;
   guestAdults: string;
   guestChildren: string;
   guestsTotal: string;
@@ -536,21 +584,52 @@ interface EventGuestExportRow {
   joinedAt: string;
 }
 
-const ATTENDANCE_HEADERS: ExportHeader[] = [
-  { key: 'date', label: 'Date', width: 14 },
-  { key: 'memberName', label: 'Member Name', width: 25 },
-  { key: 'memberEmail', label: 'Email', width: 30 },
-  { key: 'memberPhone', label: 'Phone', width: 16 },
-  { key: 'mealSlot', label: 'Meal Slot', width: 14 },
-  { key: 'mealName', label: 'Meal Name', width: 20 },
-  { key: 'status', label: 'Status', width: 12 },
-  { key: 'preference', label: 'Preference', width: 14 },
-  { key: 'markedAt', label: 'Marked At', width: 24 },
-  // Additive (Pass 9) — appended LAST so existing column positions never move.
-  { key: 'guestAdults', label: 'Guest Adults', width: 13 },
-  { key: 'guestChildren', label: 'Guest Children', width: 14 },
-  { key: 'guestsTotal', label: 'Guests Total', width: 13 },
-];
+/**
+ * Pass 15 (FR-MODE-042/FR-ANL-030): attendance export columns are built from
+ * the group's mode flags. Attendance-Only groups omit meal / preference /
+ * price columns entirely; pricing adds the ₹ column; guest hosting appends
+ * the guest columns (Pass 9 position — always last); multi-dimensional
+ * preference selections add one column per preference group, labelled with
+ * the SNAPSHOTTED group label so historical exports survive renames.
+ */
+function buildAttendanceHeaders(
+  flags: { mealsEnabled: boolean; pricingEnabled: boolean; guestsEnabled: boolean },
+  prefGroupLabels: string[],
+): ExportHeader[] {
+  return [
+    { key: 'date', label: 'Date', width: 14 },
+    { key: 'memberName', label: 'Member Name', width: 25 },
+    { key: 'memberEmail', label: 'Email', width: 30 },
+    { key: 'memberPhone', label: 'Phone', width: 16 },
+    ...(flags.mealsEnabled
+      ? [
+          { key: 'mealSlot', label: 'Meal Slot', width: 14 },
+          { key: 'mealName', label: 'Meal Name', width: 20 },
+        ]
+      : []),
+    { key: 'status', label: 'Status', width: 12 },
+    ...(flags.mealsEnabled
+      ? [{ key: 'preference', label: 'Preference', width: 14 }]
+      : []),
+    { key: 'markedAt', label: 'Marked At', width: 24 },
+    ...(flags.pricingEnabled
+      ? [{ key: 'price', label: 'Price (₹)', width: 12 }]
+      : []),
+    ...prefGroupLabels.map((label) => ({
+      key: `prefGroup:${label}`,
+      label: `Pref: ${label}`,
+      width: 20,
+    })),
+    // Additive (Pass 9) — appended LAST so existing column positions never move.
+    ...(flags.guestsEnabled
+      ? [
+          { key: 'guestAdults', label: 'Guest Adults', width: 13 },
+          { key: 'guestChildren', label: 'Guest Children', width: 14 },
+          { key: 'guestsTotal', label: 'Guests Total', width: 13 },
+        ]
+      : []),
+  ];
+}
 
 interface BillingExportRow {
   [key: string]: string;

@@ -28,6 +28,7 @@ import {
   formatUtcDate,
   AttendanceWindowState,
 } from '../../common/utils/date.utils';
+import { getVacationCoveredUserIds } from '../../common/utils/vacation-coverage.util';
 import {
   AttendanceSerializer,
   AttendanceSummarySerializer,
@@ -1410,7 +1411,14 @@ export class AttendanceService {
   ) {
     const meal = await this.prisma.meal.findFirst({
       where: { id: query.mealId, organizationId },
-      select: { id: true, slotKey: true, name: true, displayName: true, groupId: true },
+      select: {
+        id: true,
+        slotKey: true,
+        name: true,
+        displayName: true,
+        groupId: true,
+        attendanceWindowOpen: true,
+      },
     });
     if (!meal) throw new NotFoundException('Meal not found');
 
@@ -1425,10 +1433,28 @@ export class AttendanceService {
       } catch { /* fall through */ }
     }
 
-    // Total active members for this group (for totalMembers field)
-    const totalMembers = await this.prisma.groupMember.count({
+    // Active members for this group. Same single query as the old count();
+    // the vacation flag rides along for FR-ANL-003 below.
+    const activeMembers = await this.prisma.groupMember.findMany({
       where: { groupId: meal.groupId, status: 'active' },
+      select: { userId: true, user: { select: { isVacationMode: true } } },
     });
+    const totalMembers = activeMembers.length;
+
+    // Pass 15 (FR-ANL-003): expected participants = active, non-blocked
+    // (status filter above), non-vacation members for THIS meal/date —
+    // slot-aware dated vacations via the shared Pass 11 coverage util.
+    const onVacation = await getVacationCoveredUserIds(this.prisma as any, {
+      organizationId,
+      groupId: meal.groupId,
+      dateUtc: attendanceDateUtc,
+      mealOpenTime: meal.attendanceWindowOpen ?? null,
+      candidates: activeMembers.map((m) => ({
+        userId: m.userId,
+        isVacationMode: m.user.isVacationMode === true,
+      })),
+    });
+    const expectedParticipants = totalMembers - onVacation.size;
 
     const counts = await this.attendanceRepo.getMealSummary(
       query.mealId,
@@ -1463,6 +1489,11 @@ export class AttendanceService {
       ...MealAttendanceSummarySerializer.toResponse(summaryEntity),
       ...guestCounts,
       attendingTotal: counts.presentCount + guestCounts.guestCount,
+      // Pass 15 (FR-ANL-003): expected = active − vacationing (never counts
+      // blocked/removed members — the membership status filter handles those).
+      expectedParticipants,
+      // Pass 15 (FR-ANL-022): freshness stamp — cache HITs keep the original.
+      generatedAt: new Date().toISOString(),
     };
 
     // Cache result
@@ -1728,6 +1759,8 @@ export class AttendanceService {
       mealBreakdown,
       slotBreakdown,
       members: memberList,
+      // Pass 15 (FR-ANL-022): freshness stamp — cache HITs keep the original.
+      generatedAt: new Date().toISOString(),
     };
 
     // FR-BILLX-050: cache under the current billing version (configurable TTL).

@@ -212,6 +212,11 @@ export class NoticesService {
   }
 
   // ── DELETE (admin, soft) ─────────────────────────────────────────────────────
+  //
+  // FR-NOTX-004 (Pass 15 verified): soft delete flips isActive=false, and every
+  // member-facing read (list, unread count) filters isActive=true — a deleted
+  // notice vanishes from lists AND unread badges immediately. NoticeRead rows
+  // are RETAINED by policy (audit trail of who saw it before deletion).
 
   async deleteNotice(
     adminId: string,

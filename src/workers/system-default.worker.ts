@@ -82,6 +82,244 @@ export class SystemDefaultWorker extends WorkerHost {
     if (job.name === JOB_TYPES.EVENT_CLEANUP_SWEEP) {
       return this.eventCleanupSweep();
     }
+    // Pass 15 (FR-NOTX-010): weekly attendance summary digest.
+    if (job.name === JOB_TYPES.WEEKLY_DIGEST_SWEEP) {
+      return this.weeklyDigestSweep();
+    }
+    // Pass 15 (FR-NOTX-010): attendance reminder scheduling.
+    if (job.name === JOB_TYPES.REMINDER_SCHEDULE_SWEEP) {
+      return this.reminderScheduleSweep();
+    }
+  }
+
+  // ── Pass 15 (FR-NOTX-010) — attendance reminder scheduling sweep ──────────
+  //
+  // The 30/10-min pre-close reminder producer (NotificationsService.
+  // scheduleAttendanceReminders) existed since B6 but had NO production
+  // caller — reminders never dispatched, and the opt-out sweep's
+  // fair-opportunity check permanently read "no reminder sent". This sweep
+  // enqueues today's delayed dispatch jobs directly on the reminder queue.
+  //
+  // Idempotency is two-layered: queue.scheduleAttendanceReminder uses a
+  // deterministic jobId ({org}:{mealId}:{offset}min) so re-adds while the job
+  // exists are no-ops, and the dispatch worker's Redis dedup flag (4h TTL)
+  // absorbs any straggler double-fire. Holiday days in planner mode get no
+  // reminder (FR-MODE-032); AO groups only ever receive these attendance
+  // reminders — never meal/menu pushes (FR-MODE-050).
+  private async reminderScheduleSweep(): Promise<void> {
+    const groups = await this.prisma.group.findMany({
+      where: { isActive: true },
+      select: {
+        id: true,
+        organizationId: true,
+        mealsEnabled: true,
+        weeklyMenuEnabled: true,
+        dayWiseMealsEnabled: true,
+        organization: { select: { timezone: true } },
+      },
+    });
+
+    for (const group of groups) {
+      try {
+        await this.scheduleGroupReminders(group);
+      } catch (err) {
+        // One bad group never blocks the rest of the sweep.
+        this.logger.error(
+          `Reminder-schedule sweep failed group=${group.id}: ${(err as Error).message}`,
+        );
+      }
+    }
+  }
+
+  private async scheduleGroupReminders(group: {
+    id: string;
+    organizationId: string;
+    mealsEnabled: boolean;
+    weeklyMenuEnabled: boolean;
+    dayWiseMealsEnabled: boolean;
+    organization: { timezone: string | null } | null;
+  }): Promise<void> {
+    const tz = group.organization?.timezone ?? 'Asia/Kolkata';
+    const todayStr = todayInTimezone(tz);
+    const nowTime = getCurrentTimeInTimezone(tz);
+    const dateUtc = toUtcMidnight(todayStr);
+
+    const [meals, entries] = await Promise.all([
+      this.prisma.meal.findMany({
+        where: {
+          groupId: group.id,
+          organizationId: group.organizationId,
+          attendanceEnabled: true,
+        },
+        select: {
+          id: true,
+          slotKey: true,
+          attendanceWindowClose: true,
+        },
+      }),
+      this.prisma.scheduleEntry.findMany({
+        where: {
+          date: dateUtc,
+          schedule: {
+            groupId: group.id,
+            organizationId: group.organizationId,
+            isPublished: true,
+          },
+        },
+        select: { mealId: true, openTime: true, closeTime: true },
+      }),
+    ]);
+    if (!meals.length) return;
+
+    const entryMap = new Map(entries.map((e) => [e.mealId, e]));
+    const plannerActive =
+      group.mealsEnabled !== false &&
+      (group.weeklyMenuEnabled === true || group.dayWiseMealsEnabled === true);
+
+    const [nh, nm] = nowTime.split(':').map(Number);
+    const nowMinutes = nh * 60 + nm;
+
+    for (const meal of meals) {
+      const entry = entryMap.get(meal.id);
+      // FR-MODE-032: holiday / no-meal day in planner mode → no reminder.
+      if (plannerActive && !entry) continue;
+
+      const close = entry?.openTime ? entry.closeTime : meal.attendanceWindowClose;
+      if (!close || !/^\d{1,2}:\d{2}$/.test(close)) continue;
+      const [ch, cm] = close.split(':').map(Number);
+      // Already closed today (or an overnight window closing tomorrow) → the
+      // next org-day's sweep handles it. Fail-safe direction: never remind
+      // for a window that cannot still be marked.
+      const minutesUntilClose = ch * 60 + cm - nowMinutes;
+      if (minutesUntilClose <= 15) continue;
+
+      const nowMs = Date.now();
+      const closeMs = nowMs + minutesUntilClose * 60_000;
+      // Same offsets + guards as NotificationsService.scheduleAttendanceReminders
+      // (source of truth: student Settings copy — 30 and 10 min before close).
+      for (const minutesBefore of [30, 10] as const) {
+        if (minutesUntilClose <= minutesBefore + 5) continue;
+        await this.queue.scheduleAttendanceReminder(
+          {
+            organizationId: group.organizationId,
+            groupId: group.id,
+            mealId: meal.id,
+            mealSlotKey: meal.slotKey,
+            windowCloseAt: new Date(closeMs).toISOString(),
+            minutesBefore,
+          },
+          closeMs - nowMs - minutesBefore * 60_000,
+        );
+      }
+    }
+  }
+
+  // ── Pass 15 (FR-NOTX-010) — weekly attendance summary digest ──────────────
+  //
+  // Fires once per group per digest day (org timezone): when org-local time
+  // reaches digestHour on digestDay, members receive a push summarising the
+  // group's last 7 days. Consent: only members with remindersEnabled=true and
+  // a registered device get it (LOOP-083 — remindersEnabled IS the digest
+  // opt-out); the once-flag caps it at one push/week (anti-spam). Content is
+  // aggregate counts only — no names, no amounts (FR-NOTX-017).
+  private async weeklyDigestSweep(): Promise<void> {
+    const digestDay = this.config.get<number>('attendance.weeklyDigestDay', 1);
+    const digestHour = this.config.get<number>('attendance.weeklyDigestHour', 8);
+
+    const groups = await this.prisma.group.findMany({
+      where: { isActive: true },
+      select: {
+        id: true,
+        name: true,
+        organizationId: true,
+        organization: { select: { timezone: true } },
+      },
+    });
+
+    let dispatched = 0;
+    for (const group of groups) {
+      try {
+        const tz = group.organization?.timezone ?? 'Asia/Kolkata';
+        const todayStr = todayInTimezone(tz);
+        const todayUtc = toUtcMidnight(todayStr);
+        // Org-local weekday + hour gate. Late sweeps still fire (hour >=),
+        // the once-flag keeps it to a single dispatch per digest day.
+        if (todayUtc.getUTCDay() !== digestDay) continue;
+        const hourNow = parseInt(getCurrentTimeInTimezone(tz).slice(0, 2), 10);
+        if (hourNow < digestHour) continue;
+
+        const onceKey = `digest:done:${group.id}:${todayStr}`;
+        if (!(await this.redis.setDedup(onceKey, 48 * 60 * 60))) continue;
+
+        await this.dispatchGroupDigest(group, todayUtc);
+        dispatched++;
+      } catch (err) {
+        // One bad group never blocks the rest of the sweep.
+        this.logger.error(
+          `Weekly digest failed group=${group.id}: ${(err as Error).message}`,
+        );
+      }
+    }
+    if (dispatched > 0) {
+      this.logger.log(`Weekly digest dispatched for ${dispatched} group(s)`);
+    }
+  }
+
+  private async dispatchGroupDigest(
+    group: { id: string; name: string; organizationId: string },
+    todayUtc: Date,
+  ): Promise<void> {
+    const weekAgo = new Date(todayUtc.getTime() - 7 * 86_400_000);
+
+    const [statusRows, recipientsRaw] = await Promise.all([
+      this.prisma.attendanceRecord.groupBy({
+        by: ['status'],
+        where: {
+          organizationId: group.organizationId,
+          groupId: group.id,
+          attendanceDate: { gte: weekAgo, lt: todayUtc },
+        },
+        _count: { _all: true },
+      }),
+      this.prisma.groupMember.findMany({
+        where: {
+          groupId: group.id,
+          status: 'active',
+          user: { remindersEnabled: true, fcmToken: { not: null } },
+        },
+        select: { userId: true, user: { select: { fcmToken: true } } },
+      }),
+    ]);
+
+    const recipients = recipientsRaw
+      .filter((m) => m.user.fcmToken)
+      .map((m) => ({ userId: m.userId, fcmToken: m.user.fcmToken! }));
+    if (!recipients.length) return;
+
+    const counts: Record<string, number> = {};
+    for (const row of statusRows) counts[row.status] = row._count._all;
+    const present = counts['present'] ?? 0;
+    const absent = counts['absent'] ?? 0;
+    const skipped = counts['skipped'] ?? 0;
+    const denom = present + absent + skipped;
+    // Nothing happened last week → nothing to digest (quiet by default).
+    if (denom === 0) return;
+    const rate = Math.round((present / denom) * 100);
+
+    await this.queue.enqueueBatchPush({
+      organizationId: group.organizationId,
+      recipients,
+      title: 'Weekly Attendance Summary',
+      body:
+        `${group.name} — last 7 days: ${present} present, ${absent} absent, ` +
+        `${skipped} skipped (${rate}% attendance). Open the app for details.`,
+      route: '/student/attendance',
+      data: { type: 'weekly_digest', groupId: group.id },
+    });
+
+    this.logger.log(
+      `Weekly digest: group=${group.id} recipients=${recipients.length} rate=${rate}%`,
+    );
   }
 
   // ── Pass 14 (FR-EVT-054/FR-EVTX-023) — expired-event cleanup fan-out ──────

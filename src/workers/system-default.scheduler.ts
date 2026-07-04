@@ -95,24 +95,85 @@ export class SystemDefaultSweepScheduler implements OnApplicationBootstrap {
     );
     if (!eventCleanupMinutes || eventCleanupMinutes <= 0) {
       this.logger.log('Event-cleanup sweep disabled (interval = 0)');
+    } else {
+      try {
+        await this.queue.add(
+          JOB_TYPES.EVENT_CLEANUP_SWEEP,
+          {},
+          {
+            repeat: { every: eventCleanupMinutes * 60_000 },
+            removeOnComplete: { count: 20 },
+            removeOnFail: { count: 20 },
+          },
+        );
+        this.logger.log(
+          `Event-cleanup sweep scheduled every ${eventCleanupMinutes} minute(s)`,
+        );
+      } catch (err) {
+        this.logger.error(
+          `Failed to schedule event-cleanup sweep: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    // Pass 15 (FR-NOTX-010): weekly attendance summary digest. The sweep
+    // itself is cheap (one indexed groups query + an hour/day gate per group);
+    // each group dispatches at most once per digest day via a Redis once-flag.
+    const digestMinutes = this.config.get<number>(
+      'attendance.weeklyDigestSweepMinutes',
+      60,
+    );
+    if (!digestMinutes || digestMinutes <= 0) {
+      this.logger.log('Weekly-digest sweep disabled (interval = 0)');
+    } else {
+      try {
+        await this.queue.add(
+          JOB_TYPES.WEEKLY_DIGEST_SWEEP,
+          {},
+          {
+            repeat: { every: digestMinutes * 60_000 },
+            removeOnComplete: { count: 20 },
+            removeOnFail: { count: 20 },
+          },
+        );
+        this.logger.log(
+          `Weekly-digest sweep scheduled every ${digestMinutes} minute(s)`,
+        );
+      } catch (err) {
+        this.logger.error(
+          `Failed to schedule weekly-digest sweep: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    // Pass 15 (FR-NOTX-010): attendance-reminder scheduling sweep — the
+    // 30/10-min pre-close reminder producer had no caller since B6, so the
+    // reminder pipeline never fired. Enqueue-side jobId dedup + the dispatch
+    // worker's Redis flag make the repeats idempotent.
+    const reminderMinutes = this.config.get<number>(
+      'attendance.reminderScheduleSweepMinutes',
+      15,
+    );
+    if (!reminderMinutes || reminderMinutes <= 0) {
+      this.logger.log('Reminder-schedule sweep disabled (interval = 0)');
       return;
     }
     try {
       await this.queue.add(
-        JOB_TYPES.EVENT_CLEANUP_SWEEP,
+        JOB_TYPES.REMINDER_SCHEDULE_SWEEP,
         {},
         {
-          repeat: { every: eventCleanupMinutes * 60_000 },
+          repeat: { every: reminderMinutes * 60_000 },
           removeOnComplete: { count: 20 },
           removeOnFail: { count: 20 },
         },
       );
       this.logger.log(
-        `Event-cleanup sweep scheduled every ${eventCleanupMinutes} minute(s)`,
+        `Reminder-schedule sweep scheduled every ${reminderMinutes} minute(s)`,
       );
     } catch (err) {
       this.logger.error(
-        `Failed to schedule event-cleanup sweep: ${(err as Error).message}`,
+        `Failed to schedule reminder-schedule sweep: ${(err as Error).message}`,
       );
     }
   }

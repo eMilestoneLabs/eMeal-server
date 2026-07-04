@@ -50,6 +50,15 @@ export const JOB_TYPES = {
   // deactivate + hard-purge never ran. Rides the system-default queue like
   // the two sweeps above (worker branches on job name).
   EVENT_CLEANUP_SWEEP: 'event-cleanup-sweep',
+  // Pass 15 (FR-NOTX-010): weekly attendance summary digest — the last
+  // missing trigger in the notification set. Rides the system-default queue
+  // like the sweeps above (worker branches on job name).
+  WEEKLY_DIGEST_SWEEP: 'weekly-digest-sweep',
+  // Pass 15 (FR-NOTX-010): attendance reminder SCHEDULING sweep.
+  // scheduleAttendanceReminders (30/10-min pre-close pushes) existed since
+  // B6 but had NO production caller — the reminder pipeline was dormant.
+  // This sweep enqueues today's delayed dispatch jobs (jobId-deduped).
+  REMINDER_SCHEDULE_SWEEP: 'reminder-schedule-sweep',
 
   // analytics-queue
   AGGREGATE_DAILY: 'aggregate-daily',

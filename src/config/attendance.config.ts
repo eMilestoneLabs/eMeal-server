@@ -58,4 +58,21 @@ export default registerAs('attendance', () => ({
     process.env.BILLING_SUMMARY_CACHE_TTL_SECONDS ?? '60',
     10,
   ),
+  // Pass 15 (FR-NOTX-010): weekly attendance summary digest. The sweep runs
+  // every N minutes but each group fires at most once per digest day (Redis
+  // once-flag), when org-local time reaches digestHour on digestDay
+  // (0=Sunday … 6=Saturday). 0 sweep minutes disables the digest entirely.
+  weeklyDigestSweepMinutes: parseInt(
+    process.env.WEEKLY_DIGEST_SWEEP_MINUTES ?? '60',
+    10,
+  ),
+  weeklyDigestDay: parseInt(process.env.WEEKLY_DIGEST_DAY ?? '1', 10),
+  weeklyDigestHour: parseInt(process.env.WEEKLY_DIGEST_HOUR ?? '8', 10),
+  // Pass 15 (FR-NOTX-010): attendance-reminder scheduling sweep cadence.
+  // Enqueues today's 30/10-min pre-close reminder jobs; repeats are no-ops
+  // (BullMQ jobId dedup + the dispatch worker's Redis flag). 0 disables.
+  reminderScheduleSweepMinutes: parseInt(
+    process.env.REMINDER_SCHEDULE_SWEEP_MINUTES ?? '15',
+    10,
+  ),
 }));

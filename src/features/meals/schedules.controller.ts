@@ -167,12 +167,16 @@ export class SchedulesController {
     @Param('id') id: string,
     @CurrentUser() user: JwtPayload,
     @Req() req: Request,
+    // Pass 15 (FR-SCHX-003): optional { hide: true } = full unpublish —
+    // students stop seeing the week; snapshot retained for recovery.
+    @Body() body?: { hide?: boolean },
   ) {
     return this.schedulesService.revertToDraft(
       id,
       user.organizationId!,
       user.sub,
       req.requestId,
+      body?.hide === true,
     );
   }
 

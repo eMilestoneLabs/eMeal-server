@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import {
   MealScheduleEntity,
@@ -635,26 +639,66 @@ export class SchedulesRepository {
 
   // Issue 2: revert a published schedule back to draft (inverse of publish).
   // Additive — mirrors publish(); idempotent and org-isolated.
-  async revert(id: string, organizationId: string): Promise<MealScheduleEntity> {
-    // Issue 1: reverting to draft must NOT erase what students see. Keep
-    // publishedAt + publishedSnapshot intact (students keep reading the last
-    // published version); only clear the admin-UI isPublished flag so the admin
-    // can edit the live draft entries and re-publish.
+  async revert(
+    id: string,
+    organizationId: string,
+    hide = false,
+  ): Promise<MealScheduleEntity> {
+    // Issue 1 (default): reverting to draft must NOT erase what students see.
+    // Keep publishedAt + publishedSnapshot intact (students keep reading the
+    // last published version); only clear the admin-UI isPublished flag so
+    // the admin can edit the live draft entries and re-publish.
+    //
+    // Pass 15 (FR-SCHX-003, hide=true): full UNPUBLISH — also clear
+    // publishedAt so the student read path (gated on publishedAt != null)
+    // hides the week. publishedSnapshot is deliberately RETAINED in the row,
+    // so the last published state stays recoverable until the next publish.
     const result = await this.prisma.mealSchedule.updateMany({
       where: { id, organizationId },
-      data: { isPublished: false },
+      data: { isPublished: false, ...(hide ? { publishedAt: null } : {}) },
     });
     if (result.count === 0) throw new NotFoundException('Schedule not found');
     return this.findById(id, organizationId) as Promise<MealScheduleEntity>;
   }
 
-  async clone(sourceId: string, organizationId: string, targetWeekStart: Date): Promise<MealScheduleEntity> {
+  async clone(
+    sourceId: string,
+    organizationId: string,
+    targetWeekStart: Date,
+    replaceExisting = false,
+  ): Promise<MealScheduleEntity> {
     const source = await this.findById(sourceId, organizationId);
     if (!source) throw new NotFoundException('Source schedule not found');
 
     const offsetMs = targetWeekStart.getTime() - source.weekStart.getTime();
 
     return this.prisma.$transaction(async (tx) => {
+      // Pass 15 (FR-SCHX-005): the target week may already have a schedule
+      // (@@unique(groupId, weekStart) previously surfaced as a raw P2002/500).
+      // Reject explicitly unless the caller opted into replacement.
+      const existing = await tx.mealSchedule.findFirst({
+        where: {
+          groupId: source.groupId,
+          organizationId,
+          weekStart: targetWeekStart,
+        },
+        select: { id: true },
+      });
+      if (existing) {
+        if (!replaceExisting) {
+          throw new ConflictException({
+            message:
+              'A schedule already exists for the target week. Send replace: true to overwrite it.',
+            code: 'SCHEDULE_EXISTS',
+            errors: {
+              targetWeekStartDate: 'Target week already has a schedule',
+            },
+          });
+        }
+        // Entries cascade with the schedule row.
+        await tx.mealSchedule.delete({ where: { id: existing.id } });
+      }
+
       const newSchedule = await tx.mealSchedule.create({
         data: {
           organizationId,

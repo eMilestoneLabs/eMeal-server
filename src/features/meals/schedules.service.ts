@@ -385,8 +385,12 @@ export class SchedulesService {
     organizationId: string,
     adminId: string,
     requestId?: string,
+    // Pass 15 (FR-SCHX-003): hide=true fully unpublishes — students stop
+    // seeing the week; the snapshot stays recoverable in the row. Default
+    // keeps the legacy snapshot-stays-visible revert.
+    hide = false,
   ) {
-    const schedule = await this.schedulesRepo.revert(id, organizationId);
+    const schedule = await this.schedulesRepo.revert(id, organizationId, hide);
 
     this.audit.log({
       organizationId,
@@ -394,7 +398,11 @@ export class SchedulesService {
       targetId: id,
       targetType: 'MealSchedule',
       action: 'update',
-      metadata: { published: false, weekStartDate: schedule.weekStart.toISOString() },
+      metadata: {
+        published: false,
+        hiddenFromStudents: hide,
+        weekStartDate: schedule.weekStart.toISOString(),
+      },
       requestId,
     });
 
@@ -432,7 +440,13 @@ export class SchedulesService {
       });
     }
 
-    const cloned = await this.schedulesRepo.clone(sourceId, organizationId, targetWeekStart);
+    const cloned = await this.schedulesRepo.clone(
+      sourceId,
+      organizationId,
+      targetWeekStart,
+      // Pass 15 (FR-SCHX-005): explicit replace only — never silent overwrite.
+      dto.replace === true,
+    );
 
     this.audit.log({
       organizationId,
@@ -440,7 +454,11 @@ export class SchedulesService {
       targetId: cloned.id,
       targetType: 'MealSchedule',
       action: 'create',
-      metadata: { clonedFrom: sourceId, targetWeekStartDate: dto.targetWeekStartDate },
+      metadata: {
+        clonedFrom: sourceId,
+        targetWeekStartDate: dto.targetWeekStartDate,
+        replacedExisting: dto.replace === true,
+      },
       requestId,
     });
 

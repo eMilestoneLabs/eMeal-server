@@ -133,4 +133,13 @@ export class CloneScheduleDto {
    */
   @IsDateString()
   targetWeekStartDate: string;
+
+  /**
+   * Pass 15 (FR-SCHX-005): when the target week already has a schedule the
+   * clone is rejected with 409 SCHEDULE_EXISTS unless `replace: true` is sent
+   * — an explicit choice, never a silent overwrite.
+   */
+  @IsOptional()
+  @IsBoolean()
+  replace?: boolean;
 }
