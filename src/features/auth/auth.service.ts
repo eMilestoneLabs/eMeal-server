@@ -610,6 +610,27 @@ export class AuthService {
     // Find token record in DB
     const tokenRecord = await this.authRepo.findRefreshTokenByHash(tokenHash).catch(() => null);
 
+    // Rotation-reuse GRACE (mobile false-positive fix): when THIS exact token
+    // was rotated moments ago, its reappearance is almost always a retry after
+    // a lost response (flaky network / OS killed the app before the new pair
+    // was persisted) — not theft. Within the short grace window we continue
+    // the SAME family with a fresh pair instead of nuking it. Real theft — an
+    // old token replayed after the window — still kills the family below.
+    const graceActive = await this.redis
+      .exists(`auth:refresh:grace:${tokenHash}`)
+      .catch(() => false);
+
+    if ((!tokenRecord || tokenRecord.isRevoked) && graceActive) {
+      const user = await this.usersRepo.findById(userId);
+      if (!user || !user.isActive) {
+        throw new UnauthorizedException('Account not found or deactivated');
+      }
+      this.logger.warn(
+        `Refresh grace hit — rotation retry within window user=${userId} family=${family}`,
+      );
+      return this.issueTokensAndRespond(user, meta, family, tokenRecord?.id);
+    }
+
     if (!tokenRecord) {
       // Token not found — possible theft: a token from this family was reused
       // Revoke entire family to force re-login on all devices
@@ -622,6 +643,30 @@ export class AuthService {
     }
 
     if (tokenRecord.isRevoked) {
+      // Successor-usage rescue (works at ANY elapsed time, unlike the 90s
+      // Redis grace): if the successor issued when THIS token was rotated has
+      // NEVER been used, the client provably never received the rotation
+      // response (OS killed the app / network drop mid-flight). That is a lost
+      // response, not theft — retire the undelivered successor and continue
+      // the SAME family. If the successor WAS used, two parties hold tokens
+      // from one rotation = genuine fork → nuke below, exactly as before.
+      if (tokenRecord.replacedById && tokenRecord.expiresAt >= new Date()) {
+        const successor = await this.authRepo
+          .findRefreshTokenById(tokenRecord.replacedById)
+          .catch(() => null);
+        if (successor && !successor.usedAt && !successor.isRevoked) {
+          await this.authRepo.revokeRefreshToken(successor.id);
+          const user = await this.usersRepo.findById(userId);
+          if (!user || !user.isActive) {
+            throw new UnauthorizedException('Account not found or deactivated');
+          }
+          this.logger.warn(
+            `Refresh successor-rescue — undelivered rotation recovered user=${userId} family=${family}`,
+          );
+          return this.issueTokensAndRespond(user, meta, family, tokenRecord.id);
+        }
+      }
+
       // Revoked token reuse = theft detection
       await this.authRepo.revokeAllTokensByFamily(family);
       await this.redis.revokeFamily(family);
@@ -638,16 +683,25 @@ export class AuthService {
       });
     }
 
-    // Revoke the used token (rotation)
-    await this.authRepo.revokeRefreshToken(tokenRecord.id);
+    // Rotation: the used token is revoked + linked to its successor inside
+    // issueTokensAndRespond (markRefreshTokenRotated). Open the short Redis
+    // reuse-grace window as a fast path for immediate lost-response retries;
+    // the successor-usage check above covers retries at any later time.
+    const graceSeconds =
+      this.configService.get<number>('auth.refreshGraceSeconds') ?? 90;
+    if (graceSeconds > 0) {
+      await this.redis
+        .set(`auth:refresh:grace:${tokenHash}`, '1', graceSeconds)
+        .catch(() => undefined); // grace is best-effort, never blocks refresh
+    }
 
     const user = await this.usersRepo.findById(userId);
     if (!user || !user.isActive) {
       throw new UnauthorizedException('Account not found or deactivated');
     }
 
-    // Issue new token pair in the same family
-    return this.issueTokensAndRespond(user, meta, family);
+    // Issue new token pair in the same family, linking the rotated token
+    return this.issueTokensAndRespond(user, meta, family, tokenRecord.id);
   }
 
   // ── LOGOUT ─────────────────────────────────────────────────────────────────
@@ -693,6 +747,7 @@ export class AuthService {
     user: UserEntity,
     meta?: { userAgent?: string; ip?: string },
     existingFamily?: string,
+    rotatedFromId?: string,
   ) {
     const family = existingFamily ?? ulid();
     const expiresIn = this.configService.get<number>('jwt.accessExpiresIn') ?? 900;
@@ -721,7 +776,7 @@ export class AuthService {
     const tokenHash = createHash('sha256').update(refreshToken).digest('hex');
     const expiresAt = new Date(Date.now() + refreshExpiresIn * 1000);
 
-    await this.authRepo.createRefreshToken({
+    const created = await this.authRepo.createRefreshToken({
       userId: user.id,
       tokenHash,
       family,
@@ -729,6 +784,13 @@ export class AuthService {
       userAgent: meta?.userAgent,
       ipAddress: meta?.ip,
     });
+
+    // Rotation lineage: revoke the redeemed token and point it at its
+    // successor, so an undelivered successor can be recognized later
+    // (lost-response rescue) instead of tripping theft detection.
+    if (rotatedFromId && created?.id) {
+      await this.authRepo.markRefreshTokenRotated(rotatedFromId, created.id);
+    }
 
     // Track family in Redis
     await this.redis.addTokenToFamily(family, tokenHash, refreshExpiresIn);

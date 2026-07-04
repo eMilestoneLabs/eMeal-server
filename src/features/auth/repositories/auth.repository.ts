@@ -23,6 +23,22 @@ export class AuthRepository {
     return this.prisma.refreshToken.findUnique({ where: { tokenHash } });
   }
 
+  async findRefreshTokenById(id: string) {
+    return this.prisma.refreshToken.findUnique({ where: { id } });
+  }
+
+  /**
+   * Rotation bookkeeping: the token was redeemed (usedAt) and superseded by
+   * `replacedById`. A revoked token whose successor has usedAt = null was
+   * never delivered to the client — lost-response rescue, not theft.
+   */
+  async markRefreshTokenRotated(id: string, replacedById: string) {
+    return this.prisma.refreshToken.update({
+      where: { id },
+      data: { isRevoked: true, usedAt: new Date(), replacedById },
+    });
+  }
+
   async revokeRefreshToken(id: string) {
     return this.prisma.refreshToken.update({
       where: { id },

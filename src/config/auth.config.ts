@@ -25,4 +25,13 @@ export default registerAs('auth', () => ({
   // SEC-008 / AUTH-016: Mobile OTP is a future feature and must not be callable.
   // Flip to 'true' only when Mobile OTP is fully implemented + DLT-approved.
   mobileOtpEnabled: (process.env.MOBILE_OTP_ENABLED ?? 'false') === 'true',
+  // Refresh-rotation reuse grace (seconds). A JUST-rotated refresh token
+  // presented again within this window is treated as a lost-response retry
+  // (mobile networks / app kills), not theft: a fresh pair is issued in the
+  // same family instead of nuking it. 0 disables (strict rotation).
+  // Fixes the "frequent automatic logout on mobile" false-positive chain.
+  refreshGraceSeconds: parseInt(
+    process.env.AUTH_REFRESH_GRACE_SECONDS ?? '90',
+    10,
+  ),
 }));

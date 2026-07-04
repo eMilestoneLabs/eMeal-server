@@ -172,6 +172,11 @@ model RefreshToken {
   userAgent String?
   ipAddress String?
   createdAt DateTime @default(now())
+  // Rotation lineage (mobile lost-response rescue): a revoked token whose
+  // successor was NEVER used means the client never received the rotation
+  // response — rescued in-family instead of tripping theft detection.
+  usedAt       DateTime?
+  replacedById String?   // id of the successor token issued at rotation
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
