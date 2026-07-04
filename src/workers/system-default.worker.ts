@@ -78,6 +78,45 @@ export class SystemDefaultWorker extends WorkerHost {
     if (job.name === JOB_TYPES.SYSTEM_DEFAULT_SWEEP) return this.sweep();
     // Pass 11 (FR-VACX-006): vacation flag lifecycle on the same queue.
     if (job.name === JOB_TYPES.VACATION_SWEEP) return this.vacationSweep();
+    // Pass 14 (FR-EVT-054): expired-event cleanup fan-out on the same queue.
+    if (job.name === JOB_TYPES.EVENT_CLEANUP_SWEEP) {
+      return this.eventCleanupSweep();
+    }
+  }
+
+  // ── Pass 14 (FR-EVT-054/FR-EVTX-023) — expired-event cleanup fan-out ──────
+  //
+  // Enqueues the existing per-org CLEANUP_EXPIRED_EVENTS job for every org
+  // that has auto-delete events. cutoffDate is the UTC DATE (not instant) so
+  // the jobId dedupes to one cleanup per org per day regardless of sweep
+  // cadence; the cleanup itself is idempotent either way (LOOP-073).
+  private async eventCleanupSweep(): Promise<void> {
+    const orgs = await this.prisma.event.findMany({
+      where: { autoDeleteAfter7Days: true },
+      select: { organizationId: true },
+      distinct: ['organizationId'],
+    });
+    if (orgs.length === 0) return;
+
+    const cutoffDate = new Date().toISOString().slice(0, 10);
+    let enqueued = 0;
+    for (const { organizationId } of orgs) {
+      try {
+        await this.queue.enqueueExpiredEventCleanup({
+          organizationId,
+          cutoffDate,
+        });
+        enqueued++;
+      } catch (err) {
+        // One org failing must not starve the rest — next sweep retries.
+        this.logger.error(
+          `Event-cleanup enqueue failed org=${organizationId}: ${(err as Error).message}`,
+        );
+      }
+    }
+    this.logger.log(
+      `Event-cleanup sweep fanned out to ${enqueued}/${orgs.length} org(s) cutoff=${cutoffDate}`,
+    );
   }
 
   // ── Pass 11 (FR-VACX-006) — vacation flag lifecycle sweep ─────────────────

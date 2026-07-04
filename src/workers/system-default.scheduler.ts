@@ -64,24 +64,55 @@ export class SystemDefaultSweepScheduler implements OnApplicationBootstrap {
     );
     if (!vacationMinutes || vacationMinutes <= 0) {
       this.logger.log('Vacation sweep disabled (interval = 0)');
+    } else {
+      try {
+        await this.queue.add(
+          JOB_TYPES.VACATION_SWEEP,
+          {},
+          {
+            repeat: { every: vacationMinutes * 60_000 },
+            removeOnComplete: { count: 20 },
+            removeOnFail: { count: 20 },
+          },
+        );
+        this.logger.log(
+          `Vacation sweep scheduled every ${vacationMinutes} minute(s)`,
+        );
+      } catch (err) {
+        this.logger.error(
+          `Failed to schedule vacation sweep: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    // Pass 14 (FR-EVT-054/FR-EVTX-023): expired-event cleanup trigger. The
+    // per-org cleanup job existed since Phase B but nothing ever enqueued it —
+    // this sweep fans out one day-deduped job per org so the deactivate +
+    // 7-day hard-purge actually fires.
+    const eventCleanupMinutes = this.config.get<number>(
+      'attendance.eventCleanupSweepMinutes',
+      360,
+    );
+    if (!eventCleanupMinutes || eventCleanupMinutes <= 0) {
+      this.logger.log('Event-cleanup sweep disabled (interval = 0)');
       return;
     }
     try {
       await this.queue.add(
-        JOB_TYPES.VACATION_SWEEP,
+        JOB_TYPES.EVENT_CLEANUP_SWEEP,
         {},
         {
-          repeat: { every: vacationMinutes * 60_000 },
+          repeat: { every: eventCleanupMinutes * 60_000 },
           removeOnComplete: { count: 20 },
           removeOnFail: { count: 20 },
         },
       );
       this.logger.log(
-        `Vacation sweep scheduled every ${vacationMinutes} minute(s)`,
+        `Event-cleanup sweep scheduled every ${eventCleanupMinutes} minute(s)`,
       );
     } catch (err) {
       this.logger.error(
-        `Failed to schedule vacation sweep: ${(err as Error).message}`,
+        `Failed to schedule event-cleanup sweep: ${(err as Error).message}`,
       );
     }
   }

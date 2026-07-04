@@ -45,6 +45,11 @@ export const JOB_TYPES = {
   // system-default queue (both are low-frequency lifecycle materializations;
   // the worker branches on job name, so no new queue infrastructure).
   VACATION_SWEEP: 'vacation-sweep',
+  // Pass 14 (FR-EVT-054/FR-EVTX-023): fan-out trigger for expired-event
+  // cleanup — enqueueExpiredEventCleanup previously had NO caller, so the
+  // deactivate + hard-purge never ran. Rides the system-default queue like
+  // the two sweeps above (worker branches on job name).
+  EVENT_CLEANUP_SWEEP: 'event-cleanup-sweep',
 
   // analytics-queue
   AGGREGATE_DAILY: 'aggregate-daily',

@@ -44,6 +44,13 @@ export default registerAs('attendance', () => ({
     process.env.VACATION_SWEEP_MINUTES ?? '30',
     10,
   ),
+  // Pass 14 (FR-EVT-054): expired-event cleanup fan-out cadence. Per-org jobs
+  // are day-deduped (jobId embeds the UTC date), so a smaller interval only
+  // affects how soon after midnight the deactivate+purge fires. 0 disables.
+  eventCleanupSweepMinutes: parseInt(
+    process.env.EVENT_CLEANUP_SWEEP_MINUTES ?? '360',
+    10,
+  ),
   // Pass 12 (FR-BILLX-050): billing-summary read-cache TTL. Correctness is
   // version-guarded (any billing write orphans the cache instantly); the TTL
   // only bounds Redis memory for orphaned keys. 0 disables the read cache.
