@@ -26,6 +26,23 @@ import { QueryGroupsDto, QueryMembersDto } from './dto/query-groups.dto';
 import { ADMIN_ROLES } from '../../common/decorators/roles.decorator';
 import { RealtimeEventsService } from '../../realtime/services/realtime-events.service';
 
+/**
+ * Module 22 (FR-HG-020): guest-config columns that are nullable in the schema
+ * — an explicit `null` in a PATCH legitimately clears them back to their
+ * serializer default. The remaining (boolean) columns are NOT NULL; a null
+ * for those is ignored rather than passed to Prisma.
+ */
+const NULLABLE_GUEST_KEYS: ReadonlySet<string> = new Set([
+  'maxGuestsPerMemberPerMeal',
+  'maxGuestsPerMemberPerDay',
+  'guestPricingMode',
+  'guestAdultPrice',
+  'guestChildPrice',
+  'guestSurcharge',
+  'guestCutoffMinutesBeforeClose',
+  'guestAdvanceBookingDays',
+]);
+
 @Injectable()
 export class GroupsService {
   private readonly logger = new Logger(GroupsService.name);
@@ -254,7 +271,13 @@ export class GroupsService {
           'allowGuestWithoutHost',
           'billNoShowGuests',
         ] as const) {
-          if (gc[key] !== undefined) updateData[key] = gc[key];
+          const v = gc[key];
+          if (v === undefined) continue;
+          // Null is a legitimate "clear to default" ONLY for the nullable
+          // columns; the four booleans are NOT NULL in the schema — writing
+          // null would blow up in Prisma, so a null there is ignored.
+          if (v === null && !NULLABLE_GUEST_KEYS.has(key)) continue;
+          updateData[key] = v;
         }
 
         const effGuests =
@@ -273,12 +296,21 @@ export class GroupsService {
           });
         }
         // FR-HG-021: pricing-mode field requirements (final effective state).
+        // `!== undefined` (not `??`): an explicit null means "CLEAR this
+        // field" and must be validated as the true final state — with `??` a
+        // cleared price slipped past while the mode still required it.
         const effMode =
-          updateData.guestPricingMode ?? (existing as any).guestPricingMode;
+          updateData.guestPricingMode !== undefined
+            ? updateData.guestPricingMode
+            : (existing as any).guestPricingMode;
         const effAdult =
-          updateData.guestAdultPrice ?? (existing as any).guestAdultPrice;
+          updateData.guestAdultPrice !== undefined
+            ? updateData.guestAdultPrice
+            : (existing as any).guestAdultPrice;
         const effSurcharge =
-          updateData.guestSurcharge ?? (existing as any).guestSurcharge;
+          updateData.guestSurcharge !== undefined
+            ? updateData.guestSurcharge
+            : (existing as any).guestSurcharge;
         if (effMode === 'perGuestPrice' && (effAdult === null || effAdult === undefined)) {
           throw new UnprocessableEntityException({
             message: 'perGuestPrice mode requires guestAdultPrice',

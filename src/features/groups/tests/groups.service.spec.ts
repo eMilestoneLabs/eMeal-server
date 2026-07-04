@@ -352,6 +352,75 @@ describe('GroupsService', () => {
     });
   });
 
+  // ── GUEST-CONFIG VALIDATION (FR-HG-021 — golden fix) ─────────────────────
+  // An explicit null means "CLEAR this field": it must be validated as the
+  // true final state (the old `??` fallback let a cleared price slip past
+  // while the pricing mode still required it), and null must never be
+  // written to a NOT-NULL boolean column.
+
+  describe('updateGroup guest-config validation (FR-HG-021)', () => {
+    const guestGroup = new GroupEntity({
+      ...mockGroup,
+      guestAttendanceEnabled: true,
+      guestPricingMode: 'perGuestPrice',
+      guestAdultPrice: 80,
+      guestSurcharge: 20,
+    } as any);
+
+    it('rejects CLEARING guestAdultPrice while mode stays perGuestPrice (422 GUEST_PRICE_REQUIRED)', async () => {
+      groupsRepo.findById.mockResolvedValue(guestGroup);
+
+      await expect(
+        service.updateGroup('grp_01', 'org_01', 'usr_admin', {
+          mealConfig: { guestConfig: { guestAdultPrice: null } },
+        } as any),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'GUEST_PRICE_REQUIRED' }),
+      });
+      expect(groupsRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects clearing guestSurcharge while mode is flatSurcharge (422 GUEST_SURCHARGE_REQUIRED)', async () => {
+      groupsRepo.findById.mockResolvedValue(
+        new GroupEntity({ ...guestGroup, guestPricingMode: 'flatSurcharge' } as any),
+      );
+
+      await expect(
+        service.updateGroup('grp_01', 'org_01', 'usr_admin', {
+          mealConfig: { guestConfig: { guestSurcharge: null } },
+        } as any),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'GUEST_SURCHARGE_REQUIRED' }),
+      });
+    });
+
+    it('allows clearing a price when the SAME patch switches the mode away; null on a NOT-NULL boolean is ignored', async () => {
+      groupsRepo.findById.mockResolvedValue(guestGroup);
+      groupsRepo.update.mockResolvedValue(guestGroup);
+
+      await service.updateGroup('grp_01', 'org_01', 'usr_admin', {
+        mealConfig: {
+          guestConfig: {
+            guestPricingMode: 'sameAsMember',
+            guestAdultPrice: null,
+            guestRequiresApproval: null, // NOT NULL column — must be skipped
+          },
+        },
+      } as any);
+
+      expect(groupsRepo.update).toHaveBeenCalledWith(
+        'grp_01',
+        'org_01',
+        expect.objectContaining({
+          guestPricingMode: 'sameAsMember',
+          guestAdultPrice: null, // legitimate clear persists
+        }),
+      );
+      const written = (groupsRepo.update as jest.Mock).mock.calls[0][2];
+      expect('guestRequiresApproval' in written).toBe(false);
+    });
+  });
+
   describe('deleteGroup (soft)', () => {
     it('soft-deletes group without destroying member records', async () => {
       groupsRepo.findById.mockResolvedValue(mockGroup);
