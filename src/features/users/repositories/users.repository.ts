@@ -2,6 +2,10 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { UserEntity } from '../entities/user.entity';
 import { UserRole } from '@prisma/client';
+import {
+  getTodayInTimezone,
+  toUtcMidnight,
+} from '../../../common/utils/date.utils';
 
 @Injectable()
 export class UsersRepository {
@@ -44,34 +48,92 @@ export class UsersRepository {
   }
 
   /**
-   * Additive: auto-deactivate vacation mode when no approved request still
-   * covers today (the vacation has expired). Called on read (e.g. GET /auth/me)
-   * so the flag turns OFF without an app restart or a scheduled job. No-op when
-   * vacation is already off or an approved request still covers today (inclusive).
+   * Pass 11 (FR-VACX-006): read-time vacation flag sync, org-timezone-correct.
+   * Called on GET /users/me so the flag is right the moment the app opens —
+   * the lifecycle sweep covers users who never open the app.
+   *
+   * Rules (two vacation modes, FR-VACX-001):
+   *   • An approved request covers today (org time) and the flag is OFF →
+   *     flip ON (future-dated approval reaching its start date).
+   *   • The flag is ON, the user HAS approved requests, and none covers
+   *     today → flip OFF (auto-resume the day after endDate, org time).
+   *   • Pure-toggle users (no approved requests at all) are NEVER touched —
+   *     the instant toggle is its own mode and must not silently die.
    */
   async syncVacationExpiry(userId: string): Promise<void> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, isVacationMode: true },
+      select: {
+        id: true,
+        isVacationMode: true,
+        organization: { select: { timezone: true } },
+      },
     });
-    if (!user || !user.isVacationMode) return;
+    if (!user) return;
 
-    const now = new Date();
-    const todayUtc = new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
-    );
-    // endDate is inclusive (stored at UTC midnight) — still covered while
-    // endDate >= today.
-    const active = await this.prisma.vacationRequest.findFirst({
-      where: { userId, status: 'approved', endDate: { gte: todayUtc } },
+    const tz = user.organization?.timezone ?? 'Asia/Kolkata';
+    const todayUtc = toUtcMidnight(getTodayInTimezone(tz));
+
+    const covering = await this.prisma.vacationRequest.findFirst({
+      where: {
+        userId,
+        status: 'approved',
+        deletedAt: null,
+        startDate: { lte: todayUtc },
+        endDate: { gte: todayUtc },
+      },
       select: { id: true },
     });
-    if (!active) {
+
+    if (covering && !user.isVacationMode) {
       await this.prisma.user.update({
         where: { id: userId },
-        data: { isVacationMode: false },
+        data: { isVacationMode: true },
       });
+      return;
     }
+    if (!covering && user.isVacationMode) {
+      // Only request-driven flags auto-resume; toggle-mode flags stay.
+      const hasAnyApproved = await this.prisma.vacationRequest.findFirst({
+        where: { userId, status: 'approved', deletedAt: null },
+        select: { id: true },
+      });
+      if (hasAnyApproved) {
+        await this.prisma.user.update({
+          where: { id: userId },
+          data: { isVacationMode: false },
+        });
+      }
+    }
+  }
+
+  /**
+   * Pass 11 (FR-VACX-001): does any of the user's active groups require the
+   * dated-request approval flow (instant toggle disabled)?
+   */
+  async vacationRequiresApproval(userId: string): Promise<boolean> {
+    const hit = await this.prisma.groupMember.findFirst({
+      where: {
+        userId,
+        status: 'active',
+        group: { isActive: true, vacationRequiresApproval: true },
+      },
+      select: { groupId: true },
+    });
+    return !!hit;
+  }
+
+  /** fcmToken for fire-and-forget notifications (LOOP-041). */
+  async getPushTarget(
+    userId: string,
+  ): Promise<{ userId: string; fcmToken: string; organizationId: string | null } | null> {
+    const u = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { fcmToken: true, organizationId: true },
+    });
+    return u?.fcmToken
+      ? { userId, fcmToken: u.fcmToken, organizationId: u.organizationId }
+      : null;
   }
 
   async findByEmail(email: string, organizationId?: string): Promise<UserEntity | null> {

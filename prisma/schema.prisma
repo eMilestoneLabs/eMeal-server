@@ -234,6 +234,13 @@ model Group {
   preferencesEnabled   Boolean  @default(false)   // serialized as "preferencesEnabled"
   enabledPreferences   String[] @default([])       // lowercase: "veg","chicken","fish","mutton","egg","jain"
   vacationModeEnabled  Boolean  @default(true)
+  // SRS FR-VACX-001 (Pass 11): when ON, the instant self-service vacation
+  // toggle is disabled for members of this group — a dated VacationRequest
+  // with admin approval is required instead.
+  vacationRequiresApproval Boolean @default(false)
+  // SRS FR-BILLX-020 (Pass 12): day-of-month (1–28) the billing cycle starts.
+  // Null = calendar month. All period math uses the org timezone.
+  billingCycleStartDay Int?
   // Additive: when ON, meals carry a ₹ price; shown to students + used for billing/exports
   mealPricingEnabled   Boolean  @default(false)
   // SRS FR-TIME-005 (LOOP-090): per-group grace period (minutes) that extends
@@ -797,6 +804,12 @@ model VacationRequest {
   userName       String?   // denormalised display name (additive, optional)
   startDate      DateTime  // inclusive
   endDate        DateTime  // inclusive
+  // SRS FR-VACX-003 (Pass 11): optional meal-granular boundaries. On the
+  // start date only meals whose window opens AT/AFTER startSlotKey's open
+  // time are covered; on the end date only meals opening AT/BEFORE
+  // endSlotKey's open time. Null = whole boundary day covered.
+  startSlotKey   String?
+  endSlotKey     String?
   reason         String?
   status         String    @default("pending")
   reviewedBy     String?   // admin userId who approved/rejected
@@ -880,6 +893,34 @@ model BillingPeriod {
   @@index([groupId, status])
   @@index([groupId, periodStart, periodEnd])
   @@map("billing_periods")
+}
+
+/// SRS FR-BILLX-030/031/033 (Pass 12, LOOP-010, GAP-103) — append-only billing
+/// ledger. Every manual correction to a member's bill is a NEW immutable row
+/// (credit | debit | refund), never an in-place edit of a price snapshot
+/// (LOOP-004). Displayed balance = Σ(charges from snapshots) + Σ(signed
+/// ledger amounts). Debits (liability increases) obey consent asymmetry
+/// (FR-FAIR-001): they must reference an APPROVED correction request.
+/// Self-contained scalars — purely additive; no update/delete path exists.
+model BillingLedgerEntry {
+  id             String   @id @default(cuid())
+  organizationId String   // tenant isolation (from JWT, never client)
+  groupId        String
+  userId         String   // the member whose bill this entry adjusts
+  entryDate      DateTime // UTC midnight business date the entry posts to
+  type           String   // credit | debit | refund
+  amount         Int      // positive minor units; sign derived from type
+  reason         String   // mandatory human explanation
+  refRecordId    String?  // AttendanceRecord being corrected (optional)
+  refGuestId     String?  // MealGuest being corrected (optional)
+  refRequestId   String?  // APPROVED AttendanceCorrectionRequest (consent proof)
+  createdBy      String   // admin userId
+  createdAt      DateTime @default(now())
+
+  @@index([organizationId])
+  @@index([groupId, entryDate])
+  @@index([groupId, userId, entryDate])
+  @@map("billing_ledger_entries")
 }
 
 /// Module 33 (MIG-010) — Attendance Correction Request: the member-initiated

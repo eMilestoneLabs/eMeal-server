@@ -237,6 +237,15 @@ export class GroupsService {
       if (mc.preferencesEnabled !== undefined) updateData.preferencesEnabled = mc.preferencesEnabled;
       if (mc.enabledPreferences !== undefined) updateData.enabledPreferences = mc.enabledPreferences;
       if (mc.vacationModeEnabled !== undefined) updateData.vacationModeEnabled = mc.vacationModeEnabled;
+      // Pass 11 (FR-VACX-001): approval-gated vacation — audited below.
+      if (mc.vacationRequiresApproval !== undefined) {
+        updateData.vacationRequiresApproval = mc.vacationRequiresApproval;
+      }
+      // Pass 12 (FR-BILLX-020): billing cycle start day (null = calendar
+      // month) — validated 1–28 by the DTO, audited below (LOOP-033/GAP-021).
+      if (mc.billingCycleStartDay !== undefined) {
+        updateData.billingCycleStartDay = mc.billingCycleStartDay;
+      }
       if (mc.mealPricingEnabled !== undefined) updateData.mealPricingEnabled = mc.mealPricingEnabled;
       // SRS FR-TIME-005 (LOOP-090): per-group grace period — audited below.
       if (mc.attendanceGraceMinutes !== undefined) {
@@ -371,6 +380,9 @@ export class GroupsService {
       'dayWiseMealsEnabled',
       'preferencesEnabled',
       'vacationModeEnabled',
+      // Pass 11/12: policy + billing-cycle flips are high-impact (LOOP-033).
+      'vacationRequiresApproval',
+      'billingCycleStartDay',
       'mealPricingEnabled',
       // FR-TIME-005: grace changes are auditable (who/when/old→new).
       'attendanceGraceMinutes',
@@ -887,6 +899,9 @@ export class GroupsService {
       preferencesEnabled: group.preferencesEnabled,
       enabledPreferences: group.enabledPreferences,
       vacationModeEnabled: group.vacationModeEnabled,
+      // Pass 11 (FR-VACX-001) + Pass 12 (FR-BILLX-020).
+      vacationRequiresApproval: (group as any).vacationRequiresApproval ?? false,
+      billingCycleStartDay: (group as any).billingCycleStartDay ?? null,
       mealPricingEnabled: group.mealPricingEnabled,
       // SRS FR-TIME-005: per-group late-marking grace (minutes, 0 = none).
       attendanceGraceMinutes: group.attendanceGraceMinutes ?? 0,

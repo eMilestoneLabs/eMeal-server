@@ -89,6 +89,9 @@ export class GroupSerializer {
         preferencesEnabled: group.preferencesEnabled,
         enabledPreferences: group.enabledPreferences,
         vacationModeEnabled: group.vacationModeEnabled,
+        // Pass 11 (FR-VACX-001) + Pass 12 (FR-BILLX-020) — additive.
+        vacationRequiresApproval: group.vacationRequiresApproval ?? false,
+        billingCycleStartDay: group.billingCycleStartDay ?? null,
         mealPricingEnabled: group.mealPricingEnabled,
         // SRS FR-TIME-005: per-group late-marking grace (minutes, 0 = none).
         attendanceGraceMinutes: group.attendanceGraceMinutes ?? 0,

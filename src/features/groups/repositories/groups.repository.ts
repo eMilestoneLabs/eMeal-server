@@ -209,6 +209,8 @@ export class GroupsRepository {
       preferencesEnabled: boolean;
       enabledPreferences: string[];
       vacationModeEnabled: boolean;
+      vacationRequiresApproval: boolean;
+      billingCycleStartDay: number | null;
       mealPricingEnabled: boolean;
       attendanceGraceMinutes: number | null;
       attendanceDefault: string | null;

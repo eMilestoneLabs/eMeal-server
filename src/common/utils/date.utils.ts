@@ -112,6 +112,24 @@ export function getWindowState(
 }
 
 /**
+ * Current business date (YYYY-MM-DD) in an IANA timezone — Pass 11
+ * (FR-VACX-006): all vacation/billing "today" math is org-timezone-correct,
+ * never UTC (no off-by-one for Asia/Kolkata early mornings).
+ */
+export function getTodayInTimezone(timezone: string): string {
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date());
+  } catch {
+    return new Date().toISOString().slice(0, 10);
+  }
+}
+
+/**
  * Format a Date as a YYYY-MM-DD string in UTC.
  * Used for cache keys and export filenames.
  *

@@ -1,19 +1,36 @@
 import {
   Injectable,
+  Inject,
   NotFoundException,
   ConflictException,
   BadRequestException,
+  UnprocessableEntityException,
+  Optional,
+  Logger,
 } from '@nestjs/common';
 import { UsersRepository } from './repositories/users.repository';
 import { UserSerializer } from './serializers/user.serializer';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { StorageService } from '../../storage/storage.service';
+import { AuditService } from '../../audit/audit.service';
+import { QueueService } from '../../queue/queue.service';
 
 @Injectable()
 export class UsersService {
+  private readonly logger = new Logger(UsersService.name);
+
   constructor(
     private readonly usersRepo: UsersRepository,
     private readonly storage: StorageService,
+    // Pass 11 (FR-VACX-007/LOOP-041): audit + notify on vacation changes.
+    // Optional so existing TestingModules keep working unchanged. Explicit
+    // @Inject: `Class | null` erases design:paramtypes (Pass 7 gotcha).
+    @Optional()
+    @Inject(AuditService)
+    private readonly audit: AuditService | null = null,
+    @Optional()
+    @Inject(QueueService)
+    private readonly queue: QueueService | null = null,
   ) {}
 
   /**
@@ -123,8 +140,74 @@ export class UsersService {
     return UserSerializer.toResponse(updated);
   }
 
-  async setVacationMode(userId: string, enabled: boolean) {
+  /**
+   * Pass 11 (FR-VACX-001/007, LOOP-041).
+   *   • Self-service: when any of the member's groups sets
+   *     `vacationRequiresApproval`, the instant toggle is refused with a
+   *     machine code — a dated VacationRequest is the approval path.
+   *   • Admin-on-behalf: allowed (the admin IS the approver), but ALWAYS
+   *     audited and the member is notified so a forced vacation can never
+   *     silently deny meals (LOOP-041) — the member can contest.
+   */
+  async setVacationMode(
+    userId: string,
+    enabled: boolean,
+    actor?: { id: string; organizationId?: string | null },
+    requestId?: string,
+  ) {
+    const isSelf = !actor || actor.id === userId;
+
+    if (isSelf && enabled) {
+      const needsApproval = await this.usersRepo.vacationRequiresApproval(userId);
+      if (needsApproval) {
+        throw new UnprocessableEntityException({
+          message:
+            'Your group requires admin approval for vacation — submit a vacation request instead',
+          code: 'VACATION_REQUIRES_APPROVAL',
+          errors: { enabled: 'Create a dated vacation request for approval' },
+        });
+      }
+    }
+
     const user = await this.usersRepo.update(userId, { isVacationMode: enabled });
+
+    if (!isSelf && actor) {
+      if (actor.organizationId) {
+        this.audit?.log({
+          organizationId: actor.organizationId,
+          actorId: actor.id,
+          targetId: userId,
+          targetType: 'User',
+          action: 'update',
+          metadata: { isVacationMode: enabled, adminForced: true },
+          requestId,
+        });
+      }
+
+      // LOOP-041: never a silent admin-forced vacation.
+      void this.usersRepo
+        .getPushTarget(userId)
+        .then((t) =>
+          t && this.queue && t.organizationId
+            ? this.queue.enqueueBatchPush({
+                organizationId: t.organizationId,
+                recipients: [{ userId: t.userId, fcmToken: t.fcmToken }],
+                title: enabled
+                  ? 'Vacation mode turned ON by your admin'
+                  : 'Vacation mode turned OFF by your admin',
+                body: enabled
+                  ? 'You are marked on vacation and excluded from meals. Not right? You can turn it off in Settings or contact your admin.'
+                  : 'Your vacation was ended by your admin — meal tracking has resumed.',
+                route: '/settings',
+                data: { type: 'vacation_admin_forced', enabled: String(enabled) },
+              })
+            : undefined,
+        )
+        .catch((err) =>
+          this.logger.warn(`vacation push failed: ${(err as Error).message}`),
+        );
+    }
+
     return {
       isVacationMode: user.isVacationMode,
       message: enabled ? 'Vacation mode enabled' : 'Vacation mode disabled',

@@ -36,4 +36,19 @@ export default registerAs('attendance', () => ({
     process.env.ATTENDANCE_BULK_OVERRIDE_MAX_ROWS ?? '100',
     10,
   ),
+  // Pass 11 (FR-VACX-006): vacation lifecycle sweep cadence — activates
+  // future-dated approved vacations on their start date and auto-resumes
+  // tracking the day after endDate, org-timezone-correct, even for users who
+  // never open the app. 0 disables (read-time sync still applies).
+  vacationSweepMinutes: parseInt(
+    process.env.VACATION_SWEEP_MINUTES ?? '30',
+    10,
+  ),
+  // Pass 12 (FR-BILLX-050): billing-summary read-cache TTL. Correctness is
+  // version-guarded (any billing write orphans the cache instantly); the TTL
+  // only bounds Redis memory for orphaned keys. 0 disables the read cache.
+  billingSummaryCacheTtlSeconds: parseInt(
+    process.env.BILLING_SUMMARY_CACHE_TTL_SECONDS ?? '60',
+    10,
+  ),
 }));

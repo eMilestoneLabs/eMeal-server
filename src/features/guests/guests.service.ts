@@ -22,6 +22,7 @@ import {
   toUtcMidnight,
   getCurrentTimeInTimezone,
 } from '../../common/utils/date.utils';
+import { getVacationCoveredUserIds } from '../../common/utils/vacation-coverage.util';
 import {
   BookGuestsDto,
   UpdateGuestDto,
@@ -153,6 +154,9 @@ export class GuestsService {
     } catch (_) {
       /* best-effort — TTL covers the rest */
     }
+    // Pass 12 (FR-BILLX-050): guest charges feed bills — bump the billing
+    // read-cache version (O(1), fire-and-forget).
+    void this.billing?.bumpBillingVersion?.(groupId);
   }
 
   private isAdmin(role: string): boolean {
@@ -217,7 +221,8 @@ export class GuestsService {
       });
     }
 
-    // Host eligibility (FR-HG-043): active member, not blocked, not vacation.
+    // Host eligibility (FR-HG-043): active member, not blocked. The vacation
+    // check moved below — it is date/meal-scoped (FR-VACX-003/008).
     await this.assertEligibleHost(group.id, hostUserId);
 
     // Date bounds (FR-HG-040): today .. today + guestAdvanceBookingDays.
@@ -255,9 +260,34 @@ export class GuestsService {
     // FR-DISP-010: no billing writes into a finalized period.
     await this.assertPeriodOpen(organizationId, group.id, dateStr);
 
+    // FR-VACX-008 (Pass 11, slot-aware per FR-VACX-003): a host on vacation
+    // for THIS meal/date cannot host guests; on boundary days, meals outside
+    // the covered slots stay hostable. Approved dated requests govern; the
+    // instant toggle covers whole days.
+    const dateUtc = toUtcMidnight(dateStr);
+    const hostUser = await this.prisma.user.findUnique({
+      where: { id: hostUserId },
+      select: { isVacationMode: true },
+    });
+    const onVacation = await getVacationCoveredUserIds(this.prisma as any, {
+      organizationId,
+      groupId: group.id,
+      dateUtc,
+      mealOpenTime: meal.attendanceWindowOpen,
+      candidates: [
+        { userId: hostUserId, isVacationMode: hostUser?.isVacationMode === true },
+      ],
+    });
+    if (onVacation.has(hostUserId)) {
+      throw new ForbiddenException({
+        message: 'Guests cannot be hosted while on vacation mode',
+        code: 'HOST_ON_VACATION',
+        errors: { hostUserId: 'The host is on vacation for this meal' },
+      });
+    }
+
     // Host-present precondition (FR-HG-030) — same-day only; future-dated
     // bookings resolve via FR-HG-035 reconciliation when the host marks.
-    const dateUtc = toUtcMidnight(dateStr);
     if (!group.allowGuestWithoutHost && dateStr === todayStr) {
       const hostRecord = await this.prisma.attendanceRecord.findFirst({
         where: { organizationId, userId: hostUserId, mealId, attendanceDate: dateUtc },
@@ -881,16 +911,8 @@ export class GuestsService {
         errors: { hostUserId: 'Active membership required' },
       });
     }
-    const user = await this.prisma.user.findUnique({
-      where: { id: hostUserId },
-      select: { isVacationMode: true },
-    });
-    if (user?.isVacationMode) {
-      throw new ForbiddenException({
-        message: 'Guests cannot be hosted while on vacation mode',
-        errors: { hostUserId: 'Disable vacation mode first' },
-      });
-    }
+    // Vacation is validated in bookGuests — it is (date, meal)-scoped since
+    // Pass 11 (FR-VACX-003): boundary days block only the covered slots.
   }
 
   /** Effective window/price: published per-day entry overrides the master. */

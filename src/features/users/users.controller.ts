@@ -116,7 +116,11 @@ export class UsersController {
     @Body() dto: VacationModeDto,
   ) {
     this._assertSelfOrAdmin(user, userId);
-    return this.usersService.setVacationMode(userId, dto.enabled);
+    // Pass 11 (LOOP-041): admin-on-behalf changes are audited + notified.
+    return this.usersService.setVacationMode(userId, dto.enabled, {
+      id: user.sub,
+      organizationId: user.organizationId,
+    });
   }
 
   // ── /users/:userId/default-attendance ────────────────────────────────────

@@ -20,6 +20,10 @@ import {
   ReopenPeriodDto,
   QueryPeriodsDto,
 } from './dto/billing-period.dto';
+import {
+  CreateAdjustmentDto,
+  QueryAdjustmentsDto,
+} from './dto/billing-adjustment.dto';
 
 const ADMIN_ROLES = [
   'messManager',
@@ -61,6 +65,28 @@ export class BillingController {
     @Query() query: QueryPeriodsDto,
   ) {
     return this.billingService.listPeriods(user.organizationId!, query.groupId);
+  }
+
+  // ── Pass 12 (FR-BILLX-030/031): append-only adjustments ──────────────────
+
+  @Post('adjustments')
+  @HttpCode(HttpStatus.CREATED)
+  async createAdjustment(
+    @CurrentUser() user: { sub: string; organizationId: string },
+    @Body() dto: CreateAdjustmentDto,
+    @Req() req: any,
+  ) {
+    return this.billingService.createAdjustment(
+      user.sub, user.organizationId!, dto, req.requestId,
+    );
+  }
+
+  @Get('adjustments')
+  async listAdjustments(
+    @CurrentUser() user: { sub: string; organizationId: string },
+    @Query() query: QueryAdjustmentsDto,
+  ) {
+    return this.billingService.listAdjustments(user.organizationId!, query);
   }
 
   @Post('periods/:id/reopen')

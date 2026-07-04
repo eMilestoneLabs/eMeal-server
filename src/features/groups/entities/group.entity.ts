@@ -29,6 +29,10 @@ export class GroupEntity {
   preferencesEnabled: boolean;
   enabledPreferences: string[];
   vacationModeEnabled: boolean;
+  // Pass 11 (FR-VACX-001): dated-request approval replaces the instant toggle.
+  vacationRequiresApproval: boolean;
+  // Pass 12 (FR-BILLX-020): billing cycle start day (1–28; null = calendar month).
+  billingCycleStartDay: number | null;
   // Additive: ₹ pricing toggle
   mealPricingEnabled: boolean;
   // SRS FR-TIME-005: per-group late-marking grace (minutes). Null = 0.

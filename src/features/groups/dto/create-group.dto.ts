@@ -153,6 +153,24 @@ export class MealConfigDto {
   @IsBoolean()
   vacationModeEnabled?: boolean;
 
+  /**
+   * SRS FR-VACX-001 (Pass 11): when ON, members must use a dated vacation
+   * request (admin-approved) — the instant self-service toggle is disabled.
+   */
+  @IsOptional()
+  @IsBoolean()
+  vacationRequiresApproval?: boolean;
+
+  /**
+   * SRS FR-BILLX-020 (Pass 12): day-of-month the billing cycle starts (1–28).
+   * Null/omitted = calendar month. Period math uses the org timezone.
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(28)
+  billingCycleStartDay?: number;
+
   /** Additive: when ON, meals carry a ₹ price (master + per-day). */
   @IsOptional()
   @IsBoolean()

@@ -40,6 +40,7 @@ import {
   getCurrentTimeInTimezone,
   getWindowState,
 } from '../common/utils/date.utils';
+import { getVacationCoveredUserIds } from '../common/utils/vacation-coverage.util';
 
 function todayInTimezone(tz: string): string {
   return new Intl.DateTimeFormat('en-CA', {
@@ -74,8 +75,154 @@ export class SystemDefaultWorker extends WorkerHost {
   }
 
   async process(job: Job): Promise<void> {
-    if (job.name !== JOB_TYPES.SYSTEM_DEFAULT_SWEEP) return;
-    await this.sweep();
+    if (job.name === JOB_TYPES.SYSTEM_DEFAULT_SWEEP) return this.sweep();
+    // Pass 11 (FR-VACX-006): vacation flag lifecycle on the same queue.
+    if (job.name === JOB_TYPES.VACATION_SWEEP) return this.vacationSweep();
+  }
+
+  // ── Pass 11 (FR-VACX-006) — vacation flag lifecycle sweep ─────────────────
+  //
+  // Approved dated vacations drive isVacationMode deterministically even for
+  // users who never open the app (read-time sync covers the ones who do):
+  //   • activate: an approved request covers today (org timezone) → flag ON;
+  //   • resume:   flag ON, user HAS approved requests, none covers today →
+  //               flag OFF (the day after endDate, TZ-correct — ISSUE-5).
+  // Pure-toggle users (no approved requests) are never touched (FR-VACX-001).
+
+  private async vacationSweep(): Promise<void> {
+    const now = new Date();
+    // Candidate window: any request whose range could cover "today" in ANY
+    // timezone (±1 day of UTC now) — tiny, indexed.
+    const lo = new Date(now.getTime() - 2 * 86_400_000);
+    const hi = new Date(now.getTime() + 2 * 86_400_000);
+
+    const [flaggedUsers, activeRequests] = await Promise.all([
+      this.prisma.user.findMany({
+        where: { isVacationMode: true },
+        select: { id: true, organizationId: true },
+      }),
+      (this.prisma as any).vacationRequest.findMany({
+        where: {
+          status: 'approved',
+          deletedAt: null,
+          startDate: { lte: hi },
+          endDate: { gte: lo },
+        },
+        select: {
+          userId: true,
+          organizationId: true,
+          startDate: true,
+          endDate: true,
+        },
+      }) as Promise<
+        Array<{
+          userId: string;
+          organizationId: string;
+          startDate: Date;
+          endDate: Date;
+        }>
+      >,
+    ]);
+    if (!flaggedUsers.length && !activeRequests.length) return;
+
+    // Per-org "today" (UTC-midnight representation of the org business day).
+    const orgIds = new Set<string>();
+    for (const u of flaggedUsers) if (u.organizationId) orgIds.add(u.organizationId);
+    for (const r of activeRequests) orgIds.add(r.organizationId);
+    const orgs = await this.prisma.organization.findMany({
+      where: { id: { in: [...orgIds] } },
+      select: { id: true, timezone: true },
+    });
+    const todayByOrg = new Map<string, number>();
+    for (const o of orgs) {
+      todayByOrg.set(
+        o.id,
+        toUtcMidnight(todayInTimezone(o.timezone ?? 'Asia/Kolkata')).getTime(),
+      );
+    }
+
+    const coversToday = (r: { organizationId: string; startDate: Date; endDate: Date }) => {
+      const today = todayByOrg.get(r.organizationId);
+      return (
+        today !== undefined &&
+        r.startDate.getTime() <= today &&
+        r.endDate.getTime() >= today
+      );
+    };
+
+    // Activations: covered today but flag OFF.
+    const flaggedSet = new Set(flaggedUsers.map((u) => u.id));
+    const toActivate = new Map<string, string>(); // userId → orgId
+    for (const r of activeRequests) {
+      if (coversToday(r) && !flaggedSet.has(r.userId)) {
+        toActivate.set(r.userId, r.organizationId);
+      }
+    }
+
+    // Resumes: flag ON, has approved requests, none covering today. Users
+    // with NO approved requests in the candidate window may still have older
+    // ones — resolve per user with one batched query.
+    const coveredNow = new Set(
+      activeRequests.filter(coversToday).map((r) => r.userId),
+    );
+    const resumeCandidates = flaggedUsers.filter(
+      (u) => u.organizationId && !coveredNow.has(u.id) && !toActivate.has(u.id),
+    );
+    let toResume: Array<{ id: string; organizationId: string }> = [];
+    if (resumeCandidates.length) {
+      const withApproved: Array<{ userId: string }> = await (
+        this.prisma as any
+      ).vacationRequest.findMany({
+        where: {
+          userId: { in: resumeCandidates.map((u) => u.id) },
+          status: 'approved',
+          deletedAt: null,
+        },
+        select: { userId: true },
+        distinct: ['userId'],
+      });
+      const requestDriven = new Set(withApproved.map((r) => r.userId));
+      toResume = resumeCandidates.filter((u) =>
+        requestDriven.has(u.id),
+      ) as Array<{ id: string; organizationId: string }>;
+    }
+
+    if (toActivate.size) {
+      await this.prisma.user.updateMany({
+        where: { id: { in: [...toActivate.keys()] } },
+        data: { isVacationMode: true },
+      });
+    }
+    if (toResume.length) {
+      await this.prisma.user.updateMany({
+        where: { id: { in: toResume.map((u) => u.id) } },
+        data: { isVacationMode: false },
+      });
+    }
+
+    for (const [userId, orgId] of toActivate) {
+      this.audit.log({
+        organizationId: orgId,
+        targetId: userId,
+        targetType: 'User',
+        action: AuditAction.update,
+        metadata: { isVacationMode: true, reason: 'vacation sweep — approved range started (FR-VACX-006)' },
+      });
+    }
+    for (const u of toResume) {
+      this.audit.log({
+        organizationId: u.organizationId,
+        targetId: u.id,
+        targetType: 'User',
+        action: AuditAction.update,
+        metadata: { isVacationMode: false, reason: 'vacation sweep — approved range ended (FR-VACX-006)' },
+      });
+    }
+    if (toActivate.size || toResume.length) {
+      this.logger.log(
+        `Vacation sweep: activated=${toActivate.size} resumed=${toResume.length}`,
+      );
+    }
   }
 
   private async sweep(): Promise<void> {
@@ -189,6 +336,7 @@ export class SystemDefaultWorker extends WorkerHost {
         dateUtc,
         dateStr: todayStr,
         price: entry?.price != null ? entry.price : (meal.price ?? null),
+        openTime: open,
       });
     }
   }
@@ -200,6 +348,7 @@ export class SystemDefaultWorker extends WorkerHost {
     dateUtc: Date;
     dateStr: string;
     price: number | null;
+    openTime: string | null;
   }): Promise<void> {
     const { group, mealId, dateUtc, dateStr, price } = params;
 
@@ -225,11 +374,16 @@ export class SystemDefaultWorker extends WorkerHost {
         where: {
           groupId: group.id,
           status: 'active',
-          user: { isVacationMode: false },
         },
         select: {
           userId: true,
-          user: { select: { remindersEnabled: true, fcmToken: true } },
+          user: {
+            select: {
+              remindersEnabled: true,
+              fcmToken: true,
+              isVacationMode: true,
+            },
+          },
         },
       }),
       this.prisma.attendanceRecord.findMany({
@@ -238,10 +392,26 @@ export class SystemDefaultWorker extends WorkerHost {
       }),
     ]);
 
+    // Pass 11 (FR-VACX-003/012): vacation exclusion is REQUEST-AWARE and
+    // meal-granular — on a boundary day only the covered slots are exempt
+    // from auto-billing; toggle-mode vacations exempt the whole day. Approved
+    // requests govern even when the flag lags (never auto-bill a vacationer).
+    const onVacation = await getVacationCoveredUserIds(this.prisma as any, {
+      organizationId: group.organizationId,
+      groupId: group.id,
+      dateUtc,
+      mealOpenTime: params.openTime,
+      candidates: members.map((m) => ({
+        userId: m.userId,
+        isVacationMode: m.user.isVacationMode === true,
+      })),
+    });
+
     const already = new Set(existing.map((r) => r.userId));
     const eligible = members.filter(
       (m) =>
         !already.has(m.userId) &&
+        !onVacation.has(m.userId) &&
         // No reminder went out → only members who waived reminders are
         // auto-marked; the rest are neutralized (fail-safe, FR-TRUST-003).
         (reminderSent || m.user.remindersEnabled === false),

@@ -636,6 +636,7 @@ export class AttendanceRepository {
       userId: string;
       mealId: string;
       mealName: string;
+      slotKey: string;
       status: string;
       price: number | null;
       markedAt: Date | null;
@@ -670,7 +671,7 @@ export class AttendanceRepository {
           price: true,
           markedAt: true,
           attendanceDate: true,
-          meal: { select: { name: true, displayName: true } },
+          meal: { select: { name: true, displayName: true, slotKey: true } },
         },
       }),
     ]);
@@ -687,6 +688,7 @@ export class AttendanceRepository {
         userId: r.userId,
         mealId: r.mealId,
         mealName: r.meal?.displayName ?? r.meal?.name ?? '—',
+        slotKey: (r.meal as any)?.slotKey ?? 'general',
         status: r.status as string,
         price: r.price ?? null,
         markedAt: r.markedAt ?? null,

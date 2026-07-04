@@ -48,6 +48,24 @@ export class ExportsController {
     );
   }
 
+  // Pass 12 (FR-BILLX-024): per-member billing rollup export.
+  @Get('billing')
+  async exportBilling(
+    @CurrentUser() user: JwtPayload,
+    @Req() req: Request,
+    @Res() res: Response,
+    @Query() query: AttendanceExportQueryDto,
+  ) {
+    await this.exportsService.exportBilling(
+      user.sub,
+      user.organizationId!,
+      user.role,
+      query,
+      res,
+      req.headers['x-request-id'] as string,
+    );
+  }
+
   @Get('event-guests')
   async exportEventGuests(
     @CurrentUser() user: JwtPayload,

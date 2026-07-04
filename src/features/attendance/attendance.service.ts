@@ -25,6 +25,7 @@ import {
   getCurrentTimeInTimezone,
   isWithinWindow,
   getWindowState,
+  formatUtcDate,
   AttendanceWindowState,
 } from '../../common/utils/date.utils';
 import {
@@ -1486,10 +1487,60 @@ export class AttendanceService {
       });
     }
 
-    const toDate = query.toDate ? toUtcMidnight(query.toDate) : new Date();
-    const fromDate = query.fromDate
-      ? toUtcMidnight(query.fromDate)
+    // Pass 12: group policy in ONE query up front (guest policy + billing
+    // cycle + org timezone) — replaces the former mid-function lookup, so
+    // the hot path gains no extra query.
+    const groupPolicy = await this.prisma.group.findFirst({
+      where: { id: query.groupId, organizationId },
+      select: {
+        billNoShowGuests: true,
+        guestAttendanceEnabled: true,
+        billingCycleStartDay: true,
+        organization: { select: { timezone: true } },
+      },
+    });
+
+    // FR-BILLX-020/041: no explicit range → the group's CURRENT billing
+    // period in ORG TIME (cycle start day, or calendar month), replacing the
+    // arbitrary "last 30 days" default. Explicit ranges behave as before.
+    let fromStr = query.fromDate;
+    let toStr = query.toDate;
+    let periodSource: 'explicit' | 'cycle' = 'explicit';
+    if (!fromStr && !toStr) {
+      const tz = groupPolicy?.organization?.timezone ?? 'Asia/Kolkata';
+      const period = this.billing?.resolveCurrentPeriod?.(
+        getTodayInTimezone(tz),
+        (groupPolicy as any)?.billingCycleStartDay ?? null,
+      );
+      if (period) {
+        fromStr = period.fromDate;
+        toStr = period.toDate;
+        periodSource = 'cycle';
+      }
+    }
+    const toDate = toStr ? toUtcMidnight(toStr) : new Date();
+    const fromDate = fromStr
+      ? toUtcMidnight(fromStr)
       : new Date(toDate.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+    // FR-BILLX-050: version-keyed read cache. Every billing-relevant write
+    // bumps the group version, orphaning all cached ranges instantly; the
+    // TTL (env BILLING_SUMMARY_CACHE_TTL_SECONDS, 0 = disabled) only bounds
+    // Redis memory for orphaned keys.
+    const summaryTtl = this.config.get<number>(
+      'attendance.billingSummaryCacheTtlSeconds',
+      60,
+    );
+    const ver = (await this.billing?.getBillingVersion?.(query.groupId)) ?? '0';
+    const cacheKey = `bill:sum:${organizationId}:${query.groupId}:${ver}:${formatUtcDate(fromDate)}:${formatUtcDate(toDate)}`;
+    if (summaryTtl > 0) {
+      try {
+        const hit = await this.redis.get(cacheKey);
+        if (hit) return JSON.parse(hit);
+      } catch {
+        /* cache is best-effort */
+      }
+    }
 
     const { members, records } = await this.attendanceRepo.getBillingData(
       query.groupId,
@@ -1504,6 +1555,7 @@ export class AttendanceService {
         present: number;
         skipped: number;
         absent: number;
+        vacation: number;
         totalBill: number;
         lastActivity: Date | null;
       }
@@ -1512,16 +1564,20 @@ export class AttendanceService {
       string,
       { mealName: string; revenue: number; presentCount: number }
     >();
+    // Pass 12 (FR-BILLX-021): per-slot rollup for the summary contract.
+    const bySlot = new Map<string, { presentCount: number; revenue: number }>();
 
     let revenue = 0;
     let presentMeals = 0;
     let skippedMeals = 0;
     let absentMeals = 0;
+    // FR-BILLX-012/021: vacation days reported separately from absences.
+    let vacationDays = 0;
 
     for (const r of records) {
       const u =
         byUser.get(r.userId) ??
-        { present: 0, skipped: 0, absent: 0, totalBill: 0, lastActivity: null };
+        { present: 0, skipped: 0, absent: 0, vacation: 0, totalBill: 0, lastActivity: null };
 
       if (r.status === 'present') {
         const p = r.price ?? 0;
@@ -1536,12 +1592,20 @@ export class AttendanceService {
         mb.presentCount += 1;
         mb.mealName = r.mealName;
         byMeal.set(r.mealId, mb);
+        const slotKey = (r as any).slotKey ?? 'general';
+        const sb = bySlot.get(slotKey) ?? { presentCount: 0, revenue: 0 };
+        sb.presentCount += 1;
+        sb.revenue += p;
+        bySlot.set(slotKey, sb);
       } else if (r.status === 'skipped') {
         u.skipped += 1;
         skippedMeals += 1;
       } else if (r.status === 'absent') {
         u.absent += 1;
         absentMeals += 1;
+      } else if (r.status === 'onVacation') {
+        u.vacation += 1;
+        vacationDays += 1;
       }
 
       if (r.markedAt && (!u.lastActivity || r.markedAt > u.lastActivity)) {
@@ -1555,37 +1619,45 @@ export class AttendanceService {
     // groupBy query — separated from member charges, never conflated.
     let guestByHost = new Map<string, { guestCount: number; guestAmount: number }>();
     let guestRevenue = 0;
-    if (this.guests) {
-      const groupPolicy = await this.prisma.group.findFirst({
-        where: { id: query.groupId, organizationId },
-        select: { billNoShowGuests: true, guestAttendanceEnabled: true },
-      });
-      if (groupPolicy?.guestAttendanceEnabled) {
-        guestByHost = await this.guests.getGuestBillingByHost(
-          organizationId,
-          query.groupId,
-          fromDate,
-          toDate,
-          groupPolicy.billNoShowGuests ?? true,
-        );
-        for (const g of guestByHost.values()) guestRevenue += g.guestAmount;
-      }
+    if (this.guests && groupPolicy?.guestAttendanceEnabled) {
+      guestByHost = await this.guests.getGuestBillingByHost(
+        organizationId,
+        query.groupId,
+        fromDate,
+        toDate,
+        groupPolicy.billNoShowGuests ?? true,
+      );
+      for (const g of guestByHost.values()) guestRevenue += g.guestAmount;
     }
+
+    // Pass 12 (FR-BILLX-030/043): signed append-only ledger adjustments —
+    // balance = Σ(price snapshots) + Σ(guest snapshots) + Σ(adjustments).
+    const adjustmentsByUser =
+      (await this.billing?.sumAdjustmentsByUser?.(
+        organizationId,
+        query.groupId,
+        fromDate,
+        toDate,
+      )) ?? new Map<string, number>();
+    let adjustmentsTotal = 0;
+    for (const v of adjustmentsByUser.values()) adjustmentsTotal += v;
 
     const memberMeta = new Map(members.map((m) => [m.userId, m]));
     const allUserIds = new Set<string>([
       ...members.map((m) => m.userId),
       ...byUser.keys(),
       ...guestByHost.keys(),
+      ...adjustmentsByUser.keys(),
     ]);
 
     const memberList = [...allUserIds]
       .map((uid) => {
         const agg =
           byUser.get(uid) ??
-          { present: 0, skipped: 0, absent: 0, totalBill: 0, lastActivity: null };
+          { present: 0, skipped: 0, absent: 0, vacation: 0, totalBill: 0, lastActivity: null };
         const meta = memberMeta.get(uid);
         const guest = guestByHost.get(uid) ?? { guestCount: 0, guestAmount: 0 };
+        const adjustments = adjustmentsByUser.get(uid) ?? 0;
         return {
           userId: uid,
           userName: meta?.name ?? uid,
@@ -1596,9 +1668,14 @@ export class AttendanceService {
           presentCount: agg.present,
           skippedCount: agg.skipped,
           absentCount: agg.absent,
+          // FR-BILLX-012: vacation reported separately from absences.
+          vacationDays: agg.vacation,
           // FR-HG-053: guest charges itemised separately from member charges.
           guestCount: guest.guestCount,
           guestAmount: guest.guestAmount,
+          // FR-BILLX-030/031: signed ledger total + the resulting net bill.
+          adjustmentsTotal: adjustments,
+          netBill: agg.totalBill + guest.guestAmount + adjustments,
           lastActivity: agg.lastActivity ? agg.lastActivity.toISOString() : null,
         };
       })
@@ -1617,7 +1694,23 @@ export class AttendanceService {
       }))
       .sort((a, b) => b.revenue - a.revenue);
 
-    return {
+    // Pass 12 (FR-BILLX-021): per-slot rollup, revenue-descending.
+    const slotBreakdown = [...bySlot.entries()]
+      .map(([slotKey, v]) => ({
+        slotKey,
+        presentCount: v.presentCount,
+        revenue: v.revenue,
+      }))
+      .sort((a, b) => b.revenue - a.revenue);
+
+    const response = {
+      // FR-BILLX-020: which period this summary covers and why.
+      period: {
+        fromDate: formatUtcDate(fromDate),
+        toDate: formatUtcDate(toDate),
+        cycleStartDay: (groupPolicy as any)?.billingCycleStartDay ?? null,
+        source: periodSource,
+      },
       summary: {
         revenue,
         memberCount,
@@ -1627,10 +1720,26 @@ export class AttendanceService {
         averageBill,
         // Module 22 (FR-HG-053): guest component surfaced separately.
         guestRevenue,
+        // Pass 12: ledger + vacation transparency (FR-BILLX-030/012).
+        adjustmentsTotal,
+        netRevenue: revenue + adjustmentsTotal,
+        vacationDays,
       },
       mealBreakdown,
+      slotBreakdown,
       members: memberList,
     };
+
+    // FR-BILLX-050: cache under the current billing version (configurable TTL).
+    if (summaryTtl > 0) {
+      try {
+        await this.redis.set(cacheKey, JSON.stringify(response), summaryTtl);
+      } catch {
+        /* cache is best-effort */
+      }
+    }
+
+    return response;
   }
 
   // ── Billing series (analytics charts, admin) ──────────────────────────────
@@ -1720,6 +1829,10 @@ export class AttendanceService {
     }
 
     await this.redis.del(...keysToDelete);
+
+    // Pass 12 (FR-BILLX-050): any attendance change invalidates the billing
+    // read-cache in O(1) via the group's version key (fire-and-forget).
+    void this.billing?.bumpBillingVersion?.(groupId);
   }
 
   private emitAttendanceUpdated(

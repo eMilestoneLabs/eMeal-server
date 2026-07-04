@@ -82,6 +82,9 @@ describe('GuestsService (Module 22)', () => {
         findFirst: jest.fn().mockResolvedValue({ status: 'present' }),
       },
       scheduleEntry: { findFirst: jest.fn().mockResolvedValue(null) },
+      // Pass 11 (FR-VACX-003): slot-aware vacation coverage — no approved
+      // dated requests by default, so the isVacationMode flag governs.
+      vacationRequest: { findMany: jest.fn().mockResolvedValue([]) },
       mealGuest: {
         findFirst: jest.fn(),
         findMany: jest.fn().mockResolvedValue([]),

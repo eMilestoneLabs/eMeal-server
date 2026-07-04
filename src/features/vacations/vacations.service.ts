@@ -1,14 +1,22 @@
 import {
   Injectable,
+  Inject,
   Logger,
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  UnprocessableEntityException,
+  Optional,
 } from '@nestjs/common';
 import { VacationRequestsRepository } from './repositories/vacation-requests.repository';
 import { VacationRequestSerializer } from './serializers/vacation-request.serializer';
 import { AuditService } from '../../audit/audit.service';
+import { QueueService } from '../../queue/queue.service';
 import { ADMIN_ROLES } from '../../common/decorators/roles.decorator';
+import {
+  getTodayInTimezone,
+  toUtcMidnight,
+} from '../../common/utils/date.utils';
 import { CreateVacationRequestDto } from './dto/create-vacation-request.dto';
 import { QueryVacationRequestDto } from './dto/query-vacation-request.dto';
 import { ReviewVacationRequestDto } from './dto/review-vacation-request.dto';
@@ -38,10 +46,49 @@ export class VacationsService {
   constructor(
     private readonly repo: VacationRequestsRepository,
     private readonly audit: AuditService,
+    // Fire-and-forget member notifications (FR-VACX-007) — optional so the
+    // module works (and tests run) without queue infrastructure. Explicit
+    // @Inject: `Class | null` erases design:paramtypes (Pass 7 gotcha).
+    @Optional()
+    @Inject(QueueService)
+    private readonly queue: QueueService | null = null,
   ) {}
 
   private isAdmin(role: string): boolean {
     return (ADMIN_ROLES as readonly string[]).includes(role);
+  }
+
+  /** Today (UTC-midnight Date) in the org's timezone — FR-VACX-006. */
+  private async orgToday(organizationId: string): Promise<Date> {
+    const tz = await this.repo.getOrgTimezone(organizationId);
+    return toUtcMidnight(getTodayInTimezone(tz));
+  }
+
+  /** Fire-and-forget push to the affected member — never blocks the response. */
+  private notifyMember(
+    organizationId: string,
+    userId: string,
+    title: string,
+    body: string,
+  ): void {
+    if (!this.queue) return;
+    void this.repo
+      .getUserPush(userId)
+      .then((r) =>
+        r
+          ? this.queue!.enqueueBatchPush({
+              organizationId,
+              recipients: [r],
+              title,
+              body,
+              route: '/settings',
+              data: { type: 'vacation_update' },
+            })
+          : undefined,
+      )
+      .catch((err) =>
+        this.logger.warn(`vacation push failed: ${(err as Error).message}`),
+      );
   }
 
   async createRequest(
@@ -58,6 +105,53 @@ export class VacationsService {
         errors: { endDate: 'endDate must be on or after startDate' },
       });
     }
+
+    // FR-VACX-002 (LOOP-040): vacation is FORWARD-ONLY — it can never cover
+    // already-consumed or finalized days, so back-dating cannot erase bills.
+    // "Today" is the org business day, not UTC (FR-VACX-006).
+    const todayUtc = await this.orgToday(organizationId);
+    if (startDate.getTime() < todayUtc.getTime()) {
+      throw new UnprocessableEntityException({
+        message: 'Vacation cannot start in the past',
+        code: 'VACATION_PAST_DATES',
+        errors: {
+          startDate: `Vacation is forward-only — earliest start is today (${todayUtc
+            .toISOString()
+            .slice(0, 10)})`,
+        },
+      });
+    }
+    const RANGE_CAP_DAYS = 365;
+    const rangeDays =
+      (endDate.getTime() - startDate.getTime()) / 86_400_000 + 1;
+    if (rangeDays > RANGE_CAP_DAYS) {
+      throw new UnprocessableEntityException({
+        message: 'Vacation range too large',
+        code: 'VACATION_RANGE_TOO_LARGE',
+        errors: { endDate: `Maximum ${RANGE_CAP_DAYS} days per request` },
+      });
+    }
+
+    // FR-VACX-001: reject-on-overlap policy — one request governs a date.
+    const overlap = await this.repo.findOverlapping(
+      userId,
+      organizationId,
+      dto.groupId ?? null,
+      startDate,
+      endDate,
+    );
+    if (overlap) {
+      throw new UnprocessableEntityException({
+        message: 'An overlapping vacation request already exists',
+        code: 'VACATION_OVERLAP',
+        errors: {
+          startDate: `Overlaps your ${overlap.status} request ${overlap.startDate
+            .toISOString()
+            .slice(0, 10)} – ${overlap.endDate.toISOString().slice(0, 10)}`,
+        },
+      });
+    }
+
     const userName = await this.repo.getUserName(userId);
     const created = await this.repo.create({
       organizationId,
@@ -66,6 +160,9 @@ export class VacationsService {
       userName,
       startDate,
       endDate,
+      // FR-VACX-003: meal-granular boundaries (lowercase slot keys).
+      startSlotKey: dto.startSlotKey?.trim().toLowerCase() || null,
+      endSlotKey: dto.endSlotKey?.trim().toLowerCase() || null,
       reason: dto.reason ?? null,
     });
 
@@ -75,7 +172,12 @@ export class VacationsService {
       targetId: created.id,
       targetType: 'VacationRequest',
       action: 'create',
-      metadata: { startDate: dto.startDate, endDate: dto.endDate },
+      metadata: {
+        startDate: dto.startDate,
+        endDate: dto.endDate,
+        ...(dto.startSlotKey ? { startSlotKey: dto.startSlotKey } : {}),
+        ...(dto.endSlotKey ? { endSlotKey: dto.endSlotKey } : {}),
+      },
       requestId,
     });
 
@@ -138,8 +240,28 @@ export class VacationsService {
       reviewedAt: new Date(),
       reviewNote: dto.note ?? null,
     });
-    // Additive: turn the member's vacation mode ON.
-    await this.repo.setUserVacation(existing.userId, organizationId, true);
+
+    // FR-VACX-006: the flag mirrors the approved RANGE, TZ-correct — a
+    // future-dated approval does NOT flip vacation on today; the lifecycle
+    // sweep (and read-time sync) activates it on the start date in org time.
+    const todayUtc = await this.orgToday(organizationId);
+    const coversToday =
+      existing.startDate.getTime() <= todayUtc.getTime() &&
+      existing.endDate.getTime() >= todayUtc.getTime();
+    if (coversToday) {
+      await this.repo.setUserVacation(existing.userId, organizationId, true);
+    }
+
+    // FR-VACX-004 (LOOP-046): overlapping explicit Present marks are KEPT
+    // (a member's action is never silently discarded) and the conflict is
+    // surfaced to both admin (response) and member (push).
+    const conflicts = await this.repo.findPresentConflicts(
+      existing.userId,
+      organizationId,
+      existing.groupId,
+      existing.startDate,
+      existing.endDate,
+    );
 
     this.audit.log({
       organizationId,
@@ -147,11 +269,28 @@ export class VacationsService {
       targetId: id,
       targetType: 'VacationRequest',
       action: 'update',
-      metadata: { status: 'approved' },
+      metadata: {
+        status: 'approved',
+        activatedNow: coversToday,
+        ...(conflicts.length > 0 ? { presentConflicts: conflicts.length } : {}),
+      },
       requestId,
     });
 
-    return VacationRequestSerializer.toResponse(updated);
+    this.notifyMember(
+      organizationId,
+      existing.userId,
+      'Vacation approved',
+      conflicts.length > 0
+        ? `Your vacation was approved. Note: ${conflicts.length} day(s) you already marked Present stay billed as marked.`
+        : 'Your vacation request was approved.',
+    );
+
+    return {
+      ...VacationRequestSerializer.toResponse(updated),
+      // Additive: keep-Present conflicts for the admin UI (FR-VACX-004).
+      conflicts,
+    };
   }
 
   async reject(
@@ -184,6 +323,15 @@ export class VacationsService {
       metadata: { status: 'rejected' },
       requestId,
     });
+
+    this.notifyMember(
+      organizationId,
+      existing.userId,
+      'Vacation request rejected',
+      dto.note
+        ? `Your vacation request was rejected: ${dto.note}`
+        : 'Your vacation request was rejected by your admin.',
+    );
 
     return VacationRequestSerializer.toResponse(updated);
   }
@@ -218,9 +366,19 @@ export class VacationsService {
       reviewedAt: new Date(),
       reviewNote: dto.note ?? existing.reviewNote,
     });
-    // If an approved vacation is cancelled, turn the member's flag OFF.
+    // If an approved vacation is cancelled, resync the flag: OFF unless some
+    // OTHER approved request still covers today in org time (FR-VACX-006).
     if (wasApproved) {
-      await this.repo.setUserVacation(existing.userId, organizationId, false);
+      const todayUtc = await this.orgToday(organizationId);
+      const stillCovered = await this.repo.hasApprovedCovering(
+        existing.userId,
+        organizationId,
+        todayUtc,
+        id,
+      );
+      if (!stillCovered) {
+        await this.repo.setUserVacation(existing.userId, organizationId, false);
+      }
     }
 
     this.audit.log({

@@ -41,6 +41,10 @@ export const JOB_TYPES = {
   DISPATCH_REMINDER: 'dispatch-reminder',
   // Pass 7 (FR-TRUST-001): opt-out group system-default materialization
   SYSTEM_DEFAULT_SWEEP: 'system-default-sweep',
+  // Pass 11 (FR-VACX-006): vacation flag lifecycle sweep — rides the
+  // system-default queue (both are low-frequency lifecycle materializations;
+  // the worker branches on job name, so no new queue infrastructure).
+  VACATION_SWEEP: 'vacation-sweep',
 
   // analytics-queue
   AGGREGATE_DAILY: 'aggregate-daily',

@@ -34,25 +34,54 @@ export class SystemDefaultSweepScheduler implements OnApplicationBootstrap {
     );
     if (!everyMinutes || everyMinutes <= 0) {
       this.logger.log('System-default sweep disabled (interval = 0)');
+    } else {
+      try {
+        await this.queue.add(
+          JOB_TYPES.SYSTEM_DEFAULT_SWEEP,
+          {},
+          {
+            repeat: { every: everyMinutes * 60_000 },
+            removeOnComplete: { count: 20 },
+            removeOnFail: { count: 20 },
+          },
+        );
+        this.logger.log(
+          `System-default sweep scheduled every ${everyMinutes} minute(s)`,
+        );
+      } catch (err) {
+        // Never block app startup on queue availability.
+        this.logger.error(
+          `Failed to schedule system-default sweep: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    // Pass 11 (FR-VACX-006): vacation flag lifecycle sweep — same queue,
+    // distinct repeatable job. Registration is idempotent across the cluster.
+    const vacationMinutes = this.config.get<number>(
+      'attendance.vacationSweepMinutes',
+      30,
+    );
+    if (!vacationMinutes || vacationMinutes <= 0) {
+      this.logger.log('Vacation sweep disabled (interval = 0)');
       return;
     }
     try {
       await this.queue.add(
-        JOB_TYPES.SYSTEM_DEFAULT_SWEEP,
+        JOB_TYPES.VACATION_SWEEP,
         {},
         {
-          repeat: { every: everyMinutes * 60_000 },
+          repeat: { every: vacationMinutes * 60_000 },
           removeOnComplete: { count: 20 },
           removeOnFail: { count: 20 },
         },
       );
       this.logger.log(
-        `System-default sweep scheduled every ${everyMinutes} minute(s)`,
+        `Vacation sweep scheduled every ${vacationMinutes} minute(s)`,
       );
     } catch (err) {
-      // Never block app startup on queue availability.
       this.logger.error(
-        `Failed to schedule system-default sweep: ${(err as Error).message}`,
+        `Failed to schedule vacation sweep: ${(err as Error).message}`,
       );
     }
   }

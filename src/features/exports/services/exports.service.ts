@@ -145,6 +145,184 @@ export class ExportsService {
     }
   }
 
+  // ── BILLING ROLLUP EXPORT (Pass 12, FR-BILLX-024) ─────────────────────────
+
+  /**
+   * Per-member billing rollup for a group + range: meals consumed, snapshot
+   * amounts, guest charges, signed ledger adjustments, net total — the same
+   * append-only arithmetic as /attendance/billing-summary (FR-BILLX-043:
+   * export reconciles exactly with the API figures). Four indexed aggregate
+   * queries — no per-member N+1, no row-count risk.
+   */
+  async exportBilling(
+    adminId: string,
+    organizationId: string,
+    role: string,
+    dto: AttendanceExportQueryDto,
+    res: Response,
+    requestId?: string,
+  ): Promise<void> {
+    this.assertAdmin(role);
+
+    const group = await this.prisma.group.findFirst({
+      where: { id: dto.groupId, organizationId },
+      select: { id: true, name: true, billNoShowGuests: true },
+    });
+    if (!group) {
+      throw new NotFoundException({
+        message: 'Group not found',
+        errors: { groupId: 'Group does not exist in your organization' },
+      });
+    }
+
+    const fromDate = parseLocalDate(dto.fromDate);
+    const toDate = parseLocalDate(dto.toDate);
+    this.validateDateRange(fromDate, toDate);
+    const format = dto.format ?? 'csv';
+
+    const recordWhere = {
+      organizationId,
+      groupId: dto.groupId,
+      attendanceDate: { gte: fromDate, lte: toDate },
+    };
+    const guestStatuses = group.billNoShowGuests
+      ? ['booked', 'no_show']
+      : ['booked'];
+
+    const [members, statusAgg, guestAgg, ledgerAgg] = await Promise.all([
+      this.prisma.groupMember.findMany({
+        where: { groupId: dto.groupId, status: 'active' },
+        include: {
+          user: { select: { name: true, email: true, phone: true } },
+        },
+      }),
+      this.prisma.attendanceRecord.groupBy({
+        by: ['userId', 'status'],
+        where: recordWhere,
+        _count: { _all: true },
+        _sum: { price: true },
+      }),
+      this.prisma.mealGuest.groupBy({
+        by: ['hostUserId'],
+        where: {
+          organizationId,
+          groupId: dto.groupId,
+          attendanceDate: { gte: fromDate, lte: toDate },
+          status: { in: guestStatuses },
+          pendingApproval: false,
+        },
+        _count: { _all: true },
+        _sum: { priceSnapshot: true },
+      }),
+      (this.prisma as any).billingLedgerEntry.groupBy({
+        by: ['userId', 'type'],
+        where: {
+          organizationId,
+          groupId: dto.groupId,
+          entryDate: { gte: fromDate, lte: toDate },
+        },
+        _sum: { amount: true },
+      }),
+    ]);
+
+    type Agg = {
+      present: number;
+      skipped: number;
+      absent: number;
+      vacation: number;
+      mealAmount: number;
+      guestCount: number;
+      guestAmount: number;
+      adjustments: number;
+    };
+    const byUser = new Map<string, Agg>();
+    const agg = (uid: string): Agg => {
+      const v =
+        byUser.get(uid) ??
+        ({ present: 0, skipped: 0, absent: 0, vacation: 0, mealAmount: 0, guestCount: 0, guestAmount: 0, adjustments: 0 } as Agg);
+      byUser.set(uid, v);
+      return v;
+    };
+    for (const s of statusAgg) {
+      const v = agg(s.userId);
+      if (s.status === 'present') {
+        v.present = s._count._all;
+        v.mealAmount = s._sum.price ?? 0;
+      } else if (s.status === 'skipped') v.skipped = s._count._all;
+      else if (s.status === 'absent') v.absent = s._count._all;
+      else if (s.status === 'onVacation') v.vacation = s._count._all;
+    }
+    for (const g of guestAgg) {
+      const v = agg(g.hostUserId);
+      v.guestCount = g._count._all;
+      v.guestAmount = g._sum.priceSnapshot ?? 0;
+    }
+    for (const l of ledgerAgg as Array<{ userId: string; type: string; _sum: { amount: number | null } }>) {
+      const v = agg(l.userId);
+      v.adjustments += (l._sum.amount ?? 0) * (l.type === 'debit' ? 1 : -1);
+    }
+
+    const meta = new Map(
+      members.map((m) => [
+        m.userId,
+        {
+          name: m.user?.name ?? m.userId,
+          email: m.user?.email ?? '',
+          phone: m.user?.phone ?? '',
+        },
+      ]),
+    );
+    const allIds = new Set<string>([...meta.keys(), ...byUser.keys()]);
+    const money = (paise: number) => (paise / 100).toFixed(2);
+
+    const rows: BillingExportRow[] = [...allIds]
+      .map((uid) => {
+        const v = byUser.get(uid) ?? agg(uid);
+        const m = meta.get(uid);
+        const net = v.mealAmount + v.guestAmount + v.adjustments;
+        return {
+          memberName: m?.name ?? uid,
+          memberEmail: m?.email ?? '',
+          memberPhone: m?.phone ?? '',
+          presentCount: String(v.present),
+          skippedCount: String(v.skipped),
+          absentCount: String(v.absent),
+          vacationDays: String(v.vacation),
+          mealAmount: money(v.mealAmount),
+          guestCount: String(v.guestCount),
+          guestAmount: money(v.guestAmount),
+          adjustments: money(v.adjustments),
+          netTotal: money(net),
+          _net: net,
+        } as BillingExportRow & { _net: number };
+      })
+      .sort((a: any, b: any) => b._net - a._net)
+      .map(({ _net, ...row }: any) => row);
+
+    this.audit.log({
+      organizationId,
+      actorId: adminId,
+      targetId: dto.groupId,
+      targetType: 'Group',
+      action: 'export',
+      metadata: {
+        format,
+        kind: 'billing',
+        fromDate: dto.fromDate,
+        toDate: dto.toDate,
+        rowCount: rows.length,
+      },
+      requestId,
+    });
+
+    const filename = `billing_${group.name.replace(/\s+/g, '_')}_${dto.fromDate}_${dto.toDate}`;
+    if (format === 'xlsx') {
+      await this.streamXlsx(res, rows, BILLING_HEADERS, filename);
+    } else {
+      this.streamCsv(res, rows, BILLING_HEADERS, filename);
+    }
+  }
+
   // ── EVENT EXPORT ──────────────────────────────────────────────────────────
 
   async exportEventGuests(
@@ -372,6 +550,39 @@ const ATTENDANCE_HEADERS: ExportHeader[] = [
   { key: 'guestAdults', label: 'Guest Adults', width: 13 },
   { key: 'guestChildren', label: 'Guest Children', width: 14 },
   { key: 'guestsTotal', label: 'Guests Total', width: 13 },
+];
+
+interface BillingExportRow {
+  [key: string]: string;
+  memberName: string;
+  memberEmail: string;
+  memberPhone: string;
+  presentCount: string;
+  skippedCount: string;
+  absentCount: string;
+  vacationDays: string;
+  mealAmount: string;
+  guestCount: string;
+  guestAmount: string;
+  adjustments: string;
+  netTotal: string;
+}
+
+// Pass 12 (FR-BILLX-024): amounts exported in rupees (2dp) from paise
+// snapshots; adjustments are the signed append-only ledger total.
+const BILLING_HEADERS: ExportHeader[] = [
+  { key: 'memberName', label: 'Member Name', width: 25 },
+  { key: 'memberEmail', label: 'Email', width: 30 },
+  { key: 'memberPhone', label: 'Phone', width: 16 },
+  { key: 'presentCount', label: 'Present', width: 10 },
+  { key: 'skippedCount', label: 'Skipped', width: 10 },
+  { key: 'absentCount', label: 'Absent', width: 10 },
+  { key: 'vacationDays', label: 'Vacation Days', width: 14 },
+  { key: 'mealAmount', label: 'Meal Amount', width: 14 },
+  { key: 'guestCount', label: 'Guests', width: 10 },
+  { key: 'guestAmount', label: 'Guest Amount', width: 14 },
+  { key: 'adjustments', label: 'Adjustments', width: 14 },
+  { key: 'netTotal', label: 'Net Total', width: 14 },
 ];
 
 const EVENT_HEADERS: ExportHeader[] = [

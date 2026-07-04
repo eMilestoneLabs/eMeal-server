@@ -22,4 +22,20 @@ export class CreateVacationRequestDto {
   @IsOptional()
   @IsString()
   groupId?: string;
+
+  /**
+   * SRS FR-VACX-003 (Pass 11): optional meal-granular boundaries. On the
+   * start date only meals from this slot onward are covered (e.g. leaving
+   * after lunch → startSlotKey='dinner'). Omitted = whole day.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  startSlotKey?: string;
+
+  /** Counterpart for the end date: covered up to and including this slot. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  endSlotKey?: string;
 }

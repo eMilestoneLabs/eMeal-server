@@ -19,6 +19,8 @@ export class VacationRequestsRepository {
       userName: raw.userName ?? null,
       startDate: raw.startDate,
       endDate: raw.endDate,
+      startSlotKey: raw.startSlotKey ?? null,
+      endSlotKey: raw.endSlotKey ?? null,
       reason: raw.reason ?? null,
       status: raw.status,
       reviewedBy: raw.reviewedBy ?? null,
@@ -44,12 +46,121 @@ export class VacationRequestsRepository {
     userName: string | null;
     startDate: Date;
     endDate: Date;
+    startSlotKey: string | null;
+    endSlotKey: string | null;
     reason: string | null;
   }): Promise<VacationRequestEntity> {
     const raw = await (this.prisma as any).vacationRequest.create({
       data: { ...data, status: 'pending' },
     });
     return this.toEntity(raw);
+  }
+
+  /**
+   * FR-VACX-001 (Pass 11): overlapping pending/approved request for the same
+   * member (same group scope, or either side org-level) — reject-on-overlap
+   * policy, so ranges never double-govern a date.
+   */
+  async findOverlapping(
+    userId: string,
+    organizationId: string,
+    groupId: string | null,
+    startDate: Date,
+    endDate: Date,
+  ): Promise<VacationRequestEntity | null> {
+    const raw = await (this.prisma as any).vacationRequest.findFirst({
+      where: {
+        organizationId,
+        userId,
+        deletedAt: null,
+        status: { in: ['pending', 'approved'] },
+        startDate: { lte: endDate },
+        endDate: { gte: startDate },
+        ...(groupId ? { OR: [{ groupId }, { groupId: null }] } : {}),
+      },
+    });
+    return raw ? this.toEntity(raw) : null;
+  }
+
+  /** Org timezone for TZ-correct business-day math (FR-VACX-006). */
+  async getOrgTimezone(organizationId: string): Promise<string> {
+    const org = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { timezone: true },
+    });
+    return org?.timezone ?? 'Asia/Kolkata';
+  }
+
+  /**
+   * FR-VACX-004 (LOOP-046): explicit Present marks overlapping a vacation
+   * range. Policy = keep the explicit Present (member action is never
+   * silently discarded); the conflict is surfaced to admin + member.
+   */
+  async findPresentConflicts(
+    userId: string,
+    organizationId: string,
+    groupId: string | null,
+    startDate: Date,
+    endDate: Date,
+  ): Promise<Array<{ date: string; mealId: string; mealName: string }>> {
+    const rows = await this.prisma.attendanceRecord.findMany({
+      where: {
+        organizationId,
+        userId,
+        status: 'present',
+        attendanceDate: { gte: startDate, lte: endDate },
+        ...(groupId ? { groupId } : {}),
+      },
+      select: {
+        attendanceDate: true,
+        mealId: true,
+        meal: { select: { displayName: true, name: true } },
+      },
+      orderBy: { attendanceDate: 'asc' },
+      take: 50,
+    });
+    return rows.map((r) => ({
+      date: r.attendanceDate.toISOString().slice(0, 10),
+      mealId: r.mealId,
+      mealName: r.meal?.displayName || r.meal?.name || r.mealId,
+    }));
+  }
+
+  /**
+   * FR-VACX-006: does any OTHER approved request still cover [todayUtc]?
+   * Used on approve/cancel so the isVacationMode flag always mirrors the
+   * request set, TZ-correct.
+   */
+  async hasApprovedCovering(
+    userId: string,
+    organizationId: string,
+    todayUtc: Date,
+    excludeId?: string,
+  ): Promise<boolean> {
+    const hit = await (this.prisma as any).vacationRequest.findFirst({
+      where: {
+        organizationId,
+        userId,
+        status: 'approved',
+        deletedAt: null,
+        startDate: { lte: todayUtc },
+        endDate: { gte: todayUtc },
+        ...(excludeId ? { id: { not: excludeId } } : {}),
+      },
+      select: { id: true },
+    });
+    return !!hit;
+  }
+
+  /** fcmToken lookup for fire-and-forget member notifications (FR-VACX-007). */
+  async getUserPush(
+    userId: string,
+  ): Promise<{ userId: string; fcmToken: string } | null> {
+    const u = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { fcmToken: true },
+    });
+    return u?.fcmToken ? { userId, fcmToken: u.fcmToken } : null;
   }
 
   async findById(

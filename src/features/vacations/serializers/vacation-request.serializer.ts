@@ -18,6 +18,9 @@ export class VacationRequestSerializer {
       userName: v.userName ?? null,
       startDate: dateOnly(v.startDate),
       endDate: dateOnly(v.endDate),
+      // FR-VACX-003 (Pass 11): meal-granular boundaries (null = whole day).
+      startSlotKey: v.startSlotKey ?? null,
+      endSlotKey: v.endSlotKey ?? null,
       reason: v.reason ?? null,
       status: v.status,
       reviewedBy: v.reviewedBy ?? null,
