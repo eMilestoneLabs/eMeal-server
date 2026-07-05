@@ -12,13 +12,16 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$HERE/lib.sh"
 
 : "${ADMIN_EMAIL:?}"; : "${ADMIN_PASS:?}"
 ADMIN_TOKEN="$(login "$ADMIN_EMAIL" "$ADMIN_PASS")"
+# /attendance/today is student-scoped (returns 400 to an admin), so measure it
+# with a student token for a true 200 hot-path reading. Falls back to admin.
+STUDENT_TOKEN=""; [ -n "${STUDENT_EMAIL:-}" ] && STUDENT_TOKEN="$(login "$STUDENT_EMAIL" "${STUDENT_PASS:-}")"
 req GET /groups "" "$ADMIN_TOKEN"; GROUP_ID="${GROUP_ID:-$(jbody '(.data // .)[0].id // empty')}"
 
 sec "PERF-A — LATENCY PERCENTILES (backend compute, localhost) FR-TIME / NFR-perf"
 echo "  (samples=$PERF_SAMPLES each; SLO gate on p95)" >&2
 perf "health"           "/health"                                                   ""            "NFR-PERF-001" 100 >/dev/null
 perf "dashboard/admin"  "/dashboard/admin"                                          "$ADMIN_TOKEN" "FR-OVR-001,NFR-PERF-010" 300 >/dev/null
-perf "attendance/today" "/attendance/today"                                         "$ADMIN_TOKEN" "FR-ATT-001,NFR-PERF-011" 200 >/dev/null
+perf "attendance/today" "/attendance/today"                                         "${STUDENT_TOKEN:-$ADMIN_TOKEN}" "FR-ATT-001,NFR-PERF-011" 200 >/dev/null
 perf "meals/today"      "/meals/today?groupId=$GROUP_ID"                            "$ADMIN_TOKEN" "FR-MEAL-020,NFR-PERF-012" 250 >/dev/null
 perf "billing-summary"  "/attendance/billing-summary?groupId=$GROUP_ID&fromDate=$FROM&toDate=$TO" "$ADMIN_TOKEN" "FR-BILL-001,NFR-PERF-013" 250 >/dev/null
 perf "groups"           "/groups"                                                   "$ADMIN_TOKEN" "FR-GRP-001,NFR-PERF-014" 200 >/dev/null

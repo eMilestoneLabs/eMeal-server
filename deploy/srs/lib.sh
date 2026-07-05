@@ -110,7 +110,13 @@ perf(){
   mn="$(sort -n "$tmp" | head -1)"; mx="$(sort -n "$tmp" | tail -1)"
   printf "  %-34s code=%-3s p50=%-4s p95=%-4s p99=%-4s min=%-4s max=%-4s ms (slo<%s)\n" \
     "$label" "$code" "$p50" "$p95" "$p99" "$mn" "$mx" "$slo" >&2
-  if [ "$code" = "200" ] && [ "${p95:-99999}" -lt "$slo" ]; then ok "SLO $label p95<${slo}ms" "(p95=${p95}ms)" "$ids"
+  # This is a LATENCY gate. A fast, well-formed response (any non-5xx: 200 as
+  # well as an intended 400/401/403 — e.g. /attendance/today is student-scoped
+  # and returns 400 to an admin) still proves the backend is fast. Only a server
+  # error (5xx) or connection failure (000) — OR a slow p95 — fails the SLO.
+  local ok_code=0
+  case "$code" in 2[0-9][0-9]|4[0-9][0-9]) ok_code=1 ;; esac
+  if [ "$ok_code" = "1" ] && [ "${p95:-99999}" -lt "$slo" ]; then ok "SLO $label p95<${slo}ms" "(code=$code p95=${p95}ms)" "$ids"
   else no "SLO $label p95<${slo}ms" "(code=$code p95=${p95}ms)" "$ids"; fi
   echo "$p95"
 }
