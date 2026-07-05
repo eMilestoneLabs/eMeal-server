@@ -1427,6 +1427,12 @@ export class AttendanceService {
     count: number;
   }> {
     if (!groupId) throw new BadRequestException('groupId is required');
+    // Validate the date param BEFORE any DB work so malformed input (e.g. an
+    // injection probe) fails fast with 400 — never reaches Prisma as an Invalid
+    // Date (which would surface as a 500). Mirrors AdminOverrideDto's guard.
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw new BadRequestException('date must be YYYY-MM-DD format');
+    }
 
     const group = await this.prisma.group.findFirst({
       where: { id: groupId, organizationId },
@@ -1435,6 +1441,9 @@ export class AttendanceService {
     if (!group) throw new NotFoundException('Group not found');
 
     const dateUtc = toUtcMidnight(date);
+    if (Number.isNaN(dateUtc.getTime())) {
+      throw new BadRequestException('date is not a valid calendar date');
+    }
 
     const activeMembers = await this.prisma.groupMember.findMany({
       where: { groupId, status: 'active' },

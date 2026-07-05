@@ -75,6 +75,10 @@ if [ -n "$GRP" ]; then
   req_settle GET "/attendance/vacation-members?groupId=deadbeef-not-a-group&date=$TODAY" "" "$ADMIN_TOKEN"
   assert_code "unknown group → 404 (tenant guard)" 404 "$R_CODE" "FR-VACX-050,FR-SECX-040"
 
+  # Input hardening: a malformed/injection date param must 400, NEVER 500.
+  req_settle GET "/attendance/vacation-members?groupId=$GRP&date=2026-07-05%27%3BDROP%20TABLE%20notices%3B--" "" "$ADMIN_TOKEN"
+  assert_code "malformed date → 400 (never 500)" 400 "$R_CODE" "FR-SECX-050,FR-VACX-053"
+
   if [ -n "$STUDENT_TOKEN" ]; then
     req_settle GET "/attendance/vacation-members?groupId=$GRP&date=$TODAY" "" "$STUDENT_TOKEN"
     assert_code "student blocked (admin-only)" 403 "$R_CODE" "FR-SECX-041,FR-VACX-051"

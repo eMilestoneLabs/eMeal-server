@@ -850,4 +850,22 @@ describe('AttendanceService', () => {
       expect(result).not.toHaveProperty('count');
     });
   });
+
+  describe('getGroupVacationMembers — input hardening', () => {
+    it('rejects a malformed date with 400 (never reaches Prisma as Invalid Date)', async () => {
+      await expect(
+        service.getGroupVacationMembers(
+          'org_01',
+          'grp_01',
+          "2026-07-05';DROP TABLE notices;--",
+        ),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('rejects a missing groupId with 400', async () => {
+      await expect(
+        service.getGroupVacationMembers('org_01', '', '2026-07-05'),
+      ).rejects.toThrow(BadRequestException);
+    });
+  });
 });
