@@ -38,11 +38,17 @@ else skip "RBAC probes" "no STUDENT_TOKEN" "FR-SECX-030"; fi
 
 sec "SEC-C — TENANT ISOLATION / IDOR (other-org admin on our resources) FR-SECX-040"
 if [ -n "$ADMIN2_TOKEN" ] && [ -n "$GROUP_ID" ]; then
+  # meal-summary requires a mealId — probe IDOR with one of OUR org's real
+  # meals so the ownership check (not DTO validation) is what answers.
+  if [ -z "${MEAL_ID:-}" ]; then
+    req GET "/meals?groupId=$GROUP_ID" "" "$ADMIN_TOKEN"
+    MEAL_ID="$(jbody '(.data // .)[0].id // empty')"
+  fi
   CROSS=( "/groups/$GROUP_ID" "/groups/$GROUP_ID/members" "/groups/$GROUP_ID/meal-config"
     "/groups/$GROUP_ID/qr-token" "/meals?groupId=$GROUP_ID"
     "/attendance/billing-summary?groupId=$GROUP_ID&fromDate=$FROM&toDate=$TO"
-    "/attendance/meal-summary?groupId=$GROUP_ID&date=$TO"
     "/groups/$GROUP_ID/preference-crosstab?date=$TO" )
+  [ -n "${MEAL_ID:-}" ] && CROSS+=( "/attendance/meal-summary?mealId=$MEAL_ID&date=$TO" )
   for p in "${CROSS[@]}"; do
     req GET "$p" "" "$ADMIN2_TOKEN"; assert_in "cross-org blocked ${p:0:34}" "$R_CODE" "FR-SECX-040,FR-PRIV-010" 403 404
   done
@@ -63,7 +69,9 @@ req GET "/meals/today?groupId=../../../etc/passwd" "" "$ADMIN_TOKEN"
 assert_in "path-traversal in param blocked" "$R_CODE" "FR-SECX-052" 400 404
 
 sec "SEC-E — INPUT HARDENING (oversized / type-confusion / mass-assign) FR-SECX-060"
-BIG="$(head -c 200000 /dev/zero | tr '\0' 'A')"
+# 120KB: big enough to exercise body limits, under Linux's 128KB per-argument
+# cap (MAX_ARG_STRLEN) — 200KB made jq/curl fail with "Argument list too long".
+BIG="$(head -c 120000 /dev/zero | tr '\0' 'A')"
 req POST /auth/login "$(jq -nc --arg i "$BIG" '{identifier:$i,password:"x"}')"
 assert_in "oversized body rejected" "$R_CODE" "FR-SECX-060,FR-LIM-010" 400 401 413 422
 req POST /auth/signup/student "$(jq -nc '{name:"X",role:"super_admin",email:"esc@x.io",password:"Esc@12345",organizationId:"other-org"}')"

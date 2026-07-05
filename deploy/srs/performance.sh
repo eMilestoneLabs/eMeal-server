@@ -41,6 +41,13 @@ sec "PERF-C — MEMORY SOAK / LEAK SIGNAL ($SOAK_REQUESTS reqs) FR-MEMX-001"
 if command -v pm2 >/dev/null; then
   rss(){ pm2 jlist 2>/dev/null | jq '[.[]|select(.name=="emeal-server")|.monit.memory]|add // 0'; }
   restarts(){ pm2 jlist 2>/dev/null | jq '[.[]|select(.name=="emeal-server")|.pm2_env.unstable_restarts]|add // 0'; }
+  # Warm-up: right after a PM2 reload the workers are still allocating (JIT,
+  # pool/route caches), so a cold baseline reads that ramp as a fake "leak".
+  # Prime to steady state, let GC settle, THEN take the baseline.
+  echo "  warm-up: 300 requests before baseline..." >&2
+  seq 1 300 | xargs -P"$PERF_CONC" -I{} sh -c \
+    'curl -s -o /dev/null -H "Authorization: Bearer '"$ADMIN_TOKEN"'" "'"$BASE"'/dashboard/admin"'
+  sleep 5
   MEM0=$(rss); R0=$(restarts)
   ENDPOINTS=( "/dashboard/admin" "/attendance/today" "/meals/today?groupId=$GROUP_ID" "/groups" "/notices" )
   echo "  soaking with $SOAK_REQUESTS requests across ${#ENDPOINTS[@]} endpoints..." >&2

@@ -560,6 +560,14 @@ export class PreferencesService {
         errors: { date: 'Use YYYY-MM-DD' },
       });
     }
+    // Unknown or foreign-org groupId → explicit 404 instead of a 200-empty
+    // crosstab (org isolation already held inside repo.crossTab; this matches
+    // the billing-summary guard so cross-org probes can't distinguish ids).
+    const group = await this.prisma.group.findFirst({
+      where: { id: groupId, organizationId },
+      select: { id: true },
+    });
+    if (!group) throw new NotFoundException('Group not found');
     const rows = await this.repo.crossTab(organizationId, groupId, date, mealId);
     // Shape: [{groupId, groupLabel, options:[{key,label,count,totalQuantity}]}]
     const byGroup = new Map<string, any>();

@@ -21,7 +21,7 @@ req POST /auth/login "$(jq -nc --arg i "$ADMIN_EMAIL" '{identifier:$i,password:"
 assert_code "Wrong password rejected" 401 "$R_CODE" "FR-AUTH-003,FR-SECX-010"
 req GET /auth/me "" "$ADMIN_TOKEN"; assert_code "Token identifies user (/auth/me)" 200 "$R_CODE" "FR-AUTH-020"
 req GET /auth/me "" ""; assert_code "Unauthenticated /auth/me blocked" 401 "$R_CODE" "FR-AUTH-021,FR-SECX-001"
-req POST /auth/forgot-password "$(jq -nc --arg e "$ADMIN_EMAIL" '{email:$e}')"
+req POST /auth/forgot-password "$(jq -nc --arg e "$ADMIN_EMAIL" '{identifier:$e}')"
 assert_in "Forgot-password anti-enumeration (uniform)" "$R_CODE" "FR-AUTH-030,FR-SECX-020" 200 202 204
 req POST /auth/refresh '{"refreshToken":"not-a-real-token"}'
 assert_in "Refresh rejects bogus token" "$R_CODE" "FR-AUTH-040" 400 401
@@ -45,6 +45,7 @@ assert_in "Join with invalid code rejected" "$R_CODE" "FR-JOIN-020" 400 404 422
 sec "MODULE — MEALS / MODES / SCHEDULES (FR-MEAL, FR-MODE, FR-SCHX)"
 req GET "/groups/$GROUP_ID/meal-config" "" "$ADMIN_TOKEN"; assert_code "Read meal config" 200 "$R_CODE" "FR-MEAL-001,FR-MODE-001"
 req GET "/meals?groupId=$GROUP_ID" "" "$ADMIN_TOKEN"; assert_code "List meals" 200 "$R_CODE" "FR-MEAL-010"
+MEAL_ID="${MEAL_ID:-$(jbody '(.data // .)[0].id // empty')}"
 req GET "/meals/today?groupId=$GROUP_ID" "" "$ADMIN_TOKEN"; assert_code "Meals today (mode-aware)" 200 "$R_CODE" "FR-MEAL-020,FR-MODE-010"
 HAS_WIN=$(jbody 'try (has("serverTime") or (.data|has("serverTime"))) catch false')
 [ "$HAS_WIN" = "true" ] && ok "meals/today carries serverTime/window meta" "" "FR-TIME-008,FR-TIME-011" || skip "serverTime shape" "varies by mode" "FR-TIME-011"
@@ -59,8 +60,13 @@ req GET "/attendance/history?fromDate=$FROM&toDate=$TO" "" "${STUDENT_TOKEN:-$AD
 assert_code "Attendance history" 200 "$R_CODE" "FR-ATT-010"
 ORD=$(jbody 'try ([ (.data // .)[]?.markedAt // (.data // .)[]?.date ] | . as $a | ($a==($a|sort|reverse))) catch "na"')
 { [ "$ORD" = "true" ] || [ "$ORD" = "na" ]; } && ok "History newest-first ordering" "($ORD)" "FR-SORT-001" || no "History ordering" "$ORD" "FR-SORT-001"
-req GET "/attendance/meal-summary?groupId=$GROUP_ID&date=$TO" "" "$ADMIN_TOKEN"
-assert_in "Meal summary (present/pref/guest breakdown)" "$R_CODE" "FR-ANL-010,FR-PG-050" 200 400 404
+# meal-summary requires mealId (not groupId) — probe with a real meal or skip.
+if [ -n "${MEAL_ID:-}" ]; then
+  req GET "/attendance/meal-summary?mealId=$MEAL_ID&date=$TO" "" "$ADMIN_TOKEN"
+  assert_in "Meal summary (present/pref/guest breakdown)" "$R_CODE" "FR-ANL-010,FR-PG-050" 200 400 404
+else
+  skip "Meal summary" "no meal configured on group" "FR-ANL-010,FR-PG-050"
+fi
 req POST /attendance '{"mealId":"nonexistent","status":"present"}' "${STUDENT_TOKEN:-$ADMIN_TOKEN}"
 assert_in "Mark for unknown meal rejected" "$R_CODE" "FR-ATT-020" 400 404 422
 
