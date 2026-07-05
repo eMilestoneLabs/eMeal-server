@@ -21,6 +21,8 @@ export class NoticesRepository {
       body: raw.body,
       priority: raw.priority,
       audience: raw.audience ?? 'all',
+      linkType: raw.linkType ?? null,
+      targetUserId: raw.targetUserId ?? null,
       pinned: raw.pinned,
       publishedAt: raw.publishedAt,
       expiresAt: raw.expiresAt ?? null,
@@ -40,6 +42,7 @@ export class NoticesRepository {
       includeInactive?: boolean;
       onlyUnexpired?: boolean;
       audiences?: string[];
+      forUserId?: string;
     },
   ): any {
     const where: any = { organizationId };
@@ -53,11 +56,19 @@ export class NoticesRepository {
     if (opts.groupId) {
       where.OR = [{ groupId: opts.groupId }, { groupId: null }];
     }
+    const and: any[] = [];
     if (opts.onlyUnexpired) {
-      where.AND = [
-        { OR: [{ expiresAt: null }, { expiresAt: { gte: new Date() } }] },
-      ];
+      and.push({ OR: [{ expiresAt: null }, { expiresAt: { gte: new Date() } }] });
     }
+    // command_3: a per-member targeted notice (approval/rejection decision) is
+    // visible ONLY to that member; untargeted (null) notices stay visible to
+    // everyone in scope. Applied whenever the requesting user is known.
+    if (opts.forUserId) {
+      and.push({
+        OR: [{ targetUserId: null }, { targetUserId: opts.forUserId }],
+      });
+    }
+    if (and.length) where.AND = and;
     return where;
   }
 
@@ -77,6 +88,8 @@ export class NoticesRepository {
     body: string;
     priority: string;
     audience?: string;
+    linkType?: string | null;
+    targetUserId?: string | null;
     pinned: boolean;
     expiresAt: Date | null;
   }): Promise<NoticeEntity> {
@@ -110,6 +123,7 @@ export class NoticesRepository {
       includeInactive: opts.includeInactive,
       onlyUnexpired: !opts.includeInactive,
       audiences: opts.audiences,
+      forUserId,
     });
     const skip = (opts.page - 1) * opts.limit;
 
@@ -161,6 +175,7 @@ export class NoticesRepository {
       includeInactive: false,
       onlyUnexpired: true,
       audiences,
+      forUserId,
     });
     const rows = await this.prisma.notice.findMany({
       where,
@@ -220,6 +235,7 @@ export class NoticesRepository {
       includeInactive: false,
       onlyUnexpired: true,
       audiences,
+      forUserId: userId,
     });
     const rows = await this.prisma.notice.findMany({
       where,

@@ -749,7 +749,12 @@ export class AttendanceService {
     const pricingActive =
       (meal as any).group?.mealPricingEnabled === true &&
       (overridePrice ?? 0) > 0;
-    if (pricingActive && dto.status === 'present') {
+    // An admin overriding their OWN attendance is self-consenting by the act of
+    // marking — routing a self-mark through a "member confirmation to yourself"
+    // both blocks the action (it never applies) and is nonsensical. Self-marks
+    // apply directly; the FR-OVR-001 liability-increase gate still governs
+    // overrides that target OTHER members exactly as before.
+    if (pricingActive && dto.status === 'present' && adminId !== dto.userId) {
       const existing = await this.attendanceRepo.findByKey(
         dto.userId,
         dto.mealId,
@@ -1401,6 +1406,66 @@ export class AttendanceService {
     await this.redis.set(cacheKey, JSON.stringify(response), CACHE_TTL);
 
     return response;
+  }
+
+  // ── Group vacation members for a date (admin) ────────────────────────────
+  // Bug fix (command_3 · "Vacation count not updating"): the admin attendance
+  // dashboard "Vacation = N" summary must reflect who is on APPROVED vacation
+  // for the SELECTED DATE — not the global isVacationMode flag (which only
+  // flips when a vacation covers org-today and is otherwise date-agnostic).
+  // Reuses the shared Pass 11 slot-aware coverage util at DAY granularity
+  // (mealOpenTime null ⇒ any part of the day on vacation counts). Additive,
+  // read-only, org-isolated — no existing contract changes.
+  async getGroupVacationMembers(
+    organizationId: string,
+    groupId: string,
+    date: string,
+  ): Promise<{
+    date: string;
+    userIds: string[];
+    members: Array<{ userId: string; name: string }>;
+    count: number;
+  }> {
+    if (!groupId) throw new BadRequestException('groupId is required');
+
+    const group = await this.prisma.group.findFirst({
+      where: { id: groupId, organizationId },
+      select: { id: true },
+    });
+    if (!group) throw new NotFoundException('Group not found');
+
+    const dateUtc = toUtcMidnight(date);
+
+    const activeMembers = await this.prisma.groupMember.findMany({
+      where: { groupId, status: 'active' },
+      select: {
+        userId: true,
+        // name rides along so the admin dashboard can LIST members under the
+        // "Vacation" filter (not just count them) — no extra query.
+        user: { select: { isVacationMode: true, name: true } },
+      },
+    });
+
+    const covered = await getVacationCoveredUserIds(this.prisma as any, {
+      organizationId,
+      groupId,
+      dateUtc,
+      mealOpenTime: null, // day-level: whole-day coverage
+      candidates: activeMembers.map((m) => ({
+        userId: m.userId,
+        isVacationMode: m.user.isVacationMode === true,
+      })),
+    });
+
+    const members = activeMembers
+      .filter((m) => covered.has(m.userId))
+      .map((m) => ({ userId: m.userId, name: m.user.name ?? 'Member' }));
+    return {
+      date,
+      userIds: members.map((m) => m.userId),
+      members,
+      count: members.length,
+    };
   }
 
   // ── Meal attendance summary (admin) ──────────────────────────────────────

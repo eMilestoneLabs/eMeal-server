@@ -5,6 +5,7 @@ import { AuditModule } from '../../audit/audit.module';
 import { GroupsModule } from '../groups/groups.module';
 import { BillingModule } from '../billing/billing.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { NoticesModule } from '../notices/notices.module';
 import { GuestsController } from './guests.controller';
 import { GuestsService } from './guests.service';
 
@@ -26,6 +27,7 @@ import { GuestsService } from './guests.service';
     GroupsModule,
     BillingModule,
     NotificationsModule,
+    NoticesModule,
   ],
   controllers: [GuestsController],
   providers: [GuestsService],

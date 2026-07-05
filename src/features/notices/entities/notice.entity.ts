@@ -12,6 +12,17 @@ export class NoticeEntity {
   priority: string;
   /** Visibility gate: 'all' | 'admins' | 'members' (#4). */
   audience: string;
+  /**
+   * Notification Center deep-link (command_3): when set, tapping the notice
+   * opens the related approval workflow. Maps to a Flutter screen (e.g.
+   * 'vacationRequests' | 'correctionRequests'). null/undefined = plain notice.
+   */
+  linkType?: string | null;
+  /**
+   * Notification Center (command_3): per-member targeted notice. When set, only
+   * this user sees it (approval/rejection decisions). null = audience-scoped.
+   */
+  targetUserId?: string | null;
   pinned: boolean;
   publishedAt: Date;
   expiresAt: Date | null;

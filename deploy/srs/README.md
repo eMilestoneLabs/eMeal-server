@@ -21,13 +21,40 @@ certificate is truthful about what was and wasn't machine-verified.
 
 ## Run it (on the VPS, from `~/eMeal-server`)
 
+The existing test accounts (two org admins + two students) are centralized in
+`accounts.sh` and auto-loaded, so this runs **zero-config**:
+
 ```bash
-ADMIN_EMAIL='...'   ADMIN_PASS='...' \
-STUDENT_EMAIL='...' STUDENT_PASS='...' \
-ADMIN2_EMAIL='...'  ADMIN2_PASS='...' \
-EDGE='https://your-domain' \
+bash deploy/srs/run.sh                       # read-only, existing accounts
+EDGE='https://your-domain' bash deploy/srs/run.sh   # + TLS/header probes
+WRITE_TESTS=1 bash deploy/srs/run.sh         # + self-cleaning write flows
+```
+
+Any credential can still be overridden from the environment (CI / another org):
+
+```bash
+ADMIN_EMAIL='...' ADMIN_PASS='...' STUDENT_EMAIL='...' STUDENT_PASS='...' \
+ADMIN2_EMAIL='...' ADMIN2_PASS='...' EDGE='https://your-domain' \
 bash deploy/srs/run.sh
 ```
+
+### Delivered-fixes checks (`delivered-fixes.sh`)
+
+Wired into `run.sh` and standalone-runnable. Verifies, over real HTTP:
+
+- **Admin self-attendance** — the admin self-mark is applied (no longer blocked by
+  the member-consent gate); overriding another member is still gated (regression).
+  The live self-mark is behind `WRITE_TESTS=1` and self-restores the prior status.
+- **Vacation members** — `GET /attendance/vacation-members` returns `{date,userIds,
+  members,count}` per selected date; admin-only (student→403, no-token→401);
+  unknown/foreign group→404 (tenant isolation, incl. cross-org admin).
+- **Notification center** — notices expose `linkType` + `targetUserId`; link values
+  come from the known deep-link vocabulary; per-member targeted notices never leak
+  across users (checked with **two distinct students**).
+- Regression sweep of touched surfaces + (if the postgres container is reachable)
+  an additive-migration column check.
+
+Run just this layer: `bash deploy/srs/delivered-fixes.sh` (or with `WRITE_TESTS=1`).
 
 Optional env: `BASE` (default `http://localhost:3000/api/v1`), `PERF_SAMPLES`
 (30), `PERF_CONC` (20), `SOAK_REQUESTS` (2000), `WRITE_TESTS=1` (enable the

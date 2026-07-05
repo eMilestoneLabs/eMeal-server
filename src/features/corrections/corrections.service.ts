@@ -332,6 +332,7 @@ export class CorrectionsService {
           created.mealName ?? 'a meal'
         } on ${dateStr}. Tap to review.`,
         priority: 'high',
+        linkType: 'correctionRequests', // deep-link → admin Correction Requests queue
       });
     }
 
@@ -692,5 +693,21 @@ export class CorrectionsService {
       mealName: request.mealName ?? 'your meal',
       dateStr: request.attendanceDate.toISOString().slice(0, 10),
     });
+    // command_3: targeted in-app notice into the member's bell (Notification
+    // Center), deep-linked to My Corrections. Best-effort — never throws.
+    if (this.notices) {
+      const approved = request.status === 'approved';
+      void this.notices.createMemberAlert({
+        organizationId: request.organizationId,
+        groupId: request.groupId,
+        actorId: request.userId,
+        targetUserId: request.userId,
+        title: approved ? 'Correction approved' : 'Correction rejected',
+        body: approved
+          ? `Your attendance correction for ${request.mealName ?? 'a meal'} was approved.`
+          : `Your attendance correction for ${request.mealName ?? 'a meal'} was rejected.`,
+        linkType: 'myCorrections',
+      });
+    }
   }
 }

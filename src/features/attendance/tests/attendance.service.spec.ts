@@ -474,6 +474,29 @@ describe('AttendanceService', () => {
       expect(attendanceRepo.upsert).not.toHaveBeenCalled();
     });
 
+    it('SELF-override (admin marks own present, priced) applies directly — no member confirmation', async () => {
+      // command_3 bug: an admin marking their OWN attendance is self-consenting;
+      // it must NOT be routed through the FR-OVR-001 confirmation path (which
+      // returned requiresMemberConsent and blocked the admin from marking).
+      (prisma.meal.findFirst as jest.Mock).mockResolvedValue(pricedMeal);
+      (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'admin_01' });
+      (attendanceRepo.findByKey as jest.Mock).mockResolvedValue(null); // no record yet
+      (attendanceRepo.upsert as jest.Mock).mockResolvedValue(mockMealRecord);
+      (redis.del as jest.Mock).mockResolvedValue(undefined);
+
+      const result: any = await service.adminOverride('admin_01', 'org_01', {
+        userId: 'admin_01', // same as adminId → self
+        mealId: 'meal_01',
+        attendanceDate: '2026-01-05',
+        status: 'present',
+      });
+
+      expect(result.requiresMemberConsent).toBeUndefined();
+      expect(attendanceRepo.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'present', source: 'admin' }),
+      );
+    });
+
     it('liability DECREASE (present→absent, priced) applies immediately', async () => {
       (prisma.meal.findFirst as jest.Mock).mockResolvedValue(pricedMeal);
       (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'usr_01' });

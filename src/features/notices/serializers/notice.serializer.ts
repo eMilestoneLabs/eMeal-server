@@ -16,6 +16,8 @@ export class NoticeSerializer {
       body: n.body,
       priority: n.priority,
       audience: n.audience ?? 'all',
+      linkType: n.linkType ?? null,
+      targetUserId: n.targetUserId ?? null,
       pinned: n.pinned,
       publishedAt: n.publishedAt.toISOString(),
       expiresAt: n.expiresAt ? n.expiresAt.toISOString() : null,

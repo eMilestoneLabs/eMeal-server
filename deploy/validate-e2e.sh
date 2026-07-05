@@ -27,6 +27,11 @@ TO="${TO:-$(date +%F)}"
 PERF_SAMPLES="${PERF_SAMPLES:-8}"
 OUT="/tmp/emeal-validation-$(date +%Y%m%d-%H%M%S).log"
 
+# Centralized existing test accounts (env still overrides). Lets this script run
+# zero-config against the known test logins, same as the SRS suite.
+_E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$_E2E_DIR/srs/accounts.sh" ] && . "$_E2E_DIR/srs/accounts.sh"
+
 ADMIN_EMAIL="${ADMIN_EMAIL:-}"
 ADMIN_PASS="${ADMIN_PASS:-}"
 STUDENT_EMAIL="${STUDENT_EMAIL:-}"

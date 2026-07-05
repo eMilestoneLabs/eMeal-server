@@ -18,6 +18,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export RESULTS_DIR="${RESULTS_DIR:-/tmp/emeal-srs-$(date +%Y%m%d-%H%M%S)}"
 export SRS_SOURCED=1
+. "$HERE/accounts.sh"   # centralized existing test accounts (env still overrides)
 . "$HERE/lib.sh"
 LOG="$RESULTS_DIR/full-run.log"
 exec > >(tee "$LOG") 2>&1
@@ -34,6 +35,7 @@ echo "════════════════════════�
 # throttled → empty token → every PERF probe returns 401 (false failures). Perf
 # first gets a clean token; security's flood is the last thing that runs.
 . "$HERE/functional.sh"
+. "$HERE/delivered-fixes.sh"  # admin self-attendance + vacation-members + notif center
 . "$HERE/performance.sh"
 . "$HERE/security.sh"
 # PERF-E max-capacity ramp runs LAST. It intentionally saturates the per-IP

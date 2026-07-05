@@ -195,6 +195,25 @@ export class AttendanceController {
     return this.attendanceService.getMealSummary(user.organizationId!, query);
   }
 
+  // ── GET /attendance/vacation-members (admin) — MUST be before /:id ────────
+  // Members on APPROVED vacation covering the given date (day-level). Powers
+  // the admin attendance dashboard "Vacation = N" summary + vacation filter,
+  // reflecting the SELECTED DATE rather than a global flag.
+
+  @Get('vacation-members')
+  @UseGuards(RolesGuard)
+  @Roles(...ADMIN_ROLES)
+  async getVacationMembers(
+    @CurrentUser() user: { sub: string; organizationId: string; role: string },
+    @Query('groupId') groupId: string,
+    @Query('date') date?: string,
+  ) {
+    const day = date || new Date().toISOString().slice(0, 10);
+    return this.attendanceService.getGroupVacationMembers(
+      user.organizationId!, groupId, day,
+    );
+  }
+
   // ── GET /attendance/billing-summary (admin) — MUST be before /:id ─────────
   // Member Billing V2: group-wide revenue/member/meal aggregation.
 

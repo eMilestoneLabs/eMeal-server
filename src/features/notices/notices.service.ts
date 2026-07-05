@@ -66,7 +66,22 @@ export class NoticesService {
     title: string;
     body: string;
     priority?: string;
+    /**
+     * Notification Center deep-link (command_3): the approval workflow this
+     * alert should open when tapped (e.g. 'vacationRequests'). Omit for a
+     * plain informational alert.
+     */
+    linkType?: string;
+    /**
+     * Visibility (command_3): 'admins' (default — request alerts to the admin
+     * bell) or 'members' (decision notices to a member, paired with
+     * [targetUserId]).
+     */
+    audience?: string;
+    /** When set, ONLY this user sees the notice (approval/rejection decisions). */
+    targetUserId?: string | null;
   }): Promise<void> {
+    const audience = params.audience ?? 'admins';
     try {
       const notice = await this.repo.create({
         organizationId: params.organizationId,
@@ -75,12 +90,14 @@ export class NoticesService {
         title: params.title,
         body: params.body,
         priority: params.priority ?? 'high',
-        audience: 'admins',
+        audience,
+        linkType: params.linkType ?? null,
+        targetUserId: params.targetUserId ?? null,
         pinned: false,
         expiresAt: null,
       });
-      // Live badge: reuse the notice-created realtime channel so an admin bell
-      // that is open refreshes immediately (the widget re-fetches unread count).
+      // Live badge: reuse the notice-created realtime channel so an open bell
+      // refreshes immediately (the widget re-fetches its unread count).
       this.realtime?.emitNoticeCreated(params.organizationId, notice.groupId, {
         organizationId: params.organizationId,
         groupId: notice.groupId,
@@ -89,13 +106,34 @@ export class NoticesService {
         priority: notice.priority,
         pinned: notice.pinned,
         publishedAt: notice.publishedAt.toISOString(),
-        audience: 'admins',
+        audience,
       });
     } catch (err) {
       this.logger.warn(
-        `request-alert notice failed (request unaffected): ${(err as Error).message}`,
+        `alert notice failed (request unaffected): ${(err as Error).message}`,
       );
     }
+  }
+
+  /**
+   * command_3: a decision notice (approval / rejection) delivered to a single
+   * member's bell, deep-linked to where they can see the outcome. Thin wrapper
+   * over [createRequestAlert] with member audience + target — best-effort.
+   */
+  async createMemberAlert(params: {
+    organizationId: string;
+    groupId?: string | null;
+    actorId: string;
+    targetUserId: string;
+    title: string;
+    body: string;
+    priority?: string;
+    linkType?: string;
+  }): Promise<void> {
+    return this.createRequestAlert({
+      ...params,
+      audience: 'members',
+    });
   }
 
   // ── CREATE (admin) ─────────────────────────────────────────────────────────

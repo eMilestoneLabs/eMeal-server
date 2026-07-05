@@ -16,6 +16,7 @@ import { RedisService } from '../../redis/redis.service';
 import { AuditService } from '../../audit/audit.service';
 import { BillingService } from '../billing/billing.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { NoticesService } from '../notices/notices.service';
 import { MembersRepository } from '../groups/repositories/members.repository';
 import { ADMIN_ROLES } from '../../common/decorators/roles.decorator';
 import {
@@ -94,6 +95,11 @@ export class GuestsService {
     private readonly membersRepo: MembersRepository,
     private readonly billing: BillingService,
     private readonly notifications: NotificationsService,
+    // command_3: in-app admin bell alert on guest requests (Notification
+    // Center). Optional so unit tests run without the notices infra wired.
+    @Optional()
+    @Inject(NoticesService)
+    private readonly notices: NoticesService | null,
     // Same pattern as corrections.service — string token keeps this module
     // decoupled from RealtimeModule; null in unit tests.
     @Optional() @Inject('ATTENDANCE_GATEWAY')
@@ -435,6 +441,20 @@ export class GuestsService {
       },
       requestId,
     });
+
+    // command_3: a member-requested guest booking that needs admin approval
+    // surfaces in the admin bell (Notification Center), deep-linked to review.
+    if (pendingApproval && !adminOnBehalf && this.notices) {
+      void this.notices.createRequestAlert({
+        organizationId,
+        groupId: group.id,
+        actorId: hostUserId,
+        title: 'New guest meal request',
+        body: `A member requested ${dto.guests.length} guest(s) for ${meal.name}. Tap to review.`,
+        priority: 'high',
+        linkType: 'guestRequests',
+      });
+    }
 
     // Notifications: pending admin approval → admins; admin-added → host.
     if (adminOnBehalf) {

@@ -77,6 +77,19 @@ export class VacationsService {
     title: string,
     body: string,
   ): void {
+    // command_3: also drop a targeted in-app notice into the member's bell so
+    // the approval/rejection is visible without a push token, deep-linked to
+    // their vacation screen. Best-effort — createMemberAlert never throws.
+    if (this.notices) {
+      void this.notices.createMemberAlert({
+        organizationId,
+        actorId: userId,
+        targetUserId: userId,
+        title,
+        body,
+        linkType: 'myVacations',
+      });
+    }
     if (!this.queue) return;
     void this.repo
       .getUserPush(userId)
@@ -202,6 +215,7 @@ export class VacationsService {
         title: 'New vacation request',
         body: `${userName} requested vacation for ${range}. Tap to review.`,
         priority: 'high',
+        linkType: 'vacationRequests', // deep-link → admin Vacation Requests queue
       });
     }
 

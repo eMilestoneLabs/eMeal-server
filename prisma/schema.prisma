@@ -780,6 +780,14 @@ model Notice {
   // Audience gate (#4): "all" = everyone in scope (legacy behaviour, default),
   // "admins" = only org admins see it (request alerts), "members" = only members.
   audience       String    @default("all")     // all | admins | members
+  // Notification Center deep-link (command_3): when set, tapping the notice
+  // opens the related approval workflow directly. Value maps to a Flutter
+  // screen (e.g. vacationRequests | correctionRequests). null = plain notice.
+  linkType       String?
+  // Notification Center (command_3): per-member targeted notice (approval /
+  // rejection decisions). When set, ONLY this user sees it. null = everyone in
+  // scope (audience-gated), the legacy behaviour.
+  targetUserId   String?
   pinned         Boolean   @default(false)
   publishedAt    DateTime  @default(now())
   expiresAt      DateTime?
@@ -794,6 +802,7 @@ model Notice {
   @@index([groupId])
   @@index([organizationId, isActive])
   @@index([expiresAt])
+  @@index([targetUserId])
   @@map("notices")
 }
 
