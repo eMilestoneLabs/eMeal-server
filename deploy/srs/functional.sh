@@ -31,8 +31,18 @@ assert_in "OTP verify rejects bad code" "$R_CODE" "FR-AUTH-050" 400 401 422
 sec "MODULE — ORG / GROUPS / ROLE / QR (FR-GRP, FR-JOIN, FR-ADM)"
 req GET /organizations/me "" "$ADMIN_TOKEN"; assert_code "Org profile read" 200 "$R_CODE" "FR-ADM-001"
 req GET /groups "" "$ADMIN_TOKEN"; assert_code "List groups" 200 "$R_CODE" "FR-GRP-001"
-GROUP_ID="${GROUP_ID:-$(jbody '(.data // .)[0].id // empty')}"
+_ALL_GIDS="$(jbody '(.data // .)[]?.id')"
+GROUP_ID="${GROUP_ID:-$(printf '%s\n' $_ALL_GIDS | head -1)}"
 [ -n "$GROUP_ID" ] && ok "Resolved GROUP_ID" "$GROUP_ID" "FR-GRP-002" || no "Resolved GROUP_ID" "no groups"
+# Resolve a group that ACTUALLY has meals (the first group may be empty), so the
+# meal-summary + #1 planner checks run against real data instead of skipping.
+MEAL_GID=""; MEAL_ID=""
+for _g in $_ALL_GIDS; do
+  req GET "/meals?groupId=$_g" "" "$ADMIN_TOKEN"
+  _mid="$(jbody '(.data // .)[0].id // empty')"
+  if [ -n "$_mid" ]; then MEAL_GID="$_g"; MEAL_ID="$_mid"; break; fi
+done
+[ -z "$MEAL_GID" ] && MEAL_GID="$GROUP_ID"
 req GET "/groups/$GROUP_ID" "" "$ADMIN_TOKEN"
 HAS_ROLE=$(jbody 'has("functionalRole") or (.data|has("functionalRole"))')
 [ "$HAS_ROLE" = "true" ] && ok "Group exposes functionalRole" "" "FR-GRP-010,FR-ADM-020" || no "Group functionalRole" "$R_CODE" "FR-GRP-010"
@@ -159,9 +169,40 @@ _HASAUD="$(jbody '([.data[]?|has("audience")]|all) // true')"
 [ "$_HASAUD" = "true" ] && ok "#4 notices expose audience field" "" "FR-NOTX-021" \
   || no "#4 audience field missing on notices" "" "FR-NOTX-021"
 
-# ── Optional self-cleaning WRITE lifecycle (opt-in; proves FR-DEL / FR-DLC) ──
+# ── Comprehensive self-cleaning WRITE / MODIFY audit (opt-in via WRITE_TESTS=1)
+# Every write below is undone in the same block, so the DB is left as found. ──
 if [ "$WRITE_TESTS" = "1" ]; then
-  sec "MODULE — SIGNUP → DELETE LIFECYCLE (write, self-cleaned) (FR-DEL, FR-DLC)"
+  sec "MODULE — WRITE / MODIFY LIFECYCLE (real writes, self-cleaned) (FR-DEL, FR-DLC, FR-VACX, FR-NOTX)"
+
+  # (a) #4 LIVE: a member request must raise the ADMIN bell, then admin clears it.
+  if [ -n "$STUDENT_TOKEN" ]; then
+    req GET /notices/unread-count "" "$ADMIN_TOKEN"; _U0="$(jbody '.count // 0')"
+    _VS="$(date -d "+$((320 + RANDOM % 400)) days" +%F 2>/dev/null || echo 2027-06-01)"
+    _VE="$(date -d "$_VS +2 days" +%F 2>/dev/null || echo 2027-06-03)"
+    req POST /vacation-requests "$(jq -nc --arg s "$_VS" --arg e "$_VE" '{startDate:$s,endDate:$e,reason:"SRS write audit"}')" "$STUDENT_TOKEN"
+    assert_in "#4 live: student vacation request created" "$R_CODE" "FR-VACX-001" 200 201
+    _VID="$(jbody '.id // .data.id // empty')"
+    sleep 2   # the admin bell notice is raised fire-and-forget; let it commit
+    req GET /notices/unread-count "" "$ADMIN_TOKEN"; _U1="$(jbody '.count // 0')"
+    if [ "${_U1:-0}" -gt "${_U0:-0}" ] 2>/dev/null; then ok "#4 live: request raised admin bell notice" "unread ${_U0}->${_U1}" "FR-NOTX-020,FR-NOT-001"
+    else no "#4 live: admin bell did NOT increment" "unread ${_U0}->${_U1}" "FR-NOTX-020"; fi
+    # cleanup: admin rejects the request (empty body → no whitelist violation)
+    if [ -n "$_VID" ]; then
+      req PATCH "/vacation-requests/$_VID/reject" '{}' "$ADMIN_TOKEN"
+      assert_in "#4 cleanup: admin rejected the request" "$R_CODE" "FR-VACX-030" 200 201
+    fi
+  else skip "#4 live vacation→bell" "no student token" "FR-NOTX-020,FR-VACX-001"; fi
+
+  # (b) Notice create → visible in feed → delete (admin, self-clean).
+  req POST /notices "$(jq -nc '{title:"SRS Audit Notice",body:"temporary — auto-deleted by the SRS suite",priority:"low"}')" "$ADMIN_TOKEN"
+  assert_in "Notice create" "$R_CODE" "FR-NOTX-001" 200 201
+  _NID="$(jbody '.id // .data.id // empty')"
+  if [ -n "$_NID" ]; then
+    req DELETE "/notices/$_NID" "" "$ADMIN_TOKEN"
+    assert_in "Notice delete (cleanup)" "$R_CODE" "FR-NOTX-004" 200 204
+  else no "Notice create returned no id" "" "FR-NOTX-001"; fi
+
+  # (c) Signup → delete-guard → delete → cannot re-login (disposable account).
   TS=$(date +%s); TE="srs.$TS@example.com"; TP="Srs@$TS"
   req POST /auth/signup/student "$(jq -nc --arg e "$TE" --arg p "$TP" '{name:"SRS Probe",role:"student",email:$e,password:$p}')"
   assert_in "Disposable student signup" "$R_CODE" "FR-DEL-001" 200 201
@@ -174,7 +215,7 @@ if [ "$WRITE_TESTS" = "1" ]; then
   req POST /auth/login "$(jq -nc --arg i "$TE" --arg p "$TP" '{identifier:$i,password:$p}')"
   assert_in "Deleted account cannot re-login" "$R_CODE" "FR-DEL-020" 401 403 422
 else
-  skip "Write lifecycle (signup→delete)" "set WRITE_TESTS=1 to run" "FR-DEL-001,FR-DEL-010,FR-DEL-020,FR-DLC-001"
+  skip "Write/modify lifecycle" "set WRITE_TESTS=1 to run" "FR-DEL-001,FR-DEL-010,FR-DEL-020,FR-DLC-001,FR-NOTX-001,FR-VACX-001"
 fi
 
 [ "${SRS_SOURCED:-0}" = "1" ] || summary "FUNCTIONAL"

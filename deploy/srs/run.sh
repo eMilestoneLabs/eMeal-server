@@ -102,8 +102,14 @@ fi
 echo
 hr
 echo "  OVERALL: PASS=$PASS FAIL=$FAIL SKIP=$SKIP MANUAL=$MANUAL"
+# Always name EVERY failed assertion here so a single fail can never hide in a
+# long scroll — the consolidated list is printed at the very bottom.
+if [ "$FAIL" -gt 0 ] && [ "${#FAILED_LABELS[@]}" -gt 0 ]; then
+  echo "  Failed assertion(s):"
+  printf '    ✗ %s\n' "${FAILED_LABELS[@]}"
+fi
 echo "  Full log: $LOG"
 if [ "$FAIL" -eq 0 ]; then echo "  RESULT: $(_g 'GREEN — all automated SRS assertions passed')"; STATUS=0
-else echo "  RESULT: $(_r "RED — $FAIL automated assertion(s) failed (see above)")"; STATUS=1; fi
+else echo "  RESULT: $(_r "RED — $FAIL automated assertion(s) failed (named above)")"; STATUS=1; fi
 hr
 exit $STATUS
