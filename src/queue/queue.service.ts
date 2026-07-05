@@ -65,6 +65,17 @@ export class QueueService {
     private readonly systemDefaultQueue: Queue,
   ) {}
 
+  /**
+   * BullMQ rejects custom job ids containing ':' ("Custom Id cannot contain :"),
+   * so every `jobId: dedupKey` add() below used to throw — reminders, analytics
+   * aggregation and cleanup jobs were silently never enqueued in production.
+   * The dedupKey itself (payload field, Redis setNx) keeps its ':' format;
+   * only the BullMQ job id uses '-' separators.
+   */
+  private static jobIdOf(dedupKey: string): string {
+    return dedupKey.replace(/:/g, '-');
+  }
+
   // ── NOTIFICATION JOBS ──────────────────────────────────────────────────────
 
   /**
@@ -125,7 +136,7 @@ export class QueueService {
     const job = await this.reminderQueue.add(
       JOB_TYPES.DISPATCH_REMINDER,
       { ...payload, dedupKey, enqueuedAt: new Date().toISOString() } as ScheduleReminderPayload,
-      { ...DEFAULT_JOB_OPTIONS, delay: delayMs, jobId: dedupKey },
+      { ...DEFAULT_JOB_OPTIONS, delay: delayMs, jobId: QueueService.jobIdOf(dedupKey) },
     );
 
     this.logger.log(`Scheduled reminder job=${job.id} meal=${payload.mealId} delay=${delayMs}ms`);
@@ -158,7 +169,7 @@ export class QueueService {
     const job = await this.analyticsQueue.add(
       JOB_TYPES.AGGREGATE_DAILY,
       { ...payload, dedupKey, enqueuedAt: new Date().toISOString() } as AggregateDailyPayload,
-      { ...DEFAULT_JOB_OPTIONS, jobId: dedupKey }, // jobId = dedupKey prevents duplicate jobs
+      { ...DEFAULT_JOB_OPTIONS, jobId: QueueService.jobIdOf(dedupKey) }, // jobId = dedupKey prevents duplicate jobs
     );
 
     this.logger.debug(`Enqueued aggregate-daily job=${job.id} date=${payload.date}`);
@@ -174,7 +185,7 @@ export class QueueService {
     const job = await this.analyticsQueue.add(
       JOB_TYPES.AGGREGATE_GROUP,
       { ...payload, dedupKey, enqueuedAt: new Date().toISOString() } as AggregateGroupPayload,
-      { ...DEFAULT_JOB_OPTIONS, jobId: dedupKey },
+      { ...DEFAULT_JOB_OPTIONS, jobId: QueueService.jobIdOf(dedupKey) },
     );
 
     this.logger.debug(`Enqueued aggregate-group job=${job.id} group=${payload.groupId}`);
@@ -210,7 +221,7 @@ export class QueueService {
     const job = await this.cleanupQueue.add(
       JOB_TYPES.CLEANUP_STALE_TOKENS,
       { ...payload, dedupKey, enqueuedAt: new Date().toISOString() } as CleanupStaleTokensPayload,
-      { ...DEFAULT_JOB_OPTIONS, jobId: dedupKey },
+      { ...DEFAULT_JOB_OPTIONS, jobId: QueueService.jobIdOf(dedupKey) },
     );
 
     this.logger.debug(`Enqueued stale-token-cleanup job=${job.id}`);
@@ -226,7 +237,7 @@ export class QueueService {
     const job = await this.cleanupQueue.add(
       JOB_TYPES.CLEANUP_EXPIRED_EVENTS,
       { ...payload, dedupKey, enqueuedAt: new Date().toISOString() } as CleanupExpiredEventsPayload,
-      { ...DEFAULT_JOB_OPTIONS, jobId: dedupKey },
+      { ...DEFAULT_JOB_OPTIONS, jobId: QueueService.jobIdOf(dedupKey) },
     );
 
     this.logger.debug(`Enqueued expired-event-cleanup job=${job.id}`);
@@ -242,7 +253,7 @@ export class QueueService {
     const job = await this.cleanupQueue.add(
       JOB_TYPES.CLEANUP_ORPHAN_RECORDS,
       { ...payload, dedupKey, enqueuedAt: new Date().toISOString() } as CleanupOrphanRecordsPayload,
-      { ...DEFAULT_JOB_OPTIONS, jobId: dedupKey },
+      { ...DEFAULT_JOB_OPTIONS, jobId: QueueService.jobIdOf(dedupKey) },
     );
 
     return job.id!;
@@ -257,7 +268,7 @@ export class QueueService {
     const job = await this.cleanupQueue.add(
       JOB_TYPES.CLEANUP_AUDIT_LOGS,
       { ...payload, dedupKey, enqueuedAt: new Date().toISOString() } as CleanupAuditLogsPayload,
-      { ...DEFAULT_JOB_OPTIONS, jobId: dedupKey },
+      { ...DEFAULT_JOB_OPTIONS, jobId: QueueService.jobIdOf(dedupKey) },
     );
 
     return job.id!;
