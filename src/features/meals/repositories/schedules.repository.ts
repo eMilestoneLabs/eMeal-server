@@ -61,6 +61,7 @@ export class SchedulesRepository {
       closeTime: raw.closeTime ?? null,
       preferencesEnabled: raw.preferencesEnabled ?? null,
       enabledPreferences: raw.enabledPreferences ?? [],
+      enabledPreferenceGroupIds: raw.enabledPreferenceGroupIds ?? [],
       menuItems: raw.menuItems ?? [],
       price: raw.price ?? null,
       mealName: raw.mealName ?? null,
@@ -131,6 +132,7 @@ export class SchedulesRepository {
       imageUrl: e.imageUrl ?? null,
       preferencesEnabled: e.preferencesEnabled ?? null,
       enabledPreferences: e.enabledPreferences ?? [],
+      enabledPreferenceGroupIds: e.enabledPreferenceGroupIds ?? [],
       menuItems: e.menuItems ?? [],
       price: e.price ?? null,
       meal: e.meal
@@ -300,6 +302,7 @@ export class SchedulesRepository {
         imageUrl: string | null;
         preferencesEnabled: boolean | null;
         enabledPreferences: string[];
+        enabledPreferenceGroupIds: string[];
         menuItems: string[];
         price: number | null;
       }
@@ -315,6 +318,7 @@ export class SchedulesRepository {
         imageUrl: string | null;
         preferencesEnabled: boolean | null;
         enabledPreferences: string[];
+        enabledPreferenceGroupIds: string[];
         menuItems: string[];
         price: number | null;
       }
@@ -373,6 +377,7 @@ export class SchedulesRepository {
         imageUrl: e.imageUrl ?? null,
         preferencesEnabled: e.preferencesEnabled ?? null,
         enabledPreferences: e.enabledPreferences ?? [],
+      enabledPreferenceGroupIds: e.enabledPreferenceGroupIds ?? [],
         menuItems: e.menuItems ?? [],
         price: e.price ?? null,
       });
@@ -396,6 +401,7 @@ export class SchedulesRepository {
       closeTime?: string | null;
       preferencesEnabled?: boolean | null;
       enabledPreferences?: string[] | null;
+      enabledPreferenceGroupIds?: string[] | null;
       menuItems?: string[] | null;
       price?: number | null;
     }>;
@@ -420,6 +426,7 @@ export class SchedulesRepository {
                 closeTime: e.closeTime ?? null,
                 preferencesEnabled: e.preferencesEnabled ?? null,
                 enabledPreferences: e.enabledPreferences ?? [],
+      enabledPreferenceGroupIds: e.enabledPreferenceGroupIds ?? [],
                 menuItems: e.menuItems ?? [],
                 price: e.price ?? null,
               })),
@@ -454,6 +461,7 @@ export class SchedulesRepository {
         closeTime?: string | null;
         preferencesEnabled?: boolean | null;
         enabledPreferences?: string[] | null;
+      enabledPreferenceGroupIds?: string[] | null;
       menuItems?: string[] | null;
       price?: number | null;
       }>;
@@ -490,6 +498,7 @@ export class SchedulesRepository {
                 closeTime: e.closeTime ?? null,
                 preferencesEnabled: e.preferencesEnabled ?? null,
                 enabledPreferences: e.enabledPreferences ?? [],
+      enabledPreferenceGroupIds: e.enabledPreferenceGroupIds ?? [],
                 menuItems: e.menuItems ?? [],
                 price: e.price ?? null,
               })),
@@ -512,6 +521,7 @@ export class SchedulesRepository {
                   closeTime: entry.closeTime ?? null,
                   preferencesEnabled: entry.preferencesEnabled ?? null,
                   enabledPreferences: entry.enabledPreferences ?? [],
+      enabledPreferenceGroupIds: entry.enabledPreferenceGroupIds ?? [],
                   menuItems: entry.menuItems ?? [],
                   price: entry.price ?? null,
                 },
@@ -531,6 +541,7 @@ export class SchedulesRepository {
                   closeTime: entry.closeTime ?? null,
                   preferencesEnabled: entry.preferencesEnabled ?? null,
                   enabledPreferences: entry.enabledPreferences ?? [],
+      enabledPreferenceGroupIds: entry.enabledPreferenceGroupIds ?? [],
                   menuItems: entry.menuItems ?? [],
                   price: entry.price ?? null,
                 },
@@ -578,6 +589,7 @@ export class SchedulesRepository {
       closeTime?: string | null;
       preferencesEnabled?: boolean | null;
       enabledPreferences?: string[] | null;
+      enabledPreferenceGroupIds?: string[] | null;
       menuItems?: string[] | null;
       price?: number | null;
     }>,
@@ -603,6 +615,7 @@ export class SchedulesRepository {
             closeTime: e.closeTime ?? null,
             preferencesEnabled: e.preferencesEnabled ?? null,
             enabledPreferences: e.enabledPreferences ?? [],
+      enabledPreferenceGroupIds: e.enabledPreferenceGroupIds ?? [],
             menuItems: e.menuItems ?? [],
             price: e.price ?? null,
           })),
@@ -717,6 +730,7 @@ export class SchedulesRepository {
                   closeTime: e.closeTime ?? null,
                   preferencesEnabled: e.preferencesEnabled ?? null,
                   enabledPreferences: e.enabledPreferences ?? [],
+      enabledPreferenceGroupIds: e.enabledPreferenceGroupIds ?? [],
                   menuItems: e.menuItems ?? [],
                   price: e.price ?? null,
                 })),

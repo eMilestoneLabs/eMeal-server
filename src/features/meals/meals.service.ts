@@ -352,6 +352,28 @@ export class MealsService {
                     if (o.enabledPreferences.length > 0) {
                       next.enabledPreferences = o.enabledPreferences;
                     }
+                    // #3: per-day control of MULTI-preference groups. When the
+                    // admin turns preferences OFF for this day in the weekly
+                    // planner, hide the meal's master preference groups too (not
+                    // just the flat tags) so members pick nothing that day. The
+                    // master meal config is untouched — this is a per-day
+                    // presentation overlay only (no schema change).
+                    if (o.preferencesEnabled === false) {
+                      next.preferenceGroups = [];
+                    }
+                  }
+                  // #3: per-day SUBSET of master preference groups. A non-empty
+                  // list narrows the meal's groups to just those IDs for this
+                  // day; empty = inherit ALL master groups (unchanged behaviour).
+                  if (
+                    o.enabledPreferenceGroupIds &&
+                    o.enabledPreferenceGroupIds.length > 0 &&
+                    Array.isArray(next.preferenceGroups)
+                  ) {
+                    const allow = new Set(o.enabledPreferenceGroupIds);
+                    next.preferenceGroups = next.preferenceGroups.filter(
+                      (g: any) => allow.has(g.id),
+                    );
                   }
                   // Issue 3: per-day menu shown on the meal card + detail screen.
                   if (o.menuItems && o.menuItems.length > 0) {

@@ -38,6 +38,9 @@ export class ScheduleEntryEntity {
   // Per-day meal preference override (#6). null = inherit from the meal.
   preferencesEnabled: boolean | null;
   enabledPreferences: string[];
+  // Additive (#3): per-day subset of the meal's master preference group IDs that
+  // apply this day. Empty = inherit ALL master groups (unchanged behaviour).
+  enabledPreferenceGroupIds: string[];
   menuItems: string[];
   // Additive: per-day ₹ price override (null = inherit master meal price).
   price: number | null;
@@ -73,6 +76,7 @@ export class ScheduleEntryEntity {
     this.imageUrl = partial.imageUrl ?? null;
     this.preferencesEnabled = partial.preferencesEnabled ?? null;
     this.enabledPreferences = partial.enabledPreferences ?? [];
+    this.enabledPreferenceGroupIds = partial.enabledPreferenceGroupIds ?? [];
     this.menuItems = partial.menuItems ?? [];
     this.price = partial.price ?? null;
     this.meal = partial.meal;

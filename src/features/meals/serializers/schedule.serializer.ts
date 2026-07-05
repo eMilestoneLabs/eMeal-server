@@ -95,6 +95,8 @@ export class ScheduleSerializer {
       // Additive (#6): per-day meal preference.
       preferencesEnabled: entry.preferencesEnabled ?? false,
       enabledPreferences: entry.enabledPreferences ?? [],
+      // #3: per-day subset of master preference group ids (empty = inherit all).
+      enabledPreferenceGroupIds: entry.enabledPreferenceGroupIds ?? [],
       // Additive: per-day ₹ price (fallback to master meal price).
       price: entry.price ?? entry.meal?.price ?? null,
     };

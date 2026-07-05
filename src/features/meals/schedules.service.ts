@@ -488,6 +488,7 @@ export class SchedulesService {
       attendanceWindow?: { openTime: string; closeTime: string } | null;
       preferencesEnabled?: boolean | null;
       enabledPreferences?: string[] | null;
+      enabledPreferenceGroupIds?: string[] | null;
       menuItems?: string[] | null;
       price?: number | null;
     }>,
@@ -505,6 +506,7 @@ export class SchedulesService {
       closeTime: string | null;
       preferencesEnabled: boolean | null;
       enabledPreferences: string[];
+      enabledPreferenceGroupIds: string[];
       menuItems: string[];
       price: number | null;
     }> = [];
@@ -538,6 +540,7 @@ export class SchedulesService {
         closeTime: entry.attendanceWindow?.closeTime ?? null,
         preferencesEnabled: entry.preferencesEnabled ?? null,
         enabledPreferences: entry.enabledPreferences ?? [],
+        enabledPreferenceGroupIds: entry.enabledPreferenceGroupIds ?? [],
         menuItems: entry.menuItems ?? [],
         price: entry.price ?? null,
       });

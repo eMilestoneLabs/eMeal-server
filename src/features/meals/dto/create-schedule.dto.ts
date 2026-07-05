@@ -89,6 +89,13 @@ export class CreateScheduleEntryDto {
   @IsString({ each: true })
   enabledPreferences?: string[];
 
+  /** #3: per-day SUBSET of the meal's master preference GROUP ids that apply
+   * this day. Empty/absent = inherit ALL master groups (unchanged behaviour). */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  enabledPreferenceGroupIds?: string[];
+
   @IsOptional()
   @IsArray()
   @IsString({ each: true })

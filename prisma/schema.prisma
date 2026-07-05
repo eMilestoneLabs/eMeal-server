@@ -536,6 +536,9 @@ model ScheduleEntry {
   // Additive (#6): per-day meal preference override. null = inherit from meal.
   preferencesEnabled Boolean?
   enabledPreferences String[] @default([])
+  // Additive (#3): per-day SUBSET of the meal's master preference groups that
+  // apply this day (group IDs). Empty = inherit ALL master groups (no change).
+  enabledPreferenceGroupIds String[] @default([])
   menuItems          String[] @default([]) // per-day menu (independent of master meal)
   // Additive: per-day ₹ price override (null = inherit master Meal.price)
   price              Int?

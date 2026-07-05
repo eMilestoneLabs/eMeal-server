@@ -170,7 +170,7 @@ assert_code "Admin dashboard (single request)" 200 "$R_CODE"
 GEN_AT=$(echo "$R_BODY" | jq -r 'try ((.data // .).generatedAt // "none") catch "none"')
 [ "$GEN_AT" != "none" ] && ok "Dashboard generatedAt freshness stamp" || skip "generatedAt" "not present"
 
-req GET "/dashboard/analytics/attendance?fromDate=$FROM&toDate=$TO" "" "$ADMIN_TOKEN"
+req GET "/dashboard/analytics/attendance?groupId=$GROUP_ID&fromDate=$FROM&toDate=$TO" "" "$ADMIN_TOKEN"
 assert_code "Attendance analytics (pref-wise)" 200 "$R_CODE"
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -178,7 +178,7 @@ sec "5. PREFERENCES / MULTI-PREFERENCE"
 req GET "/meals/today?groupId=$GROUP_ID" "" "$ADMIN_TOKEN"
 HAS_PG=$(echo "$R_BODY" | jq 'try ([.. | objects | select(has("preferenceGroups"))] | length > 0) catch false')
 [ "$HAS_PG" = "true" ] && ok "Preference groups embedded in meals" || skip "Preference groups" "none configured on this group"
-req GET "/groups/$GROUP_ID/preference-crosstab" "" "$ADMIN_TOKEN"
+req GET "/groups/$GROUP_ID/preference-crosstab?date=$TO" "" "$ADMIN_TOKEN"
 { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "404" ]; } && ok "Preference crosstab endpoint" "($R_CODE)" || no "Preference crosstab" "$R_CODE"
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -278,7 +278,9 @@ perf() { # label path token
     total=$((total+R_MS)); [ "$R_MS" -lt "$min" ] && min=$R_MS; [ "$R_MS" -gt "$max" ] && max=$R_MS
   done
   local avg=$((total/PERF_SAMPLES))
-  printf "  %-40s code=%-4s min=%-5s avg=%-5s max=%-5s ms\n" "$1" "$code" "$min" "$avg" "$max"
+  # Human-readable line → stderr so command-substitution captures ONLY the
+  # numeric avg below (fd2 stays on the outer tee; fd1 is what $() reads).
+  printf "  %-40s code=%-4s min=%-5s avg=%-5s max=%-5s ms\n" "$1" "$code" "$min" "$avg" "$max" >&2
   echo "$avg"
 }
 A=$(perf "dashboard/admin"    "/dashboard/admin" "$ADMIN_TOKEN")

@@ -86,7 +86,7 @@ DOCKER_UNHEALTHY=$(grep -ci 'unhealthy\|restarting' "$OUT/docker-ps.txt" || true
 check "A3 docker containers healthy" $([ "${DOCKER_UNHEALTHY:-0}" = "0" ] && echo 0 || echo 1) "up=$DOCKER_UP unhealthy=$DOCKER_UNHEALTHY"
 
 PG_C=$(docker ps --format '{{.Names}}' | grep -m1 postgres || true)
-RD_C=$(docker ps --format '{{.Names}}' | grep -m1 redis || true)
+RD_C=$(docker ps --format '{{.Names}}' | grep redis | grep -v exporter | head -n1 || true)
 psqlq() { docker exec "$PG_C" bash -c "psql -U \$POSTGRES_USER -d \$POSTGRES_DB -tAc \"$1\"" 2>/dev/null | tr -d '[:space:]'; }
 PG_OK=$(psqlq "SELECT 1")
 check "A4 postgres reachable" $([ "$PG_OK" = "1" ] && echo 0 || echo 1) "container=$PG_C"
@@ -146,4 +146,18 @@ TPT=$(jval .accessToken)
 if [ "$R_CODE" = "201" ] || [ "$R_CODE" = "200" ]; then
   check "C1 student signup" 0 "code=$R_CODE ${R_MS}ms email=$TP_EMAIL"
   [ -z "$TPT" ] || [ "$TPT" = "null" ] && { req POST /auth/login - "{\"identifier\":\"$TP_EMAIL\",\"password\":\"$TP_PASS\"}" tp-login; TPT=$(jval .accessToken); }
-  req DELETE /users/me "$TPT" "{\"confirm\
+  req DELETE /users/me "$TPT" "{\"confirm\":\"nope\",\"password\":\"$TP_PASS\"}" del-guard
+  check "C2 delete rejects wrong confirm phrase" $([ "$R_CODE" = "400" ] || [ "$R_CODE" = "422" ] && echo 0 || echo 1) "code=$R_CODE"
+  req DELETE /users/me "$TPT" "{\"confirm\":\"DELETE\",\"password\":\"$TP_PASS\"}" del
+  check "C3 account deletion (DELETE /users/me)" $([ "$R_CODE" = "200" ] && echo 0 || echo 1) "code=$R_CODE ${R_MS}ms"
+  req POST /auth/login - "{\"identifier\":\"$TP_EMAIL\",\"password\":\"$TP_PASS\"}" tp-relogin
+  check "C4 deleted account cannot re-login" $([ "$R_CODE" = "401" ] || [ "$R_CODE" = "403" ] || [ "$R_CODE" = "422" ] && echo 0 || echo 1) "code=$R_CODE"
+else
+  check "C1 student signup" 1 "code=$R_CODE — signup failed; delete lifecycle skipped"
+fi
+
+# ═════ SUMMARY ═══════════════════════════════════════════════════════════════
+hdr "SUMMARY"
+log "PASS=$PASS  FAIL=$FAIL  WARN=$WARN"
+log "Finished $(date -u +%FT%TZ) — full results under $OUT"
+if [ "$FAIL" -eq 0 ]; then exit 0; else exit 1; fi
