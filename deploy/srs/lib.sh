@@ -89,6 +89,19 @@ req(){
 }
 jbody(){ printf '%s' "$R_BODY" | jq -r "$1" 2>/dev/null; }
 
+# req_settle METHOD PATH [BODY] [TOKEN] — like req, but if the response is a
+# transient 429 (a prior load test saturated the burst throttle) it backs off
+# and retries so the caller sees the TRUE verdict (e.g. RBAC 403), not a rate-
+# limit artifact. Bounded so it can never hang. Used by correctness assertions
+# (RBAC / tenant-isolation) that must not be masked by throttling.
+req_settle(){
+  local _t=0
+  req "$@"
+  while [ "${R_CODE:-000}" = "429" ] && [ "$_t" -lt 8 ]; do
+    sleep 2; _t=$((_t+1)); req "$@"
+  done
+}
+
 # login <email> <password>  → echoes accessToken (empty on failure)
 login(){
   req POST /auth/login "$(jq -nc --arg i "$1" --arg p "$2" '{identifier:$i,password:$p}')"
@@ -98,8 +111,11 @@ login(){
 # percentile helper: feed newline-separated numbers on stdin, arg=pXX(0-100)
 pctl(){ awk -v p="$1" 'NR{a[NR]=$1} END{n=asort(a); if(n==0){print 0;exit} i=int((p/100)*n); if(i<1)i=1; if(i>n)i=n; print a[i]}'; }
 
-# perf <label> <path> <token> <req-ids> <slo-ms>  → prints stats to STDERR,
-# echoes p95 to STDOUT (so $(...) captures a clean number), asserts p95<slo.
+# perf <label> <path> <token> <req-ids> <slo-ms>  → prints stats + the SLO
+# PASS/FAIL line normally, asserts p95<slo, and exposes the p95 via the global
+# $PERF_P95. Call it IN-PROCESS (not in $(...)): capturing its stdout would
+# swallow the ok/no line into the caller and corrupt the metrics file.
+PERF_P95=""
 perf(){
   local label="$1" path="$2" tok="$3" ids="$4" slo="$5"
   local tmp="$RESULTS_DIR/.perf"; : > "$tmp"
@@ -118,7 +134,7 @@ perf(){
   case "$code" in 2[0-9][0-9]|4[0-9][0-9]) ok_code=1 ;; esac
   if [ "$ok_code" = "1" ] && [ "${p95:-99999}" -lt "$slo" ]; then ok "SLO $label p95<${slo}ms" "(code=$code p95=${p95}ms)" "$ids"
   else no "SLO $label p95<${slo}ms" "(code=$code p95=${p95}ms)" "$ids"; fi
-  echo "$p95"
+  PERF_P95="$p95"
 }
 
 summary(){

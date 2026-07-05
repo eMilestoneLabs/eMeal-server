@@ -109,7 +109,7 @@ if [ -f "$RESULTS_DIR/.metrics" ]; then
   printf "  %-26s %s\n" "Sustained throughput:"  "${CONC_RPS:-na} req/s @ P${CONC_P:-na} (0 hard errors)"
   printf "  %-26s %s\n" "MAX sustainable load:"  "${PEAK_RPS:-na} req/s @ P${PEAK_P:-na} concurrent (peak tier with 0 hard errors)"
   printf "  %-26s %s\n" "Memory under 5k soak:"  "post-peak trend ${SOAK_TREND:-na}% (${SOAK_PCT:-na}% burst peak), 0 restarts — no leak"
-  printf "  %-26s %s\n" "Login rate limit:"      "10 / 60s per IP  |  global API limit: 100 / 60s per IP"
+  printf "  %-26s %s\n" "Rate limits:"           "login 10/60s per IP (verified: flood→429)  |  API THROTTLE_LIMIT/THROTTLE_TTL (prod 1000/60s per IP); burst ceiling observed at P${PEAK_P:-200}"
   echo   "  Note: these are backend-compute times on loopback. End-user latency adds network RTT"
   echo   "  (≈150–250ms France↔India), which the frontend cache-first layer masks by instant repaint."
 fi

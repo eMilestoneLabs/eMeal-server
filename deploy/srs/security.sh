@@ -32,7 +32,10 @@ if [ -n "$STUDENT_TOKEN" ]; then
   ADMIN_ONLY=( "/dashboard/admin" "/billing/periods" "/notifications/diagnostics"
     "/admin/queues/stats" "/admin/audit/integrity" "/dashboard/admin/overview" )
   for p in "${ADMIN_ONLY[@]}"; do
-    req GET "$p" "" "$STUDENT_TOKEN"; assert_in "student denied ${p:0:34}" "$R_CODE" "FR-SECX-030,FR-PRIV-001" 403 404
+    # req_settle: this runs after the PERF-E capacity ramp, which can leave the
+    # burst throttle hot. Drain any transient 429 so we assert the TRUE RBAC
+    # verdict (403/404), never a rate-limit artifact.
+    req_settle GET "$p" "" "$STUDENT_TOKEN"; assert_in "student denied ${p:0:34}" "$R_CODE" "FR-SECX-030,FR-PRIV-001" 403 404
   done
 else skip "RBAC probes" "no STUDENT_TOKEN" "FR-SECX-030"; fi
 
@@ -50,7 +53,7 @@ if [ -n "$ADMIN2_TOKEN" ] && [ -n "$GROUP_ID" ]; then
     "/groups/$GROUP_ID/preference-crosstab?date=$TO" )
   [ -n "${MEAL_ID:-}" ] && CROSS+=( "/attendance/meal-summary?mealId=$MEAL_ID&date=$TO" )
   for p in "${CROSS[@]}"; do
-    req GET "$p" "" "$ADMIN2_TOKEN"; assert_in "cross-org blocked ${p:0:34}" "$R_CODE" "FR-SECX-040,FR-PRIV-010" 403 404
+    req_settle GET "$p" "" "$ADMIN2_TOKEN"; assert_in "cross-org blocked ${p:0:34}" "$R_CODE" "FR-SECX-040,FR-PRIV-010" 403 404
   done
 else skip "Isolation probes" "no ADMIN2_TOKEN/GROUP_ID" "FR-SECX-040"; fi
 

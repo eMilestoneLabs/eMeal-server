@@ -19,14 +19,15 @@ req GET /groups "" "$ADMIN_TOKEN"; GROUP_ID="${GROUP_ID:-$(jbody '(.data // .)[0
 
 sec "PERF-A — LATENCY PERCENTILES (backend compute, localhost) FR-TIME / NFR-perf"
 echo "  (samples=$PERF_SAMPLES each; SLO gate on p95)" >&2
-# Capture each p95 (perf echoes it to stdout, prints the human line to stderr)
-# so the CERTIFICATE at the end can state the hard numbers.
-P_HEALTH=$(perf "health"           "/health"                                                   ""            "NFR-PERF-001" 100)
-P_DASH=$(perf   "dashboard/admin"  "/dashboard/admin"                                          "$ADMIN_TOKEN" "FR-OVR-001,NFR-PERF-010" 300)
-P_ATT=$(perf    "attendance/today" "/attendance/today"                                         "${STUDENT_TOKEN:-$ADMIN_TOKEN}" "FR-ATT-001,NFR-PERF-011" 200)
-P_MEALS=$(perf  "meals/today"      "/meals/today?groupId=$GROUP_ID"                            "$ADMIN_TOKEN" "FR-MEAL-020,NFR-PERF-012" 250)
-P_BILL=$(perf   "billing-summary"  "/attendance/billing-summary?groupId=$GROUP_ID&fromDate=$FROM&toDate=$TO" "$ADMIN_TOKEN" "FR-BILL-001,NFR-PERF-013" 250)
-P_GRP=$(perf    "groups"           "/groups"                                                   "$ADMIN_TOKEN" "FR-GRP-001,NFR-PERF-014" 200)
+# perf() runs IN-PROCESS (so its SLO PASS/FAIL line displays and counts) and
+# exposes each p95 via $PERF_P95, which we snapshot for the CERTIFICATE. Do NOT
+# wrap these in $(...) — that would swallow the PASS line and corrupt .metrics.
+perf "health"           "/health"                                                   ""            "NFR-PERF-001" 100;                    P_HEALTH="$PERF_P95"
+perf "dashboard/admin"  "/dashboard/admin"                                          "$ADMIN_TOKEN" "FR-OVR-001,NFR-PERF-010" 300;         P_DASH="$PERF_P95"
+perf "attendance/today" "/attendance/today"                                         "${STUDENT_TOKEN:-$ADMIN_TOKEN}" "FR-ATT-001,NFR-PERF-011" 200; P_ATT="$PERF_P95"
+perf "meals/today"      "/meals/today?groupId=$GROUP_ID"                            "$ADMIN_TOKEN" "FR-MEAL-020,NFR-PERF-012" 250;        P_MEALS="$PERF_P95"
+perf "billing-summary"  "/attendance/billing-summary?groupId=$GROUP_ID&fromDate=$FROM&toDate=$TO" "$ADMIN_TOKEN" "FR-BILL-001,NFR-PERF-013" 250; P_BILL="$PERF_P95"
+perf "groups"           "/groups"                                                   "$ADMIN_TOKEN" "FR-GRP-001,NFR-PERF-014" 200;         P_GRP="$PERF_P95"
 
 sec "PERF-B — CONCURRENCY / THROUGHPUT (${PERF_CONC} parallel clients) FR-CONC-001"
 # TOTAL scales with PERF_CONC, so `PERF_CONC=50` gives a genuine extreme-load
