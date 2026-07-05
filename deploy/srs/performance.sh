@@ -112,28 +112,35 @@ case "$WS_CODE" in
 esac
 
 # ─────────────────────────────────────────────────────────────────────────────
-sec "PERF-E — MAX CAPACITY RAMP (find peak sustainable throughput) FR-CAP-001"
-# Ramp concurrency until throughput plateaus / hard errors appear. 429s are the
-# limiter working (counted separately, not a failure). The peak tier with ZERO
-# hard errors (no 5xx / connection drop) is the certified max sustainable load.
-PEAK_RPS=0; PEAK_P=0
-for _P in 10 25 50 100 200; do
-  _N=$((_P*20)); RCF="$RESULTS_DIR/.ramp"; : > "$RCF"
-  _s=$(date +%s.%N)
-  seq 1 "$_N" | xargs -P"$_P" -I{} sh -c 'curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer '"$ADMIN_TOKEN"'" "'"$BASE"'/dashboard/admin" >> "'"$RCF"'"'
-  _e=$(date +%s.%N); _el=$(awk "BEGIN{print $_e-$_s}")
-  _rps=$(awk "BEGIN{printf \"%.0f\", $_N/($_el>0?$_el:1)}")
-  read -r _r2 _r429 _rerr <<EOF
+# PERF-E deliberately SATURATES the per-IP throttle (60s sliding window) on the
+# shared hot path /dashboard/admin. If it runs before the security suite, that
+# saturation makes SEC-B's RBAC probe read a 429 instead of the true 403 for a
+# full window. So it's packaged as a function that run.sh invokes LAST (after
+# security.sh) — nothing throttle-sensitive runs after it. It also persists the
+# headline metrics the certificate reads, so the write lives here with it.
+run_capacity_ramp(){
+  sec "PERF-E — MAX CAPACITY RAMP (find peak sustainable throughput) FR-CAP-001"
+  # Ramp concurrency until throughput plateaus / hard errors appear. 429s are the
+  # limiter working (counted separately, not a failure). The peak tier with ZERO
+  # hard errors (no 5xx / connection drop) is the certified max sustainable load.
+  PEAK_RPS=0; PEAK_P=0
+  for _P in 10 25 50 100 200; do
+    _N=$((_P*20)); RCF="$RESULTS_DIR/.ramp"; : > "$RCF"
+    _s=$(date +%s.%N)
+    seq 1 "$_N" | xargs -P"$_P" -I{} sh -c 'curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer '"$ADMIN_TOKEN"'" "'"$BASE"'/dashboard/admin" >> "'"$RCF"'"'
+    _e=$(date +%s.%N); _el=$(awk "BEGIN{print $_e-$_s}")
+    _rps=$(awk "BEGIN{printf \"%.0f\", $_N/($_el>0?$_el:1)}")
+    read -r _r2 _r429 _rerr <<EOF
 $(awk '/^2[0-9][0-9]$/{a++} /^429$/{b++} !/^(2[0-9][0-9]|429)$/{c++} END{printf "%d %d %d", a+0, b+0, c+0}' "$RCF")
 EOF
-  printf "  P=%-3s N=%-4s %6s req/s | 2xx=%-4s throttled(429)=%-4s hard-err=%-3s\n" "$_P" "$_N" "$_rps" "$_r2" "$_r429" "$_rerr" >&2
-  if [ "${_rerr:-0}" = "0" ] && [ "${_rps:-0}" -gt "${PEAK_RPS:-0}" ] 2>/dev/null; then PEAK_RPS="$_rps"; PEAK_P="$_P"; fi
-done
-if [ "${PEAK_RPS:-0}" -gt 0 ]; then ok "Max sustainable throughput (0 hard errors)" "${PEAK_RPS} req/s @P${PEAK_P}" "FR-CAP-001"
-else no "Capacity ramp hit hard errors at every tier" "" "FR-CAP-001"; fi
+    printf "  P=%-3s N=%-4s %6s req/s | 2xx=%-4s throttled(429)=%-4s hard-err=%-3s\n" "$_P" "$_N" "$_rps" "$_r2" "$_r429" "$_rerr" >&2
+    if [ "${_rerr:-0}" = "0" ] && [ "${_rps:-0}" -gt "${PEAK_RPS:-0}" ] 2>/dev/null; then PEAK_RPS="$_rps"; PEAK_P="$_P"; fi
+  done
+  if [ "${PEAK_RPS:-0}" -gt 0 ]; then ok "Max sustainable throughput (0 hard errors)" "${PEAK_RPS} req/s @P${PEAK_P}" "FR-CAP-001"
+  else no "Capacity ramp hit hard errors at every tier" "" "FR-CAP-001"; fi
 
-# Persist the headline numbers so run.sh can print a PERFORMANCE CERTIFICATE.
-cat > "$RESULTS_DIR/.metrics" <<EOF
+  # Persist the headline numbers so run.sh can print a PERFORMANCE CERTIFICATE.
+  cat > "$RESULTS_DIR/.metrics" <<EOF
 P_HEALTH=${P_HEALTH:-na}
 P_DASH=${P_DASH:-na}
 P_ATT=${P_ATT:-na}
@@ -150,5 +157,9 @@ PEAK_P=${PEAK_P:-na}
 SOAK_TREND=${TREND:-na}
 SOAK_PCT=${PCT:-na}
 EOF
+}
 
-[ "${SRS_SOURCED:-0}" = "1" ] || summary "PERFORMANCE"
+# Standalone (bash performance.sh): run the ramp inline + print the module
+# summary. Under run.sh (SRS_SOURCED=1) run.sh calls run_capacity_ramp AFTER
+# security.sh so the throttle saturation can't taint the RBAC/IDOR probes.
+if [ "${SRS_SOURCED:-0}" != "1" ]; then run_capacity_ramp; summary "PERFORMANCE"; fi

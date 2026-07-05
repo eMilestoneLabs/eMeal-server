@@ -36,6 +36,11 @@ echo "════════════════════════�
 . "$HERE/functional.sh"
 . "$HERE/performance.sh"
 . "$HERE/security.sh"
+# PERF-E max-capacity ramp runs LAST. It intentionally saturates the per-IP
+# throttle (60s window) on /dashboard/admin; running it before security made
+# SEC-B's RBAC probe read a 429 instead of the true 403. Nothing throttle-
+# sensitive runs after it, and it writes the metrics the certificate reads.
+run_capacity_ramp
 
 # ── Reconcile assertions (REQLOG) against the requirement manifest ───────────
 MAN="$HERE/manifest.tsv"
