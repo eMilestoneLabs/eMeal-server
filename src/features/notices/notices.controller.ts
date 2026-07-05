@@ -98,6 +98,7 @@ export class NoticesController {
   ) {
     return this.noticesService.markAllRead(
       user.sub,
+      user.role,
       user.organizationId!,
       groupId,
     );

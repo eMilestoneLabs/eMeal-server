@@ -10,6 +10,8 @@ export class NoticeEntity {
   title: string;
   body: string;
   priority: string;
+  /** Visibility gate: 'all' | 'admins' | 'members' (#4). */
+  audience: string;
   pinned: boolean;
   publishedAt: Date;
   expiresAt: Date | null;

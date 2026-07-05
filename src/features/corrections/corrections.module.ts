@@ -5,6 +5,7 @@ import { GroupsModule } from '../groups/groups.module';
 import { AttendanceModule } from '../attendance/attendance.module';
 import { RealtimeModule } from '../../realtime/realtime.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { NoticesModule } from '../notices/notices.module';
 
 import { CorrectionsController } from './corrections.controller';
 import { CorrectionsService } from './corrections.service';
@@ -28,6 +29,7 @@ import { CorrectionRequestsRepository } from './repositories/correction-requests
     AttendanceModule,
     RealtimeModule,
     NotificationsModule,
+    NoticesModule,
   ],
   controllers: [CorrectionsController],
   providers: [CorrectionsService, CorrectionRequestsRepository],

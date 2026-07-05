@@ -39,6 +39,65 @@ export class NoticesService {
     return (ADMIN_ROLES as readonly string[]).includes(role);
   }
 
+  /**
+   * #4: which notice audiences a role may see. Everyone sees 'all' (legacy
+   * broadcast notices); admins additionally see 'admins' (request alerts),
+   * members additionally see 'members'. Keeps admin-only alerts out of the
+   * student bell and vice-versa.
+   */
+  private audiencesFor(role: string): string[] {
+    return this.isAdmin(role) ? ['all', 'admins'] : ['all', 'members'];
+  }
+
+  // ── REQUEST ALERT (system → admins' bell) ───────────────────────────────────
+
+  /**
+   * #4: raise an in-app notice targeted at ORG ADMINS when a member submits a
+   * request (vacation, correction, …) so it appears in the admin bell + unread
+   * badge — the reliable in-app channel that complements the best-effort push.
+   * Best-effort and never throws: the underlying request write must succeed even
+   * if this alert fails. Org-wide (groupId null) so every admin sees it
+   * regardless of their selected group; audience 'admins' hides it from members.
+   */
+  async createRequestAlert(params: {
+    organizationId: string;
+    groupId?: string | null;
+    actorId: string;
+    title: string;
+    body: string;
+    priority?: string;
+  }): Promise<void> {
+    try {
+      const notice = await this.repo.create({
+        organizationId: params.organizationId,
+        groupId: params.groupId ?? null,
+        createdBy: params.actorId,
+        title: params.title,
+        body: params.body,
+        priority: params.priority ?? 'high',
+        audience: 'admins',
+        pinned: false,
+        expiresAt: null,
+      });
+      // Live badge: reuse the notice-created realtime channel so an admin bell
+      // that is open refreshes immediately (the widget re-fetches unread count).
+      this.realtime?.emitNoticeCreated(params.organizationId, notice.groupId, {
+        organizationId: params.organizationId,
+        groupId: notice.groupId,
+        noticeId: notice.id,
+        title: notice.title,
+        priority: notice.priority,
+        pinned: notice.pinned,
+        publishedAt: notice.publishedAt.toISOString(),
+        audience: 'admins',
+      });
+    } catch (err) {
+      this.logger.warn(
+        `request-alert notice failed (request unaffected): ${(err as Error).message}`,
+      );
+    }
+  }
+
   // ── CREATE (admin) ─────────────────────────────────────────────────────────
 
   async createNotice(
@@ -124,6 +183,7 @@ export class NoticesService {
       page,
       limit,
       withReadCount: admin,
+      audiences: this.audiencesFor(role),
     });
 
     return {
@@ -146,7 +206,12 @@ export class NoticesService {
       const member = await this.repo.isActiveMember(groupId, userId);
       if (!member) return { count: 0 };
     }
-    const count = await this.repo.unreadCount(organizationId, userId, groupId);
+    const count = await this.repo.unreadCount(
+      organizationId,
+      userId,
+      groupId,
+      this.audiencesFor(role),
+    );
     return { count };
   }
 
@@ -164,8 +229,18 @@ export class NoticesService {
     return { success: true };
   }
 
-  async markAllRead(userId: string, organizationId: string, groupId?: string) {
-    const updated = await this.repo.markAllRead(organizationId, userId, groupId);
+  async markAllRead(
+    userId: string,
+    role: string,
+    organizationId: string,
+    groupId?: string,
+  ) {
+    const updated = await this.repo.markAllRead(
+      organizationId,
+      userId,
+      groupId,
+      this.audiencesFor(role),
+    );
     return { success: true, updated };
   }
 

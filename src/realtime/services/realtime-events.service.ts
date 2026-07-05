@@ -159,6 +159,9 @@ export interface NoticeCreatedPayload {
   priority: string;
   pinned: boolean;
   publishedAt: string; // ISO-8601
+  // #4: 'all' | 'admins' | 'members' — lets a client ignore events not meant
+  // for it. Optional/additive; legacy notice.created emits omit it (= 'all').
+  audience?: string;
 }
 
 @Injectable()

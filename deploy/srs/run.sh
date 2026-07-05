@@ -28,9 +28,14 @@ echo " BASE=$BASE  samples=$PERF_SAMPLES  conc=$PERF_CONC  soak=$SOAK_REQUESTS  
 echo " results → $RESULTS_DIR"
 echo "════════════════════════════════════════════════════════════════════════════"
 
+# Order matters: performance BEFORE security. security.sh's SEC-F test floods
+# the login endpoint to prove the 429 rate-limit works, which then throttles the
+# shared login for ~60s. If performance ran after, its fresh login would be
+# throttled → empty token → every PERF probe returns 401 (false failures). Perf
+# first gets a clean token; security's flood is the last thing that runs.
 . "$HERE/functional.sh"
-. "$HERE/security.sh"
 . "$HERE/performance.sh"
+. "$HERE/security.sh"
 
 # ── Reconcile assertions (REQLOG) against the requirement manifest ───────────
 MAN="$HERE/manifest.tsv"

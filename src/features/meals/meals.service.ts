@@ -264,8 +264,20 @@ export class MealsService {
     );
     const removed = result.data.length - visible.length;
 
+    // FR-PG-090 (#1 fix): attach effective preference groups to the serialized
+    // list HERE — inside the shared list path — so BOTH the admin planner list
+    // (GET /meals, used by the weekly/day-wise editor) AND the student today
+    // path carry them. Previously only getTodayMeals attached afterwards, so the
+    // admin editor received empty preferenceGroups and could never render the
+    // multi-preference groups. Attaching before getTodayMeals' overlay also lets
+    // its per-day SUBSET filter actually see the groups. Net query count is
+    // unchanged for the today path (the attach moved here from below); the admin
+    // list gains one batched, N+1-free lookup.
+    const serialized = MealSerializer.toList(visible);
+    await this.attachPreferenceGroups(serialized, organizationId);
+
     return PaginatedResponseDto.of(
-      MealSerializer.toList(visible),
+      serialized,
       Math.max(0, result.total - removed),
       result.page,
       result.limit,
@@ -410,14 +422,16 @@ export class MealsService {
         // empty overlay means the published schedule has no meal for today
         // (off-day) or nothing has ever been published → show NO meals. Never
         // master meals, never draft data.
-        await this.attachPreferenceGroups(overlaid, organizationId);
+        // Preference groups were already attached in listGroupMeals (above), so
+        // result.data — and therefore the overlaid copies — already carry them.
+        // The per-day OFF→[] clear and SUBSET filter above operate on those
+        // real groups. Re-attaching here would clobber the subset, so we don't.
         return this.withWindowMeta(
           PaginatedResponseDto.of(overlaid, overlaid.length, 1, 50),
           planGroup,
           organizationId,
         );
       }
-      await this.attachPreferenceGroups(result.data as any[], organizationId);
       return this.withWindowMeta(result, planGroup, organizationId);
     }
 

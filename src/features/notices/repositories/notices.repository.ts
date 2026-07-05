@@ -20,6 +20,7 @@ export class NoticesRepository {
       title: raw.title,
       body: raw.body,
       priority: raw.priority,
+      audience: raw.audience ?? 'all',
       pinned: raw.pinned,
       publishedAt: raw.publishedAt,
       expiresAt: raw.expiresAt ?? null,
@@ -34,10 +35,20 @@ export class NoticesRepository {
   /** Visibility filter shared by list + unread count. */
   private whereFor(
     organizationId: string,
-    opts: { groupId?: string; includeInactive?: boolean; onlyUnexpired?: boolean },
+    opts: {
+      groupId?: string;
+      includeInactive?: boolean;
+      onlyUnexpired?: boolean;
+      audiences?: string[];
+    },
   ): any {
     const where: any = { organizationId };
     if (!opts.includeInactive) where.isActive = true;
+    // #4: audience gate — admins receive 'all'+'admins', members 'all'+'members'.
+    // Callers that omit audiences (or pass undefined) see everything (legacy).
+    if (opts.audiences && opts.audiences.length) {
+      where.audience = { in: opts.audiences };
+    }
     // Members see org-wide notices (groupId null) PLUS their own group's notices.
     if (opts.groupId) {
       where.OR = [{ groupId: opts.groupId }, { groupId: null }];
@@ -65,10 +76,13 @@ export class NoticesRepository {
     title: string;
     body: string;
     priority: string;
+    audience?: string;
     pinned: boolean;
     expiresAt: Date | null;
   }): Promise<NoticeEntity> {
-    const raw = await this.prisma.notice.create({ data });
+    const raw = await this.prisma.notice.create({
+      data: { ...data, audience: data.audience ?? 'all' },
+    });
     return this.toEntity(raw, false, 0);
   }
 
@@ -88,12 +102,14 @@ export class NoticesRepository {
       page: number;
       limit: number;
       withReadCount?: boolean;
+      audiences?: string[];
     },
   ): Promise<{ data: NoticeEntity[]; total: number }> {
     const where = this.whereFor(organizationId, {
       groupId: opts.groupId,
       includeInactive: opts.includeInactive,
       onlyUnexpired: !opts.includeInactive,
+      audiences: opts.audiences,
     });
     const skip = (opts.page - 1) * opts.limit;
 
@@ -138,11 +154,13 @@ export class NoticesRepository {
     organizationId: string,
     forUserId: string,
     groupId?: string,
+    audiences?: string[],
   ): Promise<number> {
     const where = this.whereFor(organizationId, {
       groupId,
       includeInactive: false,
       onlyUnexpired: true,
+      audiences,
     });
     const rows = await this.prisma.notice.findMany({
       where,
@@ -195,11 +213,13 @@ export class NoticesRepository {
     organizationId: string,
     userId: string,
     groupId?: string,
+    audiences?: string[],
   ): Promise<number> {
     const where = this.whereFor(organizationId, {
       groupId,
       includeInactive: false,
       onlyUnexpired: true,
+      audiences,
     });
     const rows = await this.prisma.notice.findMany({
       where,

@@ -20,6 +20,7 @@ import {
   isWithinWindow,
 } from '../../common/utils/date.utils';
 import { NotificationsService } from '../notifications/notifications.service';
+import { NoticesService } from '../notices/notices.service';
 import { CorrectionRequestsRepository } from './repositories/correction-requests.repository';
 import { CorrectionRequestSerializer } from './serializers/correction-request.serializer';
 import { CorrectionRequestEntity } from './entities/correction-request.entity';
@@ -86,6 +87,10 @@ export class CorrectionsService {
     private readonly attendanceService: AttendanceService,
     private readonly attendanceRepo: AttendanceRepository,
     private readonly notifications: NotificationsService,
+    // #4: in-app admin bell alert (in addition to push). Optional so tests run
+    // without the notices infrastructure wired.
+    @Optional() @Inject(NoticesService)
+    private readonly notices: NoticesService | null = null,
     @Optional() @Inject('ATTENDANCE_GATEWAY')
     private readonly gateway: {
       emitToGroup(groupId: string, event: string, payload: unknown): void;
@@ -313,6 +318,22 @@ export class CorrectionsService {
       mealName: created.mealName ?? 'a meal',
       dateStr,
     });
+
+    // #4: in-app admin bell alert (admins-only audience) so the request is
+    // visible even without a push token. Best-effort — never blocks the write.
+    if (this.notices) {
+      const typeLabel = TYPE_LABELS[dto.requestType] ?? dto.requestType;
+      void this.notices.createRequestAlert({
+        organizationId,
+        groupId: created.groupId ?? null,
+        actorId: userId,
+        title: 'New correction request',
+        body: `${created.userName ?? 'A member'} requested "${typeLabel}" for ${
+          created.mealName ?? 'a meal'
+        } on ${dateStr}. Tap to review.`,
+        priority: 'high',
+      });
+    }
 
     return CorrectionRequestSerializer.toResponse(created);
   }

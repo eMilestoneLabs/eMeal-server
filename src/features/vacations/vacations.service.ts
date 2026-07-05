@@ -12,6 +12,7 @@ import { VacationRequestsRepository } from './repositories/vacation-requests.rep
 import { VacationRequestSerializer } from './serializers/vacation-request.serializer';
 import { AuditService } from '../../audit/audit.service';
 import { QueueService } from '../../queue/queue.service';
+import { NoticesService } from '../notices/notices.service';
 import { ADMIN_ROLES } from '../../common/decorators/roles.decorator';
 import {
   getTodayInTimezone,
@@ -52,6 +53,11 @@ export class VacationsService {
     @Optional()
     @Inject(QueueService)
     private readonly queue: QueueService | null = null,
+    // #4: in-app admin bell alert on request submission. Optional so the module
+    // (and its tests) run without the notices infrastructure wired.
+    @Optional()
+    @Inject(NoticesService)
+    private readonly notices: NoticesService | null = null,
   ) {}
 
   private isAdmin(role: string): boolean {
@@ -180,6 +186,24 @@ export class VacationsService {
       },
       requestId,
     });
+
+    // #4: surface the new request in the admin bell (in-app notice, admins-only
+    // audience) so admins are alerted even without a push token. Best-effort —
+    // never blocks or fails the request write.
+    if (this.notices) {
+      const range =
+        dto.startDate === dto.endDate
+          ? dto.startDate
+          : `${dto.startDate} – ${dto.endDate}`;
+      void this.notices.createRequestAlert({
+        organizationId,
+        groupId: dto.groupId ?? null,
+        actorId: userId,
+        title: 'New vacation request',
+        body: `${userName} requested vacation for ${range}. Tap to review.`,
+        priority: 'high',
+      });
+    }
 
     return VacationRequestSerializer.toResponse(created);
   }

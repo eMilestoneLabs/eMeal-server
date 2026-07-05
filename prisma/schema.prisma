@@ -777,6 +777,9 @@ model Notice {
   title          String
   body           String
   priority       String    @default("normal") // low | normal | high | urgent
+  // Audience gate (#4): "all" = everyone in scope (legacy behaviour, default),
+  // "admins" = only org admins see it (request alerts), "members" = only members.
+  audience       String    @default("all")     // all | admins | members
   pinned         Boolean   @default(false)
   publishedAt    DateTime  @default(now())
   expiresAt      DateTime?

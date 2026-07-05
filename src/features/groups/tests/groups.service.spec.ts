@@ -234,6 +234,8 @@ describe('GroupsService', () => {
       expect(membersRepo.createMembership).toHaveBeenCalledWith({
         groupId: 'grp_01',
         userId: 'usr_new',
+        // #2: additive per-group display role — null when the join omits it.
+        functionalRole: null,
       });
       // Should sync organizationId for user without org
       expect(usersRepo.update).toHaveBeenCalledWith('usr_new', { organizationId: 'org_01' });

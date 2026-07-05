@@ -519,11 +519,15 @@ export class GroupsService {
       }
 
       if (existingMembership.status === 'removed') {
-        // Re-join: restore active status
+        // Re-join: restore active status (and update the per-group display role
+        // if the user picked one this time — #2).
         await this.membersRepo.updateMembership(group.id, userId, {
           status: 'active',
           removedAt: null as any,
           removedBy: null as any,
+          ...(dto.functionalRole
+            ? { functionalRole: dto.functionalRole }
+            : {}),
         });
 
         this.audit.log({
@@ -542,8 +546,14 @@ export class GroupsService {
       }
     }
 
-    // New member — create membership
-    await this.membersRepo.createMembership({ groupId: group.id, userId });
+    // New member — create membership. #2: store the chosen per-group display
+    // role (member-level only, already validated by the DTO). Null when omitted
+    // → display falls back to the user's global role (unchanged behaviour).
+    await this.membersRepo.createMembership({
+      groupId: group.id,
+      userId,
+      functionalRole: dto.functionalRole ?? null,
+    });
 
     this.audit.log({
       organizationId: group.organizationId,
