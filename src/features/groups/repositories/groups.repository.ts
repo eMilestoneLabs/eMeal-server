@@ -73,6 +73,33 @@ export class GroupsRepository {
     return group ? this.buildEntity(group) : null;
   }
 
+  /**
+   * ISSUE 2 (additive): resolve the group admin's display name + the org name
+   * for the read-only member detail view. Two indexed point-lookups, called
+   * only when a single group's details are opened — never in list paths.
+   */
+  async getDetailNames(
+    adminId: string | null,
+    organizationId: string,
+  ): Promise<{ adminName: string | null; organizationName: string | null }> {
+    const [admin, org] = await Promise.all([
+      adminId
+        ? this.prisma.user.findUnique({
+            where: { id: adminId },
+            select: { name: true },
+          })
+        : Promise.resolve(null),
+      this.prisma.organization.findUnique({
+        where: { id: organizationId },
+        select: { name: true },
+      }),
+    ]);
+    return {
+      adminName: admin?.name ?? null,
+      organizationName: org?.name ?? null,
+    };
+  }
+
   async findAll(
     organizationId: string,
     opts: {

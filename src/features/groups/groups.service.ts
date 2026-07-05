@@ -181,6 +181,14 @@ export class GroupsService {
     const myMembership = await this.membersRepo.findMembership(id, userId);
     group.functionalRole = myMembership?.functionalRole ?? null;
 
+    // Additive (ISSUE 2): admin + organization names for the member detail view.
+    const names = await this.groupsRepo.getDetailNames(
+      group.adminId,
+      organizationId,
+    );
+    group.adminName = names.adminName;
+    group.organizationName = names.organizationName;
+
     return GroupSerializer.toResponse(group);
   }
 

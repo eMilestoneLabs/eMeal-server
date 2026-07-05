@@ -89,6 +89,10 @@ describe('GroupsService', () => {
             update: jest.fn(),
             softDelete: jest.fn(),
             regenerateJoinCode: jest.fn(),
+            // ISSUE 2: detail-view admin/org name resolver.
+            getDetailNames: jest
+              .fn()
+              .mockResolvedValue({ adminName: null, organizationName: null }),
           },
         },
         {

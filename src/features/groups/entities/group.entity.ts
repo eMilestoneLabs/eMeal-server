@@ -66,6 +66,12 @@ export class GroupEntity {
   // back to the user's global role. Not a DB column on Group.
   functionalRole: string | null;
 
+  // Additive (ISSUE 2): populated only on the detail read path so members can
+  // see who runs the group and which organization it belongs to. Not stored on
+  // Group; resolved per-request. null when unavailable.
+  adminName?: string | null;
+  organizationName?: string | null;
+
   createdAt: Date;
   updatedAt: Date;
 

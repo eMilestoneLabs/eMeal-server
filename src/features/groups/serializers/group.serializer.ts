@@ -81,6 +81,11 @@ export class GroupSerializer {
       // Additive (#8): requester's per-group functional role (null = use global).
       functionalRole: group.functionalRole ?? null,
 
+      // Additive (ISSUE 2): read-only detail context for members. Populated only
+      // on GET /groups/:id (null elsewhere / when unavailable).
+      adminName: group.adminName ?? null,
+      organizationName: group.organizationName ?? null,
+
       // M-07 fix: always nested mealConfig object — never flattened
       mealConfig: {
         mealsEnabled: group.mealsEnabled,
