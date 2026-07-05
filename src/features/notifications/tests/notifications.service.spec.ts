@@ -254,7 +254,7 @@ describe('NotificationsService', () => {
           { userId: 'user-1', fcmToken: 'tok-1' },
           { userId: 'user-2', fcmToken: 'tok-2' },
         ],
-        route: '/notices',
+        route: '/student/dashboard',
       }),
     );
   });

@@ -479,8 +479,16 @@ export class AttendanceService {
         );
         // Option deltas bill only when meal pricing is active (base price set);
         // without a base price, selections are recorded but never billed.
+        //
+        // UNIT BOUNDARY (Issue 1/2): option priceDelta is stored in paise (the
+        // admin editor ×100s the ₹ it's given), but the base meal price and the
+        // whole billing engine work in whole ₹. Adding the paise delta straight
+        // onto the ₹ base corrupted the price snapshot — a "+₹30" option turned
+        // a ₹75 meal into ₹3075. Convert the delta to ₹ here, the single point
+        // where it enters the ₹ price. Whole-₹ options (the only kind the editor
+        // can produce) divide exactly; the round only guards hand-crafted data.
         if (effectivePrice != null) {
-          markPrice = effectivePrice + validated.totalDelta;
+          markPrice = effectivePrice + Math.round(validated.totalDelta / 100);
         }
         derivedPreference = dto.preference ?? validated.primaryKey;
         selectionSnapshot = validated.snapshot;
@@ -1854,6 +1862,69 @@ export class AttendanceService {
     }
 
     return response;
+  }
+
+  // ── My billing (student, own bill) ────────────────────────────────────────
+
+  /**
+   * Issue 5 (FR-BILLX-043, "same value everywhere"): a member's OWN bill,
+   * computed by the SAME engine as the admin Member-Billing dashboard, so the
+   * student sees the identical net — meal charges + hosted-guest charges +
+   * signed ledger adjustments (credits/refunds). Previously the student screen
+   * summed only its own meal snapshots client-side, silently omitting guest
+   * charges and admin credits, so its total could disagree with the admin's.
+   *
+   * We reuse getBillingSummary (same aggregation, same version-keyed cache) and
+   * return ONLY the caller's row — no other member's figures or PII ever leave
+   * the server. Isolation: the caller must be an active member of the group.
+   */
+  async getMyBilling(
+    organizationId: string,
+    userId: string,
+    query: QueryBillingDto,
+  ) {
+    if (!query.groupId) {
+      throw new BadRequestException({
+        message: 'groupId is required',
+        errors: { groupId: 'Provide a groupId query parameter' },
+      });
+    }
+
+    const membership = await this.prisma.groupMember.findFirst({
+      where: { groupId: query.groupId, userId, status: 'active' },
+      select: { userId: true },
+    });
+    if (!membership) {
+      throw new ForbiddenException({
+        message: 'You are not an active member of this group',
+        errors: { groupId: 'No active membership' },
+      });
+    }
+
+    // Authoritative group computation (cached); extract only my row.
+    const summary: any = await this.getBillingSummary(organizationId, query);
+    const mine = (summary.members as any[]).find((m) => m.userId === userId);
+
+    const totalBill = mine?.totalBill ?? 0; // meal + guest (pre-adjustment)
+    const guestAmount = mine?.guestAmount ?? 0;
+    const adjustmentsTotal = mine?.adjustmentsTotal ?? 0;
+
+    return {
+      period: summary.period,
+      presentCount: mine?.presentCount ?? 0,
+      skippedCount: mine?.skippedCount ?? 0,
+      absentCount: mine?.absentCount ?? 0,
+      vacationDays: mine?.vacationDays ?? 0,
+      // Itemised so the student bill is explainable at a glance and reconciles
+      // exactly with the admin: net = mealCharges + guestAmount + adjustments.
+      mealCharges: totalBill - guestAmount,
+      guestCount: mine?.guestCount ?? 0,
+      guestAmount,
+      adjustmentsTotal,
+      totalBill,
+      netBill: mine?.netBill ?? totalBill,
+      generatedAt: summary.generatedAt,
+    };
   }
 
   // ── Billing series (analytics charts, admin) ──────────────────────────────

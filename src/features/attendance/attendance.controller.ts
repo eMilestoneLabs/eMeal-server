@@ -227,6 +227,22 @@ export class AttendanceController {
     return this.attendanceService.getBillingSummary(user.organizationId!, query);
   }
 
+  // ── GET /attendance/my-billing (member) — own bill, MUST be before /:id ───
+  // Issue 5: the caller's OWN net bill from the SAME engine as the admin
+  // dashboard (meal + guest + adjustments), so both sides show one number.
+
+  @Get('my-billing')
+  async getMyBilling(
+    @CurrentUser() user: { sub: string; organizationId: string; role: string },
+    @Query() query: QueryBillingDto,
+  ) {
+    return this.attendanceService.getMyBilling(
+      user.organizationId!,
+      user.sub,
+      query,
+    );
+  }
+
   // ── GET /attendance/billing-series (admin) — analytics time-series ────────
 
   @Get('billing-series')

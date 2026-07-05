@@ -117,11 +117,13 @@ describe('BillingService adjustments (Pass 12)', () => {
     expect(prisma.billingLedgerEntry.create).not.toHaveBeenCalled();
   });
 
-  it('signed sums: debit positive, credit/refund negative (FR-BILLX-043)', async () => {
+  it('signed sums: debit positive, credit/refund negative, in ₹ (FR-BILLX-043)', async () => {
+    // Ledger amounts are paise; the billing engine works in whole ₹, so the
+    // returned sums are ₹ (paise ÷ 100). u1: +₹300 debit −₹100 credit = ₹200.
     prisma.billingLedgerEntry.groupBy.mockResolvedValue([
-      { userId: 'u1', type: 'debit', _sum: { amount: 3000 } },
-      { userId: 'u1', type: 'credit', _sum: { amount: 1000 } },
-      { userId: 'u2', type: 'refund', _sum: { amount: 500 } },
+      { userId: 'u1', type: 'debit', _sum: { amount: 30000 } },
+      { userId: 'u1', type: 'credit', _sum: { amount: 10000 } },
+      { userId: 'u2', type: 'refund', _sum: { amount: 5000 } },
     ]);
     const map = await service.sumAdjustmentsByUser(
       'org1',
@@ -129,8 +131,8 @@ describe('BillingService adjustments (Pass 12)', () => {
       new Date('2026-07-01'),
       new Date('2026-07-31'),
     );
-    expect(map.get('u1')).toBe(2000);
-    expect(map.get('u2')).toBe(-500);
+    expect(map.get('u1')).toBe(200);
+    expect(map.get('u2')).toBe(-50);
   });
 
   it('billing cycle periods resolve correctly (FR-BILLX-020)', () => {

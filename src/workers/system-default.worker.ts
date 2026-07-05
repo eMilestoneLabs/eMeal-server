@@ -798,7 +798,8 @@ export class SystemDefaultWorker extends WorkerHost {
           body:
             `${params.mealName} (${dateStr}): you were marked Present under your ` +
             'group’s opt-out policy. Didn’t eat? Correct it from the attendance screen.',
-          route: '/attendance',
+          // Registered frontend path (Issue 6: roleless routes 404'd in-app).
+          route: '/student/attendance',
           data: { type: 'system_default_marked', mealId, date: dateStr },
         });
       } catch (err) {

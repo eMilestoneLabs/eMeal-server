@@ -100,7 +100,8 @@ export class VacationsService {
               recipients: [r],
               title,
               body,
-              route: '/settings',
+              // Registered frontend path (Issue 6: roleless routes 404'd in-app).
+              route: '/student/settings',
               data: { type: 'vacation_update' },
             })
           : undefined,

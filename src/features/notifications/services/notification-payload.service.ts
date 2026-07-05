@@ -136,7 +136,9 @@ export class NotificationPayloadService {
     return {
       title: urgent ? '📢 Important Notice' : 'New Notice',
       body: params.title,
-      route: '/notices',
+      // The notice feed opens from the dashboard bell — there is no '/notices'
+      // route in the frontend router (Issue 6: it 404'd in-app).
+      route: '/student/dashboard',
       data: {
         type: 'notice_published',
         noticeId: params.noticeId,

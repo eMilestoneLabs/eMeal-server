@@ -93,19 +93,25 @@ export class BillingService {
         errors: { periodEnd: 'Before periodStart' },
       });
     }
-    const todayUtc = toUtcMidnight(new Date().toISOString().slice(0, 10));
+
+    const group = await this.prisma.group.findFirst({
+      where: { id: dto.groupId, organizationId },
+      select: { id: true, organization: { select: { timezone: true } } },
+    });
+    if (!group) throw new NotFoundException('Group not found');
+
+    // "Future" is relative to the ORG's calendar day, not the server's UTC
+    // day. Computing today in UTC wrongly rejected a period ending today when
+    // an admin in a positive-offset zone (e.g. IST) finalized before the UTC
+    // date rolled over — the server was still on "yesterday". (Issue 4)
+    const tz = group.organization?.timezone ?? 'Asia/Kolkata';
+    const todayUtc = toUtcMidnight(getTodayInTimezone(tz));
     if (end.getTime() > todayUtc.getTime()) {
       throw new BadRequestException({
         message: 'Cannot finalize a period that extends into the future',
         errors: { periodEnd: 'Must be today or earlier' },
       });
     }
-
-    const group = await this.prisma.group.findFirst({
-      where: { id: dto.groupId, organizationId },
-      select: { id: true },
-    });
-    if (!group) throw new NotFoundException('Group not found');
 
     // No overlapping FINALIZED period (reopened ones may be re-finalized).
     const overlap = await this.prisma.billingPeriod.findFirst({
@@ -396,7 +402,8 @@ export class BillingService {
                   ? 'A charge was added to your bill'
                   : 'A credit was applied to your bill',
               body: `${dto.type === 'debit' ? '+' : '−'}₹${(dto.amount / 100).toFixed(2)} — ${dto.reason}`,
-              route: '/billing',
+              // Registered frontend path (Issue 6: '/billing' 404'd in-app).
+              route: '/student/billing',
               data: { type: 'billing_adjustment', entryId: entry.id },
             })
           : undefined,
@@ -442,9 +449,17 @@ export class BillingService {
   }
 
   /**
-   * Signed adjustment sums per member for a group+range — one groupBy per
-   * type (3 tiny indexed queries). Sign convention: debit positive
-   * (increases the bill), credit/refund negative.
+   * Signed adjustment sums per member for a group+range — one groupBy (grouped
+   * by type). Sign convention: debit positive (increases the bill),
+   * credit/refund negative.
+   *
+   * UNIT BOUNDARY (Issue 1/2): ledger rows are stored in paise (minor units),
+   * but the billing engine — meal/guest price snapshots, revenue, member bills
+   * — works in whole ₹. This is the single point where the ledger crosses into
+   * that engine, so it converts paise → ₹ here. Returning paise made a ₹7,000
+   * refund read as −₹7,00,000 once summed into a ₹ bill. Real corrections are
+   * whole-rupee (admin types ₹, the client ×100s), so the division is exact;
+   * the round only guards a hand-crafted sub-rupee entry.
    */
   async sumAdjustmentsByUser(
     organizationId: string,
@@ -462,10 +477,16 @@ export class BillingService {
         },
         _sum: { amount: true },
       });
-    const byUser = new Map<string, number>();
+    // Accumulate in paise first, convert once per member — so multi-entry
+    // sums round on the total, never per entry.
+    const paiseByUser = new Map<string, number>();
     for (const r of rows) {
       const signed = (r._sum.amount ?? 0) * (r.type === 'debit' ? 1 : -1);
-      byUser.set(r.userId, (byUser.get(r.userId) ?? 0) + signed);
+      paiseByUser.set(r.userId, (paiseByUser.get(r.userId) ?? 0) + signed);
+    }
+    const byUser = new Map<string, number>();
+    for (const [userId, paise] of paiseByUser) {
+      byUser.set(userId, Math.round(paise / 100));
     }
     return byUser;
   }

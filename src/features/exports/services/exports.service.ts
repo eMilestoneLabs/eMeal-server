@@ -134,8 +134,8 @@ export class ExportsService {
         status: r.status,
         preference: r.preference ?? '',
         markedAt: r.markedAt ? r.markedAt.toISOString() : '',
-        // FR-ANL-030: ₹ from the paise snapshot at mark time (blank = unpriced).
-        price: r.price != null ? (r.price / 100).toFixed(2) : '',
+        // FR-ANL-030: whole-₹ price snapshot at mark time (blank = unpriced).
+        price: r.price != null ? Number(r.price).toFixed(2) : '',
         // FR-HG-060 (Pass 9): hosted-guest counters ride the same record —
         // denormalised on AttendanceRecord in Pass 8, so no extra query.
         guestAdults: String(r.guestAdults ?? 0),
@@ -320,13 +320,18 @@ export class ExportsService {
       ]),
     );
     const allIds = new Set<string>([...meta.keys(), ...byUser.keys()]);
-    const money = (paise: number) => (paise / 100).toFixed(2);
+    // Meal/guest price snapshots are stored in whole ₹; only the append-only
+    // ledger is in paise. Convert the ledger to ₹ so the export reconciles
+    // EXACTLY with /attendance/billing-summary (FR-BILLX-043). Previously every
+    // column was ÷100, which silently shrank real meal/guest revenue 100×.
+    const rupees = (v: number) => v.toFixed(2);
 
     const rows: BillingExportRow[] = [...allIds]
       .map((uid) => {
         const v = byUser.get(uid) ?? agg(uid);
         const m = meta.get(uid);
-        const net = v.mealAmount + v.guestAmount + v.adjustments;
+        const adjustments = Math.round(v.adjustments / 100);
+        const net = v.mealAmount + v.guestAmount + adjustments;
         return {
           memberName: m?.name ?? uid,
           memberEmail: m?.email ?? '',
@@ -335,11 +340,11 @@ export class ExportsService {
           skippedCount: String(v.skipped),
           absentCount: String(v.absent),
           vacationDays: String(v.vacation),
-          mealAmount: money(v.mealAmount),
+          mealAmount: rupees(v.mealAmount),
           guestCount: String(v.guestCount),
-          guestAmount: money(v.guestAmount),
-          adjustments: money(v.adjustments),
-          netTotal: money(net),
+          guestAmount: rupees(v.guestAmount),
+          adjustments: rupees(adjustments),
+          netTotal: rupees(net),
           _net: net,
         } as BillingExportRow & { _net: number };
       })
@@ -647,8 +652,9 @@ interface BillingExportRow {
   netTotal: string;
 }
 
-// Pass 12 (FR-BILLX-024): amounts exported in rupees (2dp) from paise
-// snapshots; adjustments are the signed append-only ledger total.
+// Pass 12 (FR-BILLX-024): amounts exported in ₹ (2dp) — meal/guest from the
+// whole-₹ price snapshots, adjustments from the signed paise ledger converted
+// to ₹, so the export reconciles exactly with the billing-summary API.
 const BILLING_HEADERS: ExportHeader[] = [
   { key: 'memberName', label: 'Member Name', width: 25 },
   { key: 'memberEmail', label: 'Email', width: 30 },

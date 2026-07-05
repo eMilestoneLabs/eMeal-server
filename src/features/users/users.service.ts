@@ -216,7 +216,8 @@ export class UsersService {
                 body: enabled
                   ? 'You are marked on vacation and excluded from meals. Not right? You can turn it off in Settings or contact your admin.'
                   : 'Your vacation was ended by your admin — meal tracking has resumed.',
-                route: '/settings',
+                // Registered frontend path (Issue 6: roleless routes 404'd in-app).
+                route: '/student/settings',
                 data: { type: 'vacation_admin_forced', enabled: String(enabled) },
               })
             : undefined,
