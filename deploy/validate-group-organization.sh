@@ -154,7 +154,7 @@ sec "2. CREATE + EXTENDED METADATA + SIGNED QR (GRP-003/011/012/013)"
 G_META=""
 if [ "$CAN_CREATE" = "true" ]; then
   BODY=$(jq -nc '{name:"ZZ_M02_VERIFY_meta",type:"hostel",description:"verify",
-    country:"India",state:"WB",city:"Kolkata",address:"Test St",currency:"INR",
+    country:"India",state:"WB",city:"Kolkata",pin:"721301",address:"Test St",currency:"INR",
     maxMembers:10,joinApprovalRequired:false,qrExpiryDays:0,mealConfig:{mealsEnabled:true}}')
   req POST /groups "$BODY" "$ADMIN_TOKEN"
   { [ "$R_CODE" = "201" ] || [ "$R_CODE" = "200" ]; } && ok "Create group w/ metadata" "($R_CODE)" || no "Create group" "$R_CODE"
@@ -162,6 +162,8 @@ if [ "$CAN_CREATE" = "true" ]; then
   req GET "/groups/$G_META" "" "$ADMIN_TOKEN"
   [ "$(j '.country // .data.country')" = "India" ] && ok "GRP-003 country persisted+returned" || no "GRP-003 country"
   [ "$(j '.currency // .data.currency')" = "INR" ] && ok "GRP-003 currency persisted+returned" || no "GRP-003 currency"
+  # Issue 8 (command_3): the new PIN code round-trips through create → read.
+  [ "$(j '.pin // .data.pin')" = "721301" ] && ok "Issue8 PIN code persisted+returned" || no "Issue8 PIN code" "$(j '.pin // .data.pin')"
 else
   skip "Create group w/ metadata" "org at group limit (CFG-012) — using existing group for read-only checks"
   G_META="$EXIST_GID"
@@ -190,10 +192,34 @@ if [ "$CAN_CREATE" = "true" ] && [ -n "$STUDENT_TOKEN" ]; then
   req POST /groups "$(jq -nc '{name:"ZZ_M02_VERIFY_approval",type:"hostel",joinApprovalRequired:true,maxMembers:5}')" "$ADMIN_TOKEN"
   G_APR="$(j '.id // .data.id')"; CLEANUP_GROUPS+=("$G_APR")
   req GET "/groups/$G_APR/qr-token" "" "$ADMIN_TOKEN"; ACODE="$(j '.joinCode // .data.joinCode')"
+  # Issue 7 / PRIORITY-1: clear the admin bell first so the join-request
+  # notification count is deterministic (dismiss is per-user + non-destructive).
+  req DELETE "/notices/dismiss-all" "" "$ADMIN_TOKEN" >/dev/null 2>&1
   # Student joins → pending
   req POST /groups/join "$(jq -nc --arg c "$ACODE" '{joinCode:$c}')" "$STUDENT_TOKEN"; perf "join(approval)"
   JS="$(j '.joinStatus // .data.joinStatus')"
   [ "$JS" = "pending" ] && ok "MEM-004 join creates PENDING (joinStatus=pending)" || no "MEM-004 pending join" "joinStatus=$JS"
+  # Issue 7 (command_3): the join request MUST also reach the admin NOTIFICATION
+  # BELL (NTF-001 — org-wide audience:'admins' notice, linkType=groupJoinRequests),
+  # not only the Join Requests tab. Verify it is in the feed AND counted unread,
+  # and that EXACTLY ONE was raised (Priority-1: no duplicate notifications).
+  sleep 0.5   # bell notice is fire-and-forget; give it a moment to persist
+  req GET "/notices" "" "$ADMIN_TOKEN"
+  JR_N="$(echo "$R_BODY" | jq -r '[(.data // .)[] | select(.linkType=="groupJoinRequests")] | length')"
+  [ "${JR_N:-0}" -ge 1 ] && ok "NTF-001 join request appears in admin bell" "n=$JR_N" \
+    || no "NTF-001 join-request bell notice MISSING" "n=$JR_N (expected >=1)"
+  [ "${JR_N:-0}" -le 1 ] && ok "PRIORITY-1 single join-request notification (no duplicate)" "n=$JR_N" \
+    || no "PRIORITY-1 DUPLICATE join-request notifications" "n=$JR_N (expected 1)"
+  req GET "/notices/unread-count" "" "$ADMIN_TOKEN"
+  JR_U="$(echo "$R_BODY" | jq -r '.count // .data.count // 0')"
+  [ "${JR_U:-0}" -ge 1 ] && ok "NTF-001 unread badge reflects join request" "unread=$JR_U" \
+    || no "NTF-001 unread badge did not increment" "unread=$JR_U"
+  # Issue 4 (command_3): the student can RE-ACCESS their pending request after
+  # dismissing the inline flow — server-truth via GET /groups/my-join-requests.
+  req GET "/groups/my-join-requests" "" "$STUDENT_TOKEN"
+  MJR="$(echo "$R_BODY" | jq -r '[((.data // []))[] | select(.id=="'"$G_APR"'")] | length')"
+  [ "${MJR:-0}" -ge 1 ] && ok "MEM-005 my-join-requests re-lists the pending group" "n=$MJR" \
+    || no "MEM-005 my-join-requests" "n=$MJR (expected >=1)"
   # Admin sees the pending request
   req GET "/groups/$G_APR/join-requests" "" "$ADMIN_TOKEN"; perf "join-requests"
   PCOUNT="$(echo "$R_BODY" | jq -r '((.data // .)|length)')"

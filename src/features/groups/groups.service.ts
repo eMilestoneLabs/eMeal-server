@@ -238,12 +238,15 @@ export class GroupsService {
       vacationModeEnabled: dto.mealConfig?.vacationModeEnabled ?? true,
       mealPricingEnabled: dto.mealConfig?.mealPricingEnabled ?? false,
       // Module 02 (GRP-003) — extended metadata captured once at creation.
-      country: dto.country ?? null,
+      // Issue 8: India-only release — country defaults to India and currency to
+      // INR when the client omits them (both remain overridable/config-ready).
+      country: dto.country ?? 'India',
       state: dto.state ?? null,
       city: dto.city ?? null,
+      pin: dto.pin ?? null,
       address: dto.address ?? null,
       timezone: dto.timezone ?? null,
-      currency: dto.currency ?? null,
+      currency: dto.currency ?? 'INR',
       joinApprovalRequired: dto.joinApprovalRequired ?? false,
       qrExpiryDays: qrExpiryDays && qrExpiryDays > 0 ? qrExpiryDays : null,
     });
@@ -947,6 +950,26 @@ export class GroupsService {
    */
   private joinResponse(group: GroupEntity, joinStatus: 'active' | 'pending') {
     return { ...GroupSerializer.toResponse(group), joinStatus };
+  }
+
+  /**
+   * MEM-004/005 (Issue 4): list the current user's OWN pending join requests so
+   * the client can re-surface the "Waiting for approval" state (and Cancel)
+   * after the inline flow is dismissed. Server-truth: a request that an admin has
+   * since approved/rejected simply no longer appears. Pending requests per user
+   * are few, so hydrating each group individually is cheap and keeps the full
+   * serialized shape (memberCount/capacity/name) the client already renders.
+   */
+  async getMyJoinRequests(userId: string) {
+    const pending = await this.membersRepo.findPendingGroupsForUser(userId);
+    const data: Array<Record<string, unknown>> = [];
+    for (const p of pending) {
+      const group = await this.groupsRepo.findById(p.groupId, p.organizationId);
+      if (group) {
+        data.push({ ...GroupSerializer.toResponse(group), joinStatus: 'pending' });
+      }
+    }
+    return { data };
   }
 
   // ── JOIN APPROVAL WORKFLOW (MEM-002..010, NTF-001/002/004) ─────────────────

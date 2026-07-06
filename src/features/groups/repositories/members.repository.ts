@@ -104,6 +104,29 @@ export class MembersRepository {
   }
 
   /**
+   * MEM-005 (Issue 4): the groups a user currently has a PENDING join request
+   * for. Returns each pending membership's groupId + its group's organizationId
+   * so the caller can hydrate a full group summary. Newest request first.
+   * Only active (non-archived) groups are considered.
+   */
+  async findPendingGroupsForUser(
+    userId: string,
+  ): Promise<{ groupId: string; organizationId: string }[]> {
+    const rows = await this.prisma.groupMember.findMany({
+      where: { userId, status: 'pending', group: { isActive: true } },
+      select: {
+        groupId: true,
+        group: { select: { organizationId: true } },
+      },
+      orderBy: { joinedAt: 'desc' },
+    });
+    return rows.map((r) => ({
+      groupId: r.groupId,
+      organizationId: r.group.organizationId,
+    }));
+  }
+
+  /**
    * Create membership. Returns the created record.
    */
   async createMembership(data: {

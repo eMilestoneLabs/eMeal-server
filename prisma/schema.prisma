@@ -286,6 +286,7 @@ model Group {
   country  String? // GRP-003 (captured at create, immutable)
   state    String? // GRP-003
   city     String? // GRP-003
+  pin      String? // GRP-003 (command_3 Issue 8) — postal/PIN code, captured at create
   address  String? // GRP-003
   timezone String? // GRP-003 — group display timezone (null = inherit org tz)
   currency String? // GRP-003 — ISO 4217 code (null = inherit org / default)

@@ -27,6 +27,7 @@ export class GroupEntity {
   country: string | null;
   state: string | null;
   city: string | null;
+  pin: string | null; // command_3 Issue 8 — postal/PIN code
   address: string | null;
   timezone: string | null;
   currency: string | null;

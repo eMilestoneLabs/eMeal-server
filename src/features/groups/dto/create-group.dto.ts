@@ -265,12 +265,30 @@ export class CreateGroupDto {
   @MaxLength(80)
   city?: string;
 
+  /**
+   * command_3 Issue 8: postal / PIN code, captured at creation (GRP-003 family).
+   * Optional + length-bounded server-side (client enforces a 6-digit PIN for
+   * India); additive so existing callers are unaffected.
+   */
   @Transform(({ value }) =>
     typeof value === 'string' ? value.trim() : value,
   )
   @IsOptional()
   @IsString()
-  @MaxLength(200)
+  @MaxLength(16)
+  pin?: string;
+
+  /**
+   * command_3 Issue 8: Address is now optional with a hard 30-char limit
+   * (was 200). Older payloads over 30 chars are historical only — new writes
+   * are bounded here.
+   */
+  @Transform(({ value }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
   address?: string;
 
   /** IANA timezone for the group display (null = inherit organization tz). */

@@ -124,6 +124,17 @@ export class GroupsController {
   }
 
   /**
+   * GET /api/v1/groups/my-join-requests — MEM-004/005 (Issue 4): the current
+   * user's own pending join requests, so the "Waiting for approval" state can be
+   * re-opened (and cancelled) after the inline flow was dismissed. Must be
+   * declared before the `/:id` route.
+   */
+  @Get('my-join-requests')
+  async getMyJoinRequests(@CurrentUser() user: JwtPayload) {
+    return this.groupsService.getMyJoinRequests(user.sub);
+  }
+
+  /**
    * DELETE /api/v1/groups/:id/join-request — MEM-005: the current member cancels
    * their OWN pending join request. Self-service (no admin role).
    */

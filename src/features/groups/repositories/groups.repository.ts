@@ -218,6 +218,7 @@ export class GroupsRepository {
     country?: string | null;
     state?: string | null;
     city?: string | null;
+    pin?: string | null;
     address?: string | null;
     timezone?: string | null;
     currency?: string | null;
@@ -245,6 +246,7 @@ export class GroupsRepository {
         country: data.country ?? null,
         state: data.state ?? null,
         city: data.city ?? null,
+        pin: data.pin ?? null,
         address: data.address ?? null,
         timezone: data.timezone ?? null,
         currency: data.currency ?? null,

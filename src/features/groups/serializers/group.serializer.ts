@@ -86,6 +86,7 @@ export class GroupSerializer {
       country: group.country ?? null,
       state: group.state ?? null,
       city: group.city ?? null,
+      pin: group.pin ?? null, // command_3 Issue 8 — postal/PIN code
       address: group.address ?? null,
       timezone: group.timezone ?? null,
       currency: group.currency ?? null,
