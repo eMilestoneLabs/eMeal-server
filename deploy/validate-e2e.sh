@@ -371,7 +371,8 @@ if command -v docker >/dev/null; then
   if [ -n "$PG_CONT" ]; then
     echo "  Postgres:"
     # Credentials come from the CONTAINER'S own env (set by docker-compose).
-    docker exec "$PG_CONT" sh -c 'psql -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-postgres}" -Atc "SELECT '"'"'    users='"'"'||(SELECT count(*) FROM \"User\")||'"'"'  orgs='"'"'||(SELECT count(*) FROM \"Organization\")||'"'"'  groups='"'"'||(SELECT count(*) FROM \"Group\")||'"'"'  attendance_rows='"'"'||(SELECT count(*) FROM \"Attendance\");"' 2>/dev/null \
+    # Schema-agnostic row counts (no table-name assumptions): top tables by rows.
+    docker exec "$PG_CONT" sh -c 'psql -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-postgres}" -Atc "SELECT '"'"'    '"'"'||relname||'"'"'='"'"'||n_live_tup FROM pg_stat_user_tables ORDER BY n_live_tup DESC LIMIT 8;"' 2>/dev/null \
       || echo "    (psql probe failed — check container env POSTGRES_USER/POSTGRES_DB)"
     docker exec "$PG_CONT" sh -c 'psql -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-postgres}" -Atc "SELECT '"'"'    db_size='"'"'||pg_size_pretty(pg_database_size(current_database()))||'"'"'  max_conn='"'"'||(SELECT setting FROM pg_settings WHERE name='"'"'max_connections'"'"')||'"'"'  active_conn='"'"'||(SELECT count(*) FROM pg_stat_activity)||'"'"'  cache_hit='"'"'||round(100.0*sum(blks_hit)/nullif(sum(blks_hit)+sum(blks_read),0),2)||'"'"'%'"'"' FROM pg_stat_database;"' 2>/dev/null || true
     echo "    (headroom rule-of-thumb: ~1 GB DB ≈ 100k users w/ 1yr attendance; current size above)"
