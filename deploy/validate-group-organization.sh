@@ -125,6 +125,9 @@ CAN_CREATE="$(echo "$R_BODY" | jq -r 'if has("canCreateGroup") then .canCreateGr
 MAX_GROUPS="$(j '.maxGroups // .data.maxGroups')"
 ROLE_LIMIT="$(j '.roleMemberLimit // .data.roleMemberLimit')"
 echo "      maxGroups=$MAX_GROUPS canCreate=$CAN_CREATE roleMemberLimit=$ROLE_LIMIT"
+# On a FULL org (5 groups) the create-dependent sections below SKIP by design —
+# archive one group in the app (Groups → archive) to free a slot, then re-run;
+# they run and PASS automatically. No script bypass of real product behaviour.
 [ "$MAX_GROUPS" != "null" ] && ok "limits.maxGroups present (config-driven)" || no "limits.maxGroups"
 [ "$ROLE_LIMIT" != "null" ] && ok "limits.roleMemberLimit present (GRP-004)" || no "limits.roleMemberLimit"
 # GRP-004: full per-role cap map + configurable floor exposed for the client so
@@ -165,7 +168,7 @@ if [ "$CAN_CREATE" = "true" ]; then
   # Issue 8 (command_3): the new PIN code round-trips through create → read.
   [ "$(j '.pin // .data.pin')" = "721301" ] && ok "Issue8 PIN code persisted+returned" || no "Issue8 PIN code" "$(j '.pin // .data.pin')"
 else
-  skip "Create group w/ metadata" "org at group limit (CFG-012) — using existing group for read-only checks"
+  skip "Create group w/ metadata" "org at group limit (CFG-012) — read-only checks on existing group; archive a group to run create+PIN checks"
   G_META="$EXIST_GID"
 fi
 # Read-only checks below run against G_META regardless of how it was obtained.
@@ -238,7 +241,7 @@ if [ "$CAN_CREATE" = "true" ] && [ -n "$STUDENT_TOKEN" ]; then
   req POST /groups/join "$(jq -nc --arg c "$ACODE" '{joinCode:$c}')" "$STUDENT_TOKEN"
   req DELETE "/groups/$G_APR/join-request" "" "$STUDENT_TOKEN"
   { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; } && ok "MEM-005 cancel own pending request" "($R_CODE)" || no "MEM-005 cancel" "$R_CODE"
-else skip "join-approval workflow" "needs create capacity + STUDENT_EMAIL"; fi
+else skip "join-approval workflow" "needs create capacity + STUDENT_EMAIL (archive a group to free a slot on a full org)"; fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 sec "4. ARCHIVE → RESTORE → PERMANENT DELETE (GRP-016/018/019)"
@@ -257,7 +260,7 @@ if [ "$CAN_CREATE" = "true" ]; then
   assert_code "GRP-019 permanent delete" 200 "$R_CODE"
   req GET "/groups/$G_LC" "" "$ADMIN_TOKEN"
   assert_code "GRP-019 gone after permanent delete" 404 "$R_CODE"
-else skip "lifecycle (archive/restore/delete)" "group limit reached"; fi
+else skip "lifecycle (archive/restore/delete)" "group limit reached (archive a group to free a slot)"; fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 sec "5. NOTIFICATION BELL — dismiss + retention (NTF-005/006/007)"
