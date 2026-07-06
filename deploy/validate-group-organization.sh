@@ -198,7 +198,10 @@ if [ "$CAN_CREATE" = "true" ] && [ -n "$STUDENT_TOKEN" ]; then
   req GET "/groups/$G_APR/join-requests" "" "$ADMIN_TOKEN"; perf "join-requests"
   PCOUNT="$(echo "$R_BODY" | jq -r '((.data // .)|length)')"
   [ "${PCOUNT:-0}" -ge 1 ] && ok "MEM-006 admin lists pending request" "n=$PCOUNT" || no "MEM-006 list pending" "n=$PCOUNT"
-  SUID="$(echo "$R_BODY" | jq -r '((.data // .)[0].id // (.data // .)[0].userId // empty)')"
+  # The approve/reject endpoints key on the USER id. The member serializer
+  # exposes that as `userId` (and nested `user.id`); the top-level `id` is the
+  # GroupMember row id — using it here 404s. Prefer userId → user.id → id.
+  SUID="$(echo "$R_BODY" | jq -r '((.data // .)[0].userId // (.data // .)[0].user.id // (.data // .)[0].id // empty)')"
   # Approve → active
   req PATCH "/groups/$G_APR/join-requests/$SUID/approve" "" "$ADMIN_TOKEN"
   { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; } && ok "MEM-006 approve → active" "($R_CODE)" || no "MEM-006 approve" "$R_CODE"
@@ -234,13 +237,26 @@ else skip "lifecycle (archive/restore/delete)" "group limit reached"; fi
 sec "5. NOTIFICATION BELL — dismiss + retention (NTF-005/006/007)"
 req GET /notices "" "$ADMIN_TOKEN"; assert_code "List notices (bell)" 200 "$R_CODE"; perf "notices"
 NID="$(echo "$R_BODY" | jq -r '((.data // .)[0].id // empty)')"
+# Deterministic NTF-006: if the admin bell happens to be empty (a prior run's
+# dismiss-all persists per-user, and join alerts are best-effort/fire-and-forget),
+# seed one throwaway notice so single-dismiss is actually exercised. It is
+# admin-deleted below so nothing is left behind.
+SEED_NOTICE_ID=""
+if [ -z "$NID" ]; then
+  req POST /notices "$(jq -nc '{title:"ZZ_M02_VERIFY_notice",body:"verify dismiss",priority:"normal"}')" "$ADMIN_TOKEN"
+  SEED_NOTICE_ID="$(j '.id // .data.id')"
+  req GET /notices "" "$ADMIN_TOKEN"
+  NID="$(echo "$R_BODY" | jq -r '((.data // .)[0].id // empty)')"
+fi
 req GET /notices/unread-count "" "$ADMIN_TOKEN"; assert_code "Unread count (badge)" 200 "$R_CODE"; perf "unread-count"
 if [ -n "$NID" ]; then
   req DELETE "/notices/$NID/dismiss" "" "$ADMIN_TOKEN"
   { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; } && ok "NTF-006 dismiss one notice (per-user)" "($R_CODE)" || no "NTF-006 dismiss" "$R_CODE"
-else skip "NTF-006 dismiss one" "no notices to dismiss"; fi
+else skip "NTF-006 dismiss one" "no notices to dismiss (seed failed)"; fi
 req DELETE "/notices/dismiss-all" "" "$ADMIN_TOKEN"
 { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; } && ok "NTF-006 delete-all (per-user)" "($R_CODE)" || no "NTF-006 dismiss-all" "$R_CODE"
+# Remove the seeded throwaway notice entirely (admin delete), keeping the org clean.
+[ -n "$SEED_NOTICE_ID" ] && [ "$SEED_NOTICE_ID" != "null" ] && req DELETE "/notices/$SEED_NOTICE_ID" "" "$ADMIN_TOKEN" >/dev/null 2>&1
 
 # ═════════════════════════════════════════════════════════════════════════════
 sec "6. TENANT ISOLATION (multi-tenant)"
