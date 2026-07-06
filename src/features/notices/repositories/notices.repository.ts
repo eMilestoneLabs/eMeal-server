@@ -43,6 +43,11 @@ export class NoticesRepository {
       onlyUnexpired?: boolean;
       audiences?: string[];
       forUserId?: string;
+      // NTF-006: hide notices this user has dismissed from their bell.
+      excludeDismissedFor?: string;
+      // NTF-005: retention window in days — hide notices older than this from
+      // the bell feed (0/undefined = no retention cutoff).
+      retentionDays?: number;
     },
   ): any {
     const where: any = { organizationId };
@@ -67,6 +72,26 @@ export class NoticesRepository {
       and.push({
         OR: [{ targetUserId: null }, { targetUserId: opts.forUserId }],
       });
+    }
+    // NTF-006: exclude notices this user has dismissed from their own bell.
+    if (opts.excludeDismissedFor) {
+      and.push({
+        NOT: {
+          reads: {
+            some: {
+              userId: opts.excludeDismissedFor,
+              dismissedAt: { not: null },
+            },
+          },
+        },
+      });
+    }
+    // NTF-005: retention cutoff — bell feed only shows recent notices.
+    if (opts.retentionDays && opts.retentionDays > 0) {
+      const cutoff = new Date(
+        Date.now() - opts.retentionDays * 24 * 60 * 60 * 1000,
+      );
+      and.push({ publishedAt: { gte: cutoff } });
     }
     if (and.length) where.AND = and;
     return where;
@@ -116,6 +141,7 @@ export class NoticesRepository {
       limit: number;
       withReadCount?: boolean;
       audiences?: string[];
+      retentionDays?: number;
     },
   ): Promise<{ data: NoticeEntity[]; total: number }> {
     const where = this.whereFor(organizationId, {
@@ -124,6 +150,10 @@ export class NoticesRepository {
       onlyUnexpired: !opts.includeInactive,
       audiences: opts.audiences,
       forUserId,
+      // NTF-005/006: dismissal + retention apply to the live bell feed only
+      // (not the admin includeInactive management view).
+      excludeDismissedFor: opts.includeInactive ? undefined : forUserId,
+      retentionDays: opts.includeInactive ? undefined : opts.retentionDays,
     });
     const skip = (opts.page - 1) * opts.limit;
 
@@ -169,6 +199,7 @@ export class NoticesRepository {
     forUserId: string,
     groupId?: string,
     audiences?: string[],
+    retentionDays?: number,
   ): Promise<number> {
     const where = this.whereFor(organizationId, {
       groupId,
@@ -176,6 +207,9 @@ export class NoticesRepository {
       onlyUnexpired: true,
       audiences,
       forUserId,
+      // NTF-006/005: dismissed + retention-aged notices never count as unread.
+      excludeDismissedFor: forUserId,
+      retentionDays,
     });
     const rows = await this.prisma.notice.findMany({
       where,
@@ -253,5 +287,72 @@ export class NoticesRepository {
     if (toCreate.length === 0) return 0;
     await this.prisma.noticeRead.createMany({ data: toCreate });
     return toCreate.length;
+  }
+
+  /**
+   * NTF-006: dismiss ONE notice from a single user's bell (per-user hide). Also
+   * marks it read. Idempotent via the (noticeId,userId) unique key.
+   */
+  async dismiss(noticeId: string, userId: string): Promise<void> {
+    const now = new Date();
+    await this.prisma.noticeRead.upsert({
+      where: { noticeId_userId: { noticeId, userId } },
+      create: { noticeId, userId, dismissedAt: now },
+      update: { dismissedAt: now },
+    });
+  }
+
+  /**
+   * NTF-006: dismiss ALL currently-visible notices from a user's bell. Returns
+   * the number affected. Existing read rows are flipped to dismissed; missing
+   * rows are created dismissed.
+   */
+  async dismissAll(
+    organizationId: string,
+    userId: string,
+    groupId?: string,
+    audiences?: string[],
+    retentionDays?: number,
+  ): Promise<number> {
+    const where = this.whereFor(organizationId, {
+      groupId,
+      includeInactive: false,
+      onlyUnexpired: true,
+      audiences,
+      forUserId: userId,
+      excludeDismissedFor: userId, // already-dismissed rows are skipped
+      retentionDays,
+    });
+    const rows = await this.prisma.notice.findMany({
+      where,
+      select: { id: true },
+    });
+    if (rows.length === 0) return 0;
+
+    const now = new Date();
+    const existing = await this.prisma.noticeRead.findMany({
+      where: { noticeId: { in: rows.map((r: any) => r.id) }, userId },
+      select: { noticeId: true },
+    });
+    const have = new Set(existing.map((r: any) => r.noticeId));
+
+    const toCreate = rows
+      .filter((r: any) => !have.has(r.id))
+      .map((r: any) => ({ noticeId: r.id, userId, dismissedAt: now }));
+
+    await this.prisma.$transaction([
+      ...(have.size
+        ? [
+            this.prisma.noticeRead.updateMany({
+              where: { noticeId: { in: [...have] }, userId },
+              data: { dismissedAt: now },
+            }),
+          ]
+        : []),
+      ...(toCreate.length
+        ? [this.prisma.noticeRead.createMany({ data: toCreate })]
+        : []),
+    ]);
+    return rows.length;
   }
 }

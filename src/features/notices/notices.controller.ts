@@ -113,6 +113,40 @@ export class NoticesController {
     return this.noticesService.markRead(user.sub, user.organizationId!, id);
   }
 
+  // ── MEMBER BELL DISMISSAL (NTF-006) — per-user, not a global delete ─────────
+
+  /**
+   * DELETE /api/v1/notices/dismiss-all — "Delete All" from the member's bell.
+   * Declared before `/:id/dismiss` so the literal path wins.
+   */
+  @Delete('dismiss-all')
+  @HttpCode(HttpStatus.OK)
+  async dismissAll(
+    @CurrentUser() user: JwtPayload,
+    @Query('groupId') groupId?: string,
+  ) {
+    if (!user.organizationId) return { success: true, dismissed: 0 };
+    return this.noticesService.dismissAllNotices(
+      user.sub,
+      user.role,
+      user.organizationId,
+      groupId,
+    );
+  }
+
+  /**
+   * DELETE /api/v1/notices/:id/dismiss — remove one notice from the member's
+   * own bell (per-user hide; the shared notice is unaffected).
+   */
+  @Delete(':id/dismiss')
+  @HttpCode(HttpStatus.OK)
+  async dismiss(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+  ) {
+    return this.noticesService.dismissNotice(user.sub, user.organizationId!, id);
+  }
+
   @Patch(':id')
   @UseGuards(RolesGuard)
   @Roles(...ADMIN_ROLES)

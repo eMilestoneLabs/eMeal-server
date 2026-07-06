@@ -18,6 +18,11 @@ import { AuditService } from '../../audit/audit.service';
 import { UsersRepository } from '../users/repositories/users.repository';
 import { PrismaService } from '../../prisma/prisma.service';
 import { generateJoinCode } from '../../common/utils/code.utils';
+import {
+  encodeQrPayload,
+  decodeQrPayload,
+  isSignedQrPayload,
+} from '../../common/utils/qr-payload.util';
 import { CreateGroupDto } from './dto/create-group.dto';
 import { UpdateGroupDto } from './dto/update-group.dto';
 import { JoinGroupDto } from './dto/join-group.dto';
@@ -25,6 +30,9 @@ import { UpdateMemberDto } from './dto/update-member.dto';
 import { QueryGroupsDto, QueryMembersDto } from './dto/query-groups.dto';
 import { ADMIN_ROLES } from '../../common/decorators/roles.decorator';
 import { RealtimeEventsService } from '../../realtime/services/realtime-events.service';
+import { ConfigService } from '@nestjs/config';
+import { NoticesService } from '../notices/notices.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 /**
  * Module 22 (FR-HG-020): guest-config columns that are nullable in the schema
@@ -53,9 +61,109 @@ export class GroupsService {
     private readonly usersRepo: UsersRepository,
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly config: ConfigService,
     @Optional() @Inject('REALTIME_GATEWAY')
     private readonly realtime: RealtimeEventsService | null = null,
+    // Module 02: bell + push for group/member lifecycle. @Optional so unit
+    // tests can construct the service without wiring these providers.
+    @Optional() private readonly notices: NoticesService | null = null,
+    @Optional() private readonly notifications: NotificationsService | null = null,
   ) {}
+
+  /** Typed access to the `groups.*` configuration namespace (CFG-001). */
+  private groupsCfg<T>(key: string, fallback: T): T {
+    return this.config.get<T>(`groups.${key}`) ?? fallback;
+  }
+
+  /**
+   * GRP-004 / CFG-002/003/004: the maximum member capacity an admin may
+   * configure for a Group, based on their Organization Role. Config-driven with
+   * a documented default fallback for unlisted roles.
+   */
+  private roleMemberLimit(role: string): number {
+    const limits = this.groupsCfg<Record<string, number>>(
+      'roleMemberLimits',
+      {},
+    );
+    const fallback = this.groupsCfg<number>('defaultRoleMemberLimit', 50);
+    const v = limits?.[role];
+    return typeof v === 'number' && v > 0 ? v : fallback;
+  }
+
+  // ── LIFECYCLE NOTIFICATIONS (bell + best-effort push) ──────────────────────
+  // All best-effort and fire-and-forget: a notification failure must NEVER break
+  // the membership write (NTF/FR-NOTX-016). The bell (Notice) is the reliable
+  // in-app channel; FCM push is a best-effort second layer.
+
+  /** NTF-001: alert org admins that a member submitted a join request. */
+  private alertAdminsJoinRequest(
+    organizationId: string,
+    requesterId: string,
+    requesterName: string,
+    groupName: string,
+  ): void {
+    void this.notices?.createRequestAlert({
+      organizationId,
+      groupId: null, // org-wide so every admin sees it regardless of selected group
+      actorId: requesterId,
+      title: 'New join request',
+      body: `${requesterName} requested to join ${groupName}. Tap to review.`,
+      priority: 'high',
+      linkType: 'groupJoinRequests',
+      audience: 'admins',
+    });
+  }
+
+  /** NTF-004: alert org admins that a group reached maximum capacity. */
+  private alertAdminsGroupFull(
+    organizationId: string,
+    actorId: string,
+    groupName: string,
+  ): void {
+    void this.notices?.createRequestAlert({
+      organizationId,
+      groupId: null,
+      actorId,
+      title: 'Group is full',
+      body: `${groupName} has reached its maximum capacity.`,
+      priority: 'normal',
+      linkType: 'groupMembers',
+      audience: 'admins',
+    });
+  }
+
+  /**
+   * NTF-002/003 / MEM-022: drop a targeted notice into ONE member's bell for a
+   * lifecycle event (approved/rejected/blocked/unblocked/removed/reinvited), and
+   * optionally mirror it as an FCM push.
+   */
+  private alertMember(params: {
+    organizationId: string;
+    actorId: string;
+    targetUserId: string;
+    groupName: string;
+    title: string;
+    body: string;
+    linkType?: string;
+    push?: 'joined' | 'removed' | 'blocked';
+  }): void {
+    void this.notices?.createMemberAlert({
+      organizationId: params.organizationId,
+      actorId: params.actorId,
+      targetUserId: params.targetUserId,
+      title: params.title,
+      body: params.body,
+      linkType: params.linkType ?? 'myGroups',
+    });
+    if (params.push) {
+      void this.notifications?.notifyGroupMembership({
+        organizationId: params.organizationId,
+        userId: params.targetUserId,
+        groupName: params.groupName,
+        action: params.push,
+      });
+    }
+  }
 
   // ── CREATE ────────────────────────────────────────────────────────────────
 
@@ -65,8 +173,44 @@ export class GroupsService {
     dto: CreateGroupDto,
     requestId?: string,
   ) {
-    // Generate collision-resistant 8-char join code
+    // ORG-012/013 / GRP-005/010 / CFG-012/013: enforce the max-groups-per-org
+    // limit BEFORE any write. Reached → 409 so the client keeps Create disabled.
+    const maxGroups = this.groupsCfg<number>('maxGroupsPerOrg', 5);
+    const currentGroups = await this.groupsRepo.countActiveGroups(organizationId);
+    if (currentGroups >= maxGroups) {
+      throw new ConflictException({
+        message: `Group limit reached (${maxGroups}). Archive or delete a group to create a new one.`,
+        code: 'GROUP_LIMIT_REACHED',
+        errors: { organization: `Maximum of ${maxGroups} groups allowed` },
+      });
+    }
+
+    // GRP-004 / CFG-002/003/004: Maximum Members entered by the admin must not
+    // exceed the configured limit for their Organization Role. The creator's
+    // role is resolved from their User record (one indexed PK lookup at create).
+    if (dto.maxMembers !== undefined && dto.maxMembers !== null) {
+      const creator = await this.usersRepo.findById(adminId);
+      const limit = this.roleMemberLimit(creator?.role ?? 'student');
+      if (dto.maxMembers > limit) {
+        throw new UnprocessableEntityException({
+          message: `Maximum Members (${dto.maxMembers}) exceeds your role limit of ${limit}.`,
+          code: 'MEMBER_LIMIT_EXCEEDED',
+          errors: { maxMembers: `Must be ${limit} or fewer for your role` },
+        });
+      }
+    }
+
+    // Generate collision-resistant join code (length is config-driven, CFG-015).
     const joinToken = await this.generateUniqueJoinCode();
+
+    // GRP-013 / CFG-014: resolve the QR expiry policy (days) — dto value, else
+    // the configured default (0 = Never). Compute the concrete deadline once.
+    const qrExpiryDays =
+      dto.qrExpiryDays ?? this.groupsCfg<number>('defaultQrExpiryDays', 0);
+    const joinTokenExpiresAt =
+      qrExpiryDays && qrExpiryDays > 0
+        ? new Date(Date.now() + qrExpiryDays * 24 * 60 * 60 * 1000)
+        : null;
 
     // Create group with mealConfig defaults
     const group = await this.groupsRepo.create({
@@ -76,6 +220,7 @@ export class GroupsService {
       description: dto.description,
       adminId,
       joinToken,
+      joinTokenExpiresAt,
       maxMembers: dto.maxMembers,
       mealsEnabled: dto.mealConfig?.mealsEnabled ?? true,
       weeklyMenuEnabled: dto.mealConfig?.weeklyMenuEnabled ?? false,
@@ -84,6 +229,15 @@ export class GroupsService {
       enabledPreferences: dto.mealConfig?.enabledPreferences ?? [],
       vacationModeEnabled: dto.mealConfig?.vacationModeEnabled ?? true,
       mealPricingEnabled: dto.mealConfig?.mealPricingEnabled ?? false,
+      // Module 02 (GRP-003) — extended metadata captured once at creation.
+      country: dto.country ?? null,
+      state: dto.state ?? null,
+      city: dto.city ?? null,
+      address: dto.address ?? null,
+      timezone: dto.timezone ?? null,
+      currency: dto.currency ?? null,
+      joinApprovalRequired: dto.joinApprovalRequired ?? false,
+      qrExpiryDays: qrExpiryDays && qrExpiryDays > 0 ? qrExpiryDays : null,
     });
 
     // Auto-add creator as groupManager member.
@@ -104,7 +258,19 @@ export class GroupsService {
       targetId: group.id,
       targetType: 'Group',
       action: 'create',
-      metadata: { name: dto.name, type: dto.type },
+      metadata: {
+        name: dto.name,
+        type: dto.type,
+        // GRP-003 / ORG-016: record the immutable metadata + policy at creation.
+        country: dto.country ?? null,
+        state: dto.state ?? null,
+        city: dto.city ?? null,
+        currency: dto.currency ?? null,
+        timezone: dto.timezone ?? null,
+        maxMembers: dto.maxMembers ?? null,
+        joinApprovalRequired: dto.joinApprovalRequired ?? false,
+        qrExpiryDays: qrExpiryDays && qrExpiryDays > 0 ? qrExpiryDays : null,
+      },
       requestId,
     });
 
@@ -113,6 +279,24 @@ export class GroupsService {
     // Re-fetch to include the just-created membership in computed fields
     const fresh = await this.groupsRepo.findById(group.id, organizationId);
     return GroupSerializer.toResponse(fresh!);
+  }
+
+  // ── LIMITS (ORG-013 / GRP-010 / CFG-013) ───────────────────────────────────
+
+  /**
+   * Configuration-driven limits for the current organization + requester role,
+   * so the client can disable the Create-Group action at the limit (GRP-010)
+   * and cap the Maximum-Members input (GRP-004) without hardcoding anything.
+   */
+  async getGroupLimits(organizationId: string, role: string) {
+    const maxGroups = this.groupsCfg<number>('maxGroupsPerOrg', 5);
+    const currentGroups = await this.groupsRepo.countActiveGroups(organizationId);
+    return {
+      maxGroups,
+      currentGroups,
+      canCreateGroup: currentGroups < maxGroups,
+      roleMemberLimit: this.roleMemberLimit(role),
+    };
   }
 
   // ── LIST ──────────────────────────────────────────────────────────────────
@@ -162,11 +346,12 @@ export class GroupsService {
   // ── GET ONE ───────────────────────────────────────────────────────────────
 
   async getGroupById(id: string, organizationId: string, userId: string, userRole: string) {
-    const group = await this.groupsRepo.findById(id, organizationId);
+    // GRP-018/019: admins may open ARCHIVED groups (to restore / permanently
+    // delete them); members only ever see active groups.
+    const isAdmin = ADMIN_ROLES.includes(userRole as any);
+    const group = await this.groupsRepo.findById(id, organizationId, isAdmin);
     if (!group) throw new NotFoundException('Group not found');
 
-    // Students must be active members to view group details
-    const isAdmin = ADMIN_ROLES.includes(userRole as any);
     if (!isAdmin) {
       const isMember = await this.membersRepo.isActiveMember(id, userId);
       if (!isMember) {
@@ -460,11 +645,90 @@ export class GroupsService {
       targetId: id,
       targetType: 'Group',
       action: 'delete',
-      metadata: { name: existing.name, softDelete: true },
+      metadata: { name: existing.name, softDelete: true, archived: true },
       requestId,
     });
 
     return { message: 'Group archived successfully', id };
+  }
+
+  // ── RESTORE (GRP-018) ──────────────────────────────────────────────────────
+
+  /**
+   * GRP-018: restore a previously archived Group. Admin-only (guarded at the
+   * controller). Un-hides it from dashboards + switchers with all historical
+   * data intact.
+   */
+  async restoreGroup(
+    id: string,
+    organizationId: string,
+    actorId: string,
+    requestId?: string,
+  ) {
+    // includeInactive so we can find the archived row.
+    const existing = await this.groupsRepo.findById(id, organizationId, true);
+    if (!existing) throw new NotFoundException('Group not found');
+    if (existing.isActive) {
+      throw new ConflictException({
+        message: 'Group is not archived',
+        code: 'GROUP_NOT_ARCHIVED',
+        errors: { id: 'Only archived groups can be restored' },
+      });
+    }
+
+    const restored = await this.groupsRepo.restore(id, organizationId);
+
+    this.audit.log({
+      organizationId,
+      actorId,
+      targetId: id,
+      targetType: 'Group',
+      action: 'update',
+      metadata: { name: existing.name, restored: true },
+      requestId,
+    });
+
+    this.logger.log(`Group restored: ${existing.name} [${id}] in org ${organizationId}`);
+    return GroupSerializer.toResponse(restored);
+  }
+
+  // ── PERMANENT DELETE (GRP-019) ─────────────────────────────────────────────
+
+  /**
+   * GRP-019: permanently delete a Group and ALL of its data. Irreversible —
+   * requires explicit danger confirmation at the client. The repository runs
+   * every child delete in one transaction. Admin-only (controller-guarded).
+   */
+  async permanentDeleteGroup(
+    id: string,
+    organizationId: string,
+    actorId: string,
+    requestId?: string,
+  ) {
+    const existing = await this.groupsRepo.findById(id, organizationId, true);
+    if (!existing) throw new NotFoundException('Group not found');
+
+    // Snapshot identity for the audit trail BEFORE the row is gone (ORG-016).
+    this.audit.log({
+      organizationId,
+      actorId,
+      targetId: id,
+      targetType: 'Group',
+      action: 'delete',
+      metadata: {
+        name: existing.name,
+        permanent: true,
+        memberCount: existing.memberCount,
+      },
+      requestId,
+    });
+
+    await this.groupsRepo.hardDelete(id, organizationId);
+
+    this.logger.warn(
+      `Group PERMANENTLY DELETED: ${existing.name} [${id}] by ${actorId} in org ${organizationId}`,
+    );
+    return { message: 'Group permanently deleted', id };
   }
 
   // ── JOIN ──────────────────────────────────────────────────────────────────
@@ -483,7 +747,29 @@ export class GroupsService {
    * 8. User's organizationId updated if not yet assigned
    */
   async joinGroup(userId: string, dto: JoinGroupDto, requestId?: string) {
-    const group = await this.groupsRepo.findByJoinCode(dto.joinCode);
+    // GRP-012: accept EITHER a raw join code OR a signed QR payload. A signed
+    // payload is verified (HMAC) and expiry-checked here before we trust its
+    // embedded join token; a tampered/forged payload is rejected outright.
+    let joinCode = dto.joinCode;
+    if (isSignedQrPayload(dto.joinCode)) {
+      const secret = this.groupsCfg<string>('qrSigningSecret', 'emeal-qr-dev-secret');
+      const payload = decodeQrPayload(dto.joinCode, secret);
+      if (!payload) {
+        throw new BadRequestException({
+          message: 'Invalid QR code',
+          errors: { joinCode: 'This QR code is invalid or has been tampered with' },
+        });
+      }
+      if (payload.e && new Date(payload.e) < new Date()) {
+        throw new BadRequestException({
+          message: 'QR code expired',
+          errors: { joinCode: 'This QR code has expired. Ask your admin for a new one.' },
+        });
+      }
+      joinCode = payload.t;
+    }
+
+    const group = await this.groupsRepo.findByJoinCode(joinCode);
 
     if (!group || !group.isActive) {
       throw new BadRequestException({
@@ -492,7 +778,7 @@ export class GroupsService {
       });
     }
 
-    // Join code expiry check
+    // GRP-014 / Join code expiry check — expired codes reject new joins.
     if (group.joinTokenExpiresAt && group.joinTokenExpiresAt < new Date()) {
       throw new BadRequestException({
         message: 'Join code expired',
@@ -500,11 +786,18 @@ export class GroupsService {
       });
     }
 
-    // Max capacity check (null maxMembers = unlimited).
-    // SRS FR-GRP-015/FR-JOIN-012 (LOOP-061, SC-043): 409 GROUP_FULL.
-    if (group.maxMembers !== null && group.memberCount >= group.maxMembers) {
+    // MEM-004: does this group gate joins behind admin approval?
+    const approvalRequired = group.joinApprovalRequired === true;
+
+    // Capacity check (null maxMembers = unlimited). CFG-009/010 / MEM-008/010:
+    // pending requests count toward capacity so pending can never exceed the
+    // remaining slots. SRS FR-GRP-015/FR-JOIN-012 (LOOP-061): 409 GROUP_FULL.
+    const occupied = group.memberCount + group.pendingCount;
+    if (group.maxMembers !== null && occupied >= group.maxMembers) {
+      // NTF-004: let admins know the group is at capacity.
+      this.alertAdminsGroupFull(group.organizationId, userId, group.name);
       throw new ConflictException({
-        message: 'Group is full',
+        message: 'Group Full – Contact Administrator',
         code: 'GROUP_FULL',
         errors: { joinCode: 'This group has reached its maximum capacity' },
       });
@@ -522,17 +815,25 @@ export class GroupsService {
       }
 
       if (existingMembership.status === 'active') {
-        // Idempotent — already a member, return group
-        return GroupSerializer.toResponse(group);
+        // Idempotent — already a member, return group.
+        return this.joinResponse(group, 'active');
+      }
+
+      if (existingMembership.status === 'pending') {
+        // MEM-004: idempotent — request already awaiting approval.
+        return this.joinResponse(group, 'pending');
       }
 
       if (existingMembership.status === 'removed') {
-        // Re-join: restore active status (and update the per-group display role
-        // if the user picked one this time — #2).
+        // MEM-021: rejoin follows normal join rules — including approval mode.
+        const nextStatus = approvalRequired ? 'pending' : 'active';
         await this.membersRepo.updateMembership(group.id, userId, {
-          status: 'active',
+          status: nextStatus,
           removedAt: null as any,
           removedBy: null as any,
+          reviewedBy: null as any,
+          reviewedAt: null as any,
+          reviewNote: null as any,
           ...(dto.functionalRole
             ? { functionalRole: dto.functionalRole }
             : {}),
@@ -544,22 +845,40 @@ export class GroupsService {
           targetId: group.id,
           targetType: 'Group',
           action: 'join',
-          metadata: { rejoin: true },
+          metadata: { rejoin: true, pending: approvalRequired },
           requestId,
         });
 
+        if (approvalRequired) {
+          const requester = await this.usersRepo.findById(userId);
+          this.alertAdminsJoinRequest(
+            group.organizationId,
+            userId,
+            requester?.name ?? 'A member',
+            group.name,
+          );
+          return this.joinResponse(group, 'pending');
+        }
+
         const refreshed = await this.groupsRepo.findById(group.id, group.organizationId);
         await this.syncUserOrganization(userId, group.organizationId);
-        return GroupSerializer.toResponse(refreshed!);
+        this.realtime?.emitGroupMemberUpdated(group.id, {
+          groupId: group.id,
+          userId,
+          action: 'joined',
+        });
+        return this.joinResponse(refreshed!, 'active');
       }
     }
 
-    // New member — create membership. #2: store the chosen per-group display
-    // role (member-level only, already validated by the DTO). Null when omitted
-    // → display falls back to the user's global role (unchanged behaviour).
+    // ── New member ────────────────────────────────────────────────────────
+    // MEM-004: approval mode → create a PENDING request (not active). #2: store
+    // the chosen per-group display role (validated by the DTO).
+    const status = approvalRequired ? 'pending' : 'active';
     await this.membersRepo.createMembership({
       groupId: group.id,
       userId,
+      status,
       functionalRole: dto.functionalRole ?? null,
     });
 
@@ -569,15 +888,27 @@ export class GroupsService {
       targetId: group.id,
       targetType: 'Group',
       action: 'join',
+      metadata: { pending: approvalRequired },
       requestId,
     });
 
-    // Sync user's organizationId if they don't have one yet
+    if (approvalRequired) {
+      // MEM-004/NTF-001: waiting for approval — alert admins, do NOT sync org
+      // or emit a member-joined event until the request is approved.
+      const requester = await this.usersRepo.findById(userId);
+      this.alertAdminsJoinRequest(
+        group.organizationId,
+        userId,
+        requester?.name ?? 'A member',
+        group.name,
+      );
+      this.logger.log(`User ${userId} requested to join group ${group.id} (pending)`);
+      return this.joinResponse(group, 'pending');
+    }
+
+    // Immediate join (no approval). Sync org + emit realtime membership change.
     await this.syncUserOrganization(userId, group.organizationId);
-
-    this.logger.log(`User \${userId} joined group \${group.id}`);
-
-    // B7: emit group membership change so group room members see the new member
+    this.logger.log(`User ${userId} joined group ${group.id}`);
     this.realtime?.emitGroupMemberUpdated(group.id, {
       groupId: group.id,
       userId,
@@ -585,7 +916,215 @@ export class GroupsService {
     });
 
     const refreshed = await this.groupsRepo.findById(group.id, group.organizationId);
-    return GroupSerializer.toResponse(refreshed!);
+    return this.joinResponse(refreshed!, 'active');
+  }
+
+  /**
+   * MEM-004: join response — the serialized group plus `joinStatus` so the
+   * client knows whether the member is now active or awaiting approval. Additive
+   * key on the group JSON (old clients ignore it).
+   */
+  private joinResponse(group: GroupEntity, joinStatus: 'active' | 'pending') {
+    return { ...GroupSerializer.toResponse(group), joinStatus };
+  }
+
+  // ── JOIN APPROVAL WORKFLOW (MEM-002..010, NTF-001/002/004) ─────────────────
+
+  /**
+   * MEM-002: pre-join preview by join code. Returns the identity + capacity +
+   * approval info the client shows BEFORE joining. No membership change; safe to
+   * call unauthenticated-of-org (the join code is the capability).
+   */
+  async previewByJoinCode(userId: string, joinCode: string) {
+    const group = await this.groupsRepo.findByJoinCode(joinCode);
+    if (!group || !group.isActive) {
+      throw new BadRequestException({
+        message: 'Invalid join code',
+        errors: { joinCode: 'No active group found with this join code' },
+      });
+    }
+    const expired =
+      !!group.joinTokenExpiresAt && group.joinTokenExpiresAt < new Date();
+    const names = await this.groupsRepo.getDetailNames(
+      group.adminId,
+      group.organizationId,
+    );
+    const membership = await this.membersRepo.findMembership(group.id, userId);
+    const occupied = group.memberCount + group.pendingCount;
+    return {
+      groupId: group.id,
+      organizationId: group.organizationId,
+      organizationName: names.organizationName,
+      name: group.name,
+      description: group.description ?? null,
+      type: group.type === 'factory' ? 'factory_' : group.type,
+      currentMembers: group.memberCount,
+      maxMembers: group.maxMembers ?? null,
+      approvalRequired: group.joinApprovalRequired === true,
+      isFull: group.maxMembers !== null && occupied >= group.maxMembers,
+      expired,
+      // Where the requester already stands with this group (null = not a member).
+      myStatus: membership?.status ?? null,
+    };
+  }
+
+  /**
+   * MEM-006: admin approves a pending join request → member becomes active.
+   * Re-validates capacity against ACTIVE members (a spot must be free).
+   */
+  async approveJoinRequest(
+    groupId: string,
+    targetUserId: string,
+    organizationId: string,
+    actorId: string,
+    requestId?: string,
+  ) {
+    const group = await this.groupsRepo.findById(groupId, organizationId);
+    if (!group) throw new NotFoundException('Group not found');
+
+    const membership = await this.membersRepo.findMembership(groupId, targetUserId);
+    if (!membership || membership.status !== 'pending') {
+      throw new NotFoundException({
+        message: 'No pending join request',
+        errors: { memberId: 'This user has no pending join request for this group' },
+      });
+    }
+
+    // MEM-008: capacity re-checked at approval time against active members.
+    if (group.maxMembers !== null && group.memberCount >= group.maxMembers) {
+      throw new ConflictException({
+        message: 'Group Full – Contact Administrator',
+        code: 'GROUP_FULL',
+        errors: { memberId: 'This group has reached its maximum capacity' },
+      });
+    }
+
+    const updated = await this.membersRepo.updateMembership(groupId, targetUserId, {
+      status: 'active',
+      reviewedBy: actorId,
+      reviewedAt: new Date(),
+      reviewNote: null as any,
+    });
+
+    await this.syncUserOrganization(targetUserId, organizationId);
+
+    this.audit.log({
+      organizationId,
+      actorId,
+      targetId: targetUserId,
+      targetType: 'User',
+      action: 'join',
+      metadata: { groupId, approvedJoin: true },
+      requestId,
+    });
+
+    this.realtime?.emitGroupMemberUpdated(groupId, {
+      groupId,
+      userId: targetUserId,
+      action: 'joined',
+    });
+
+    // NTF-002: notify the member their request was approved.
+    this.alertMember({
+      organizationId,
+      actorId,
+      targetUserId,
+      groupName: group.name,
+      title: 'Join request approved',
+      body: `You are now a member of ${group.name}.`,
+      linkType: 'myGroups',
+      push: 'joined',
+    });
+
+    return GroupMemberSerializer.toResponse(updated);
+  }
+
+  /**
+   * MEM-007: admin rejects a pending join request (optional reason). The pending
+   * row is removed so capacity frees and the member may request again later
+   * (MEM-021). The decision is audited and pushed to the member's bell.
+   */
+  async rejectJoinRequest(
+    groupId: string,
+    targetUserId: string,
+    organizationId: string,
+    actorId: string,
+    reason?: string,
+    requestId?: string,
+  ) {
+    const group = await this.groupsRepo.findById(groupId, organizationId);
+    if (!group) throw new NotFoundException('Group not found');
+
+    const membership = await this.membersRepo.findMembership(groupId, targetUserId);
+    if (!membership || membership.status !== 'pending') {
+      throw new NotFoundException({
+        message: 'No pending join request',
+        errors: { memberId: 'This user has no pending join request for this group' },
+      });
+    }
+
+    await this.membersRepo.hardDelete(groupId, targetUserId);
+
+    this.audit.log({
+      organizationId,
+      actorId,
+      targetId: targetUserId,
+      targetType: 'User',
+      action: 'update',
+      metadata: { groupId, rejectedJoin: true, reason: reason ?? null },
+      requestId,
+    });
+
+    // NTF-002: notify the member their request was rejected (with reason).
+    this.alertMember({
+      organizationId,
+      actorId,
+      targetUserId,
+      groupName: group.name,
+      title: 'Join request declined',
+      body: reason
+        ? `Your request to join ${group.name} was declined: ${reason}`
+        : `Your request to join ${group.name} was declined.`,
+      linkType: 'myGroups',
+    });
+
+    return { success: true, message: 'Join request rejected' };
+  }
+
+  /**
+   * MEM-005: a member cancels their OWN pending join request before an admin
+   * acts on it. Self-service — no admin role required.
+   */
+  async cancelJoinRequest(groupId: string, userId: string, requestId?: string) {
+    const membership = await this.membersRepo.findMembership(groupId, userId);
+    if (!membership || membership.status !== 'pending') {
+      throw new NotFoundException({
+        message: 'No pending join request',
+        errors: { group: 'You have no pending join request for this group' },
+      });
+    }
+
+    // Derive the org from the group (a pending member may not have org synced).
+    const grp = await this.prisma.group.findUnique({
+      where: { id: groupId },
+      select: { organizationId: true },
+    });
+
+    await this.membersRepo.hardDelete(groupId, userId);
+
+    if (grp?.organizationId) {
+      this.audit.log({
+        organizationId: grp.organizationId,
+        actorId: userId,
+        targetId: groupId,
+        targetType: 'Group',
+        action: 'update',
+        metadata: { cancelledJoinRequest: true },
+        requestId,
+      });
+    }
+
+    return { success: true, message: 'Join request cancelled' };
   }
 
   // ── JOIN CODE REGENERATION ────────────────────────────────────────────────
@@ -605,9 +1144,16 @@ export class GroupsService {
     if (!existing) throw new NotFoundException('Group not found');
 
     const newCode = await this.generateUniqueJoinCode();
-    const expiresAt = expiresInHours
-      ? new Date(Date.now() + expiresInHours * 60 * 60 * 1000)
-      : null;
+    // GRP-013 / CFG-014: explicit hours win; otherwise re-apply the group's
+    // configured QR expiry policy (days). No policy → Never expires.
+    let expiresAt: Date | null = null;
+    if (expiresInHours && expiresInHours > 0) {
+      expiresAt = new Date(Date.now() + expiresInHours * 60 * 60 * 1000);
+    } else if (existing.qrExpiryDays && existing.qrExpiryDays > 0) {
+      expiresAt = new Date(
+        Date.now() + existing.qrExpiryDays * 24 * 60 * 60 * 1000,
+      );
+    }
 
     await this.groupsRepo.regenerateJoinCode(id, organizationId, newCode, expiresAt);
 
@@ -751,6 +1297,46 @@ export class GroupsService {
       });
     }
 
+    // NTF-003 / MEM-022 (PRIORITY-1): mirror block/unblock/remove into the
+    // member's notification bell (+ best-effort push). Best-effort — never
+    // affects the membership write above.
+    if (dto.status === 'blocked') {
+      this.alertMember({
+        organizationId,
+        actorId,
+        targetUserId,
+        groupName: group.name,
+        title: 'Access blocked',
+        body: `An administrator has blocked your access to ${group.name}.`,
+        linkType: 'myGroups',
+        push: 'blocked',
+      });
+    } else if (dto.status === 'active' && membership.status === 'blocked') {
+      // Unblock (was blocked → active). A plain role change is not a member
+      // alert.
+      this.alertMember({
+        organizationId,
+        actorId,
+        targetUserId,
+        groupName: group.name,
+        title: 'Access restored',
+        body: `Your access to ${group.name} has been restored.`,
+        linkType: 'myGroups',
+        push: 'joined',
+      });
+    } else if (dto.status === 'removed') {
+      this.alertMember({
+        organizationId,
+        actorId,
+        targetUserId,
+        groupName: group.name,
+        title: 'Removed from group',
+        body: `You have been removed from ${group.name}.`,
+        linkType: 'myGroups',
+        push: 'removed',
+      });
+    }
+
     return GroupMemberSerializer.toResponse(updated);
   }
 
@@ -800,7 +1386,71 @@ export class GroupsService {
       action: 'removed',
     });
 
+    // NTF-003 / MEM-022: notify the removed member (bell + push).
+    this.alertMember({
+      organizationId,
+      actorId,
+      targetUserId,
+      groupName: group.name,
+      title: 'Removed from group',
+      body: `You have been removed from ${group.name}.`,
+      linkType: 'myGroups',
+      push: 'removed',
+    });
+
     return { message: 'Member removed from group', userId: targetUserId };
+  }
+
+  /**
+   * MEM-016/017: a member voluntarily LEAVES a group (self-service). Sets
+   * status='removed' (soft), preserving history for billing/audit. The client
+   * switches to the next available group (MEM-017). Any authenticated member —
+   * no admin role required.
+   */
+  async leaveGroup(groupId: string, userId: string, requestId?: string) {
+    const membership = await this.membersRepo.findMembership(groupId, userId);
+    if (!membership || membership.status === 'removed') {
+      throw new NotFoundException({
+        message: 'Not a member',
+        errors: { group: 'You are not a member of this group' },
+      });
+    }
+
+    // A pending request is cancelled, not "left" (MEM-005 semantics).
+    if (membership.status === 'pending') {
+      return this.cancelJoinRequest(groupId, userId, requestId);
+    }
+
+    const grp = await this.prisma.group.findUnique({
+      where: { id: groupId },
+      select: { organizationId: true, name: true },
+    });
+
+    await this.membersRepo.updateMembership(groupId, userId, {
+      status: 'removed',
+      removedAt: new Date(),
+      removedBy: userId, // self
+    });
+
+    if (grp?.organizationId) {
+      this.audit.log({
+        organizationId: grp.organizationId,
+        actorId: userId,
+        targetId: groupId,
+        targetType: 'Group',
+        action: 'leave',
+        metadata: { groupId, self: true },
+        requestId,
+      });
+    }
+
+    this.realtime?.emitGroupMemberUpdated(groupId, {
+      groupId,
+      userId,
+      action: 'removed',
+    });
+
+    return { message: 'You have left the group', groupId };
   }
 
   /**
@@ -839,6 +1489,17 @@ export class GroupsService {
       });
       await this.syncUserOrganization(targetUserId, organizationId);
       this.realtime?.emitGroupMemberUpdated(groupId, { groupId, userId: targetUserId, action: 'joined' });
+      // NTF-003 / MEM-018: notify the reinvited member (bell + push).
+      this.alertMember({
+        organizationId,
+        actorId,
+        targetUserId,
+        groupName: group.name,
+        title: 'Added to a group',
+        body: `An administrator added you to ${group.name}.`,
+        linkType: 'myGroups',
+        push: 'joined',
+      });
       return GroupMemberSerializer.toResponse(updated);
     }
 
@@ -854,6 +1515,18 @@ export class GroupsService {
     this.audit.log({ organizationId, actorId, targetId: targetUserId, targetType: 'User', action: 'join', metadata: { groupId, addedByAdmin: true }, requestId });
     this.realtime?.emitGroupMemberUpdated(groupId, { groupId, userId: targetUserId, action: 'joined' });
 
+    // NTF-003 / MEM-018: notify the added member (bell + push).
+    this.alertMember({
+      organizationId,
+      actorId,
+      targetUserId,
+      groupName: group.name,
+      title: 'Added to a group',
+      body: `An administrator added you to ${group.name}.`,
+      linkType: 'myGroups',
+      push: 'joined',
+    });
+
     return GroupMemberSerializer.toResponse(membership);
   }
 
@@ -868,7 +1541,9 @@ export class GroupsService {
     if (attempts >= 5) {
       throw new Error('Failed to generate unique join code after 5 attempts');
     }
-    const code = generateJoinCode(8);
+    // CFG-015: fixed, configurable Join Code length (default 8).
+    const length = this.groupsCfg<number>('joinCodeLength', 8);
+    const code = generateJoinCode(length);
     const existing = await this.groupsRepo.findByJoinCode(code);
     if (existing) {
       return this.generateUniqueJoinCode(attempts + 1);
@@ -898,10 +1573,28 @@ export class GroupsService {
   async getQrToken(id: string, organizationId: string) {
     const group = await this.groupsRepo.findById(id, organizationId);
     if (!group) throw new NotFoundException('Group not found');
+    // GRP-012: qrPayload is now a SIGNED payload (org+group+token+expiry+sig).
+    // joinCode stays the raw fixed-length code for manual entry (backward
+    // compatible — the join endpoint accepts both).
+    const secret = this.groupsCfg<string>('qrSigningSecret', 'emeal-qr-dev-secret');
+    const qrPayload = encodeQrPayload(
+      {
+        o: group.organizationId,
+        g: group.id,
+        t: group.joinToken,
+        e: group.joinTokenExpiresAt
+          ? group.joinTokenExpiresAt.toISOString()
+          : null,
+      },
+      secret,
+    );
     return {
       groupId: group.id,
-      joinCode: group.joinToken,
-      qrPayload: group.joinToken,  // Flutter renders QR from this value
+      joinCode: group.joinToken, // raw code for manual entry
+      qrPayload, // Flutter renders the QR from this signed value
+      expiresAt: group.joinTokenExpiresAt
+        ? group.joinTokenExpiresAt.toISOString()
+        : null,
     };
   }
 

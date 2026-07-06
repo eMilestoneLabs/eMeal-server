@@ -41,12 +41,16 @@ export class GroupsRepository {
     const members: Array<{ userId: string; status: string }> = raw.members ?? [];
     const activeMembers = members.filter((m) => m.status === 'active');
     const blockedMembers = members.filter((m) => m.status === 'blocked');
+    // MEM-008/010 / CFG-009: pending join requests count toward capacity.
+    const pendingMembers = members.filter((m) => m.status === 'pending');
 
     return new GroupEntity({
       ...raw,
       memberCount: activeMembers.length,
       memberIds: activeMembers.map((m) => m.userId),
       blockedMemberIds: blockedMembers.map((m) => m.userId),
+      pendingCount: pendingMembers.length,
+      pendingMemberIds: pendingMembers.map((m) => m.userId),
     });
   }
 
@@ -98,6 +102,16 @@ export class GroupsRepository {
       adminName: admin?.name ?? null,
       organizationName: org?.name ?? null,
     };
+  }
+
+  /**
+   * ORG-012 / GRP-005 / CFG-012: count the organization's ACTIVE (non-archived)
+   * groups — drives the max-groups-per-org limit and the Create-disabled state.
+   */
+  async countActiveGroups(organizationId: string): Promise<number> {
+    return this.prisma.group.count({
+      where: { organizationId, isActive: true },
+    });
   }
 
   async findAll(
@@ -191,6 +205,7 @@ export class GroupsRepository {
     description?: string;
     adminId?: string;
     joinToken: string;
+    joinTokenExpiresAt?: Date | null;
     maxMembers?: number;
     mealsEnabled?: boolean;
     weeklyMenuEnabled?: boolean;
@@ -199,6 +214,15 @@ export class GroupsRepository {
     enabledPreferences?: string[];
     vacationModeEnabled?: boolean;
     mealPricingEnabled?: boolean;
+    // Module 02 (GRP-003) — extended metadata + approval/QR policy.
+    country?: string | null;
+    state?: string | null;
+    city?: string | null;
+    address?: string | null;
+    timezone?: string | null;
+    currency?: string | null;
+    joinApprovalRequired?: boolean;
+    qrExpiryDays?: number | null;
   }): Promise<GroupEntity> {
     const group = await this.prisma.group.create({
       data: {
@@ -208,6 +232,7 @@ export class GroupsRepository {
         description: data.description,
         adminId: data.adminId,
         joinToken: data.joinToken,
+        joinTokenExpiresAt: data.joinTokenExpiresAt ?? null,
         maxMembers: data.maxMembers,
         mealsEnabled: data.mealsEnabled ?? true,
         weeklyMenuEnabled: data.weeklyMenuEnabled ?? false,
@@ -216,6 +241,15 @@ export class GroupsRepository {
         enabledPreferences: data.enabledPreferences ?? [],
         vacationModeEnabled: data.vacationModeEnabled ?? true,
         mealPricingEnabled: data.mealPricingEnabled ?? false,
+        // Module 02 (GRP-003) — nullable metadata, captured once at creation.
+        country: data.country ?? null,
+        state: data.state ?? null,
+        city: data.city ?? null,
+        address: data.address ?? null,
+        timezone: data.timezone ?? null,
+        currency: data.currency ?? null,
+        joinApprovalRequired: data.joinApprovalRequired ?? false,
+        qrExpiryDays: data.qrExpiryDays ?? null,
       },
       include: { members: this.memberSelect },
     });
@@ -256,6 +290,7 @@ export class GroupsRepository {
       allowGuestWithoutHost: boolean;
       billNoShowGuests: boolean;
       isActive: boolean;
+      archivedAt: Date | null;
       joinToken: string;
       joinTokenExpiresAt: Date | null;
     }>,
@@ -281,12 +316,59 @@ export class GroupsRepository {
   async softDelete(id: string, organizationId: string): Promise<void> {
     const result = await this.prisma.group.updateMany({
       where: { id, organizationId, isActive: true },
-      data: { isActive: false },
+      data: { isActive: false, archivedAt: new Date() },
     });
 
     if (result.count === 0) {
       throw new NotFoundException('Group not found or already archived');
     }
+  }
+
+  /**
+   * GRP-018: restore an archived Group — flips isActive=true, clears archivedAt.
+   * Org-isolated via updateMany WHERE. Returns the restored entity.
+   */
+  async restore(id: string, organizationId: string): Promise<GroupEntity> {
+    const result = await this.prisma.group.updateMany({
+      where: { id, organizationId, isActive: false },
+      data: { isActive: true, archivedAt: null },
+    });
+
+    if (result.count === 0) {
+      throw new NotFoundException('Group not found or not archived');
+    }
+
+    return this.findById(id, organizationId, true) as Promise<GroupEntity>;
+  }
+
+  /**
+   * GRP-019: permanently delete a Group and all of its data. Every child table
+   * that references the group is removed via ON DELETE CASCADE (members, meals,
+   * schedules, attendance) plus explicit deletes for the self-contained
+   * scalar-FK tables (guests, notices, vacation requests, correction requests,
+   * billing ledger). Runs in one transaction — all-or-nothing.
+   */
+  async hardDelete(id: string, organizationId: string): Promise<void> {
+    // Verify the group belongs to the org BEFORE any destructive write.
+    const group = await this.prisma.group.findFirst({
+      where: { id, organizationId },
+      select: { id: true },
+    });
+    if (!group) {
+      throw new NotFoundException('Group not found');
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      // Self-contained tables keyed by scalar groupId (no Prisma cascade).
+      await tx.mealGuest.deleteMany({ where: { groupId: id } });
+      await tx.notice.deleteMany({ where: { groupId: id } });
+      await tx.vacationRequest.deleteMany({ where: { groupId: id } });
+      await tx.attendanceCorrectionRequest.deleteMany({ where: { groupId: id } });
+      await tx.billingLedgerEntry.deleteMany({ where: { groupId: id } });
+      // Group row — GroupMember / Meal / MealSchedule / AttendanceRecord are
+      // removed by their ON DELETE CASCADE FKs to groups.
+      await tx.group.delete({ where: { id } });
+    });
   }
 
   /**

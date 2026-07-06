@@ -76,7 +76,29 @@ export class GroupSerializer {
       memberCount: group.memberCount,
       memberIds: group.memberIds,
       blockedMemberIds: group.blockedMemberIds,
+      // MEM-008/010 / CFG-009: pending join requests (approval mode).
+      pendingCount: group.pendingCount ?? 0,
+      pendingMemberIds: group.pendingMemberIds ?? [],
       maxMembers: group.maxMembers ?? null,
+
+      // Module 02 (GRP-003 / ORG-008): extended metadata + policy. Additive
+      // keys — older Flutter clients ignore unknown fields.
+      country: group.country ?? null,
+      state: group.state ?? null,
+      city: group.city ?? null,
+      address: group.address ?? null,
+      timezone: group.timezone ?? null,
+      currency: group.currency ?? null,
+      // GRP-003 / MEM-004: Join Approval Mode flag.
+      joinApprovalRequired: group.joinApprovalRequired ?? false,
+      // GRP-013 / CFG-014: QR expiry policy (days; null = Never) + concrete
+      // deadline so the client can show "expires on".
+      qrExpiryDays: group.qrExpiryDays ?? null,
+      joinCodeExpiresAt: group.joinTokenExpiresAt
+        ? group.joinTokenExpiresAt.toISOString()
+        : null,
+      // GRP-016: archive marker for the lifecycle UI.
+      archivedAt: group.archivedAt ? group.archivedAt.toISOString() : null,
 
       // Additive (#8): requester's per-group functional role (null = use global).
       functionalRole: group.functionalRole ?? null,

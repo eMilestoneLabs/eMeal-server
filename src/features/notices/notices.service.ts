@@ -15,6 +15,7 @@ import { UpdateNoticeDto } from './dto/update-notice.dto';
 import { QueryNoticeDto } from './dto/query-notice.dto';
 import { NotificationsService } from '../notifications/notifications.service';
 import type { RealtimeEventsService } from '../../realtime/services/realtime-events.service';
+import { ConfigService } from '@nestjs/config';
 
 /**
  * NoticesService — Phase B: in-app notice board + bell center (no FCM).
@@ -30,10 +31,18 @@ export class NoticesService {
     private readonly repo: NoticesRepository,
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
+    private readonly config: ConfigService,
     @Optional()
     @Inject('REALTIME_GATEWAY')
     private readonly realtime: RealtimeEventsService | null = null,
   ) {}
+
+  /** NTF-005: configurable bell retention window in days (default 30). */
+  private retentionDays(): number {
+    return (
+      this.config.get<number>('groups.notificationRetentionDays') ?? 30
+    );
+  }
 
   private isAdmin(role: string): boolean {
     return (ADMIN_ROLES as readonly string[]).includes(role);
@@ -222,6 +231,8 @@ export class NoticesService {
       limit,
       withReadCount: admin,
       audiences: this.audiencesFor(role),
+      // NTF-005: bell feed retention (ignored for the admin includeInactive view).
+      retentionDays: this.retentionDays(),
     });
 
     return {
@@ -249,6 +260,7 @@ export class NoticesService {
       userId,
       groupId,
       this.audiencesFor(role),
+      this.retentionDays(),
     );
     return { count };
   }
@@ -280,6 +292,44 @@ export class NoticesService {
       this.audiencesFor(role),
     );
     return { success: true, updated };
+  }
+
+  // ── DISMISS (member bell — NTF-006) ─────────────────────────────────────────
+
+  /**
+   * NTF-006: a member removes ONE notice from their OWN bell (per-user hide).
+   * The shared notice is untouched for everyone else. Idempotent.
+   */
+  async dismissNotice(userId: string, organizationId: string, noticeId: string) {
+    const notice = await this.repo.findById(noticeId, organizationId);
+    if (!notice) {
+      throw new NotFoundException({
+        message: 'Notice not found',
+        errors: { id: 'Notice does not exist in your organization' },
+      });
+    }
+    await this.repo.dismiss(noticeId, userId);
+    return { success: true };
+  }
+
+  /**
+   * NTF-006: "Delete All" — a member clears every currently-visible notice from
+   * their OWN bell. Returns how many were dismissed.
+   */
+  async dismissAllNotices(
+    userId: string,
+    role: string,
+    organizationId: string,
+    groupId?: string,
+  ) {
+    const updated = await this.repo.dismissAll(
+      organizationId,
+      userId,
+      groupId,
+      this.audiencesFor(role),
+      this.retentionDays(),
+    );
+    return { success: true, dismissed: updated };
   }
 
   // ── UPDATE (admin) ───────────────────────────────────────────────────────────

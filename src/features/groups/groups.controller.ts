@@ -25,6 +25,7 @@ import { UpdateGroupDto } from './dto/update-group.dto';
 import { JoinGroupDto } from './dto/join-group.dto';
 import { UpdateMemberDto } from './dto/update-member.dto';
 import { QueryGroupsDto, QueryMembersDto } from './dto/query-groups.dto';
+import { RejectJoinDto } from './dto/reject-join.dto';
 
 /**
  * GroupsController
@@ -78,12 +79,62 @@ export class GroupsController {
     return this.groupsService.getGroups(user.sub, user.role, user.organizationId, query);
   }
 
+  // ── LIMITS (must be before /:id routes) ──────────────────────────────────
+  // GRP-010 / ORG-013 / CFG-013: config-driven group + member limits so the
+  // client can disable Create at the cap and bound the Maximum-Members input.
+
+  @Get('limits')
+  async getGroupLimits(@CurrentUser() user: JwtPayload) {
+    if (!user.organizationId) {
+      return {
+        maxGroups: 0,
+        currentGroups: 0,
+        canCreateGroup: false,
+        roleMemberLimit: 0,
+      };
+    }
+    return this.groupsService.getGroupLimits(user.organizationId, user.role);
+  }
+
   // ── JOIN (must be before /:id routes) ────────────────────────────────────
 
   @Post('join')
   @HttpCode(HttpStatus.OK)
   async joinGroup(@CurrentUser() user: JwtPayload, @Body() dto: JoinGroupDto, @Req() req: Request) {
     return this.groupsService.joinGroup(user.sub, dto, req.requestId);
+  }
+
+  /**
+   * GET /api/v1/groups/preview?joinCode=XXXX — MEM-002 pre-join preview.
+   * Returns org/group identity, capacity and approval info BEFORE joining.
+   * Must be declared before the `/:id` route.
+   */
+  @Get('preview')
+  async previewJoin(
+    @CurrentUser() user: JwtPayload,
+    @Query('joinCode') joinCode: string,
+  ) {
+    if (!joinCode) {
+      throw new BadRequestException({
+        message: 'joinCode is required',
+        errors: { joinCode: 'Provide a join code to preview' },
+      });
+    }
+    return this.groupsService.previewByJoinCode(user.sub, joinCode);
+  }
+
+  /**
+   * DELETE /api/v1/groups/:id/join-request — MEM-005: the current member cancels
+   * their OWN pending join request. Self-service (no admin role).
+   */
+  @Delete(':id/join-request')
+  @HttpCode(HttpStatus.OK)
+  async cancelMyJoinRequest(
+    @Param('id') groupId: string,
+    @CurrentUser() user: JwtPayload,
+    @Req() req: Request,
+  ) {
+    return this.groupsService.cancelJoinRequest(groupId, user.sub, req.requestId);
   }
 
   // ── GET ONE ───────────────────────────────────────────────────────────────
@@ -124,6 +175,30 @@ export class GroupsController {
     return this.groupsService.deleteGroup(id, user.organizationId!, user.sub, req.requestId);
   }
 
+  // ── RESTORE (GRP-018) ─────────────────────────────────────────────────────
+
+  @Post(':id/restore')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(RolesGuard)
+  @Roles(...ADMIN_ROLES)
+  async restoreGroup(@Param('id') id: string, @CurrentUser() user: JwtPayload, @Req() req: Request) {
+    return this.groupsService.restoreGroup(id, user.organizationId!, user.sub, req.requestId);
+  }
+
+  // ── PERMANENT DELETE (GRP-019) — irreversible, danger-confirmed on client ──
+
+  @Delete(':id/permanent')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(RolesGuard)
+  @Roles(...ADMIN_ROLES)
+  async permanentDeleteGroup(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+    @Req() req: Request,
+  ) {
+    return this.groupsService.permanentDeleteGroup(id, user.organizationId!, user.sub, req.requestId);
+  }
+
   // ── MEAL CONFIG ───────────────────────────────────────────────────────────
 
   @Patch(':id/meal-config')
@@ -155,6 +230,22 @@ export class GroupsController {
     return this.groupsService.regenerateJoinCode(id, user.organizationId!, user.sub, hours, req.requestId);
   }
 
+  // ── LEAVE (self-service, MEM-016/017) ─────────────────────────────────────
+
+  /**
+   * POST /api/v1/groups/:id/leave — the current member voluntarily leaves the
+   * group. Any authenticated member (no admin role).
+   */
+  @Post(':id/leave')
+  @HttpCode(HttpStatus.OK)
+  async leaveGroup(
+    @Param('id') groupId: string,
+    @CurrentUser() user: JwtPayload,
+    @Req() req: Request,
+  ) {
+    return this.groupsService.leaveGroup(groupId, user.sub, req.requestId);
+  }
+
   // ── MEMBERS ───────────────────────────────────────────────────────────────
 
   // ── POST /groups/:id/members — Flutter: addMember = '/groups/{groupId}/members' ──
@@ -174,6 +265,67 @@ export class GroupsController {
       throw new BadRequestException({ message: 'No organization', errors: { organizationId: 'Required' } });
     }
     return this.groupsService.addMemberById(groupId, user.organizationId!, user.sub, body.userId, body.role, req.requestId);
+  }
+
+  // ── JOIN REQUESTS (admin approval workflow, MEM-006/007) ──────────────────
+
+  /**
+   * GET /groups/:id/join-requests — admin lists pending join requests for the
+   * approvals screen. Thin wrapper over the member list filtered to `pending`.
+   */
+  @Get(':id/join-requests')
+  @UseGuards(RolesGuard)
+  @Roles(...ADMIN_ROLES)
+  async getJoinRequests(
+    @Param('id') groupId: string,
+    @CurrentUser() user: JwtPayload,
+    @Query() query: QueryMembersDto,
+  ) {
+    if (!user.organizationId) return { data: [], total: 0, page: 1, limit: 20 };
+    return this.groupsService.getMembers(groupId, user.organizationId, user.sub, user.role, {
+      ...query,
+      status: 'pending',
+    });
+  }
+
+  @Patch(':id/join-requests/:userId/approve')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(RolesGuard)
+  @Roles(...ADMIN_ROLES)
+  async approveJoinRequest(
+    @Param('id') groupId: string,
+    @Param('userId') userId: string,
+    @CurrentUser() user: JwtPayload,
+    @Req() req: Request,
+  ) {
+    return this.groupsService.approveJoinRequest(
+      groupId,
+      userId,
+      user.organizationId!,
+      user.sub,
+      req.requestId,
+    );
+  }
+
+  @Patch(':id/join-requests/:userId/reject')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(RolesGuard)
+  @Roles(...ADMIN_ROLES)
+  async rejectJoinRequest(
+    @Param('id') groupId: string,
+    @Param('userId') userId: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: RejectJoinDto,
+    @Req() req: Request,
+  ) {
+    return this.groupsService.rejectJoinRequest(
+      groupId,
+      userId,
+      user.organizationId!,
+      user.sub,
+      dto.reason,
+      req.requestId,
+    );
   }
 
   @Get(':id/members')

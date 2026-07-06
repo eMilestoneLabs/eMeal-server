@@ -417,6 +417,25 @@ if command -v docker >/dev/null; then
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
+sec "19. MODULE_02 — Organization & Group Management (delegated verifier)"
+# command_3: runs the full MODULE_02 end-to-end suite (limits, signed QR, join
+# preview, join-approval workflow, archive→restore→permanent-delete, self-leave,
+# bell dismissal, tenant isolation). Its detailed PASS/FAIL streams above; the
+# aggregate result rolls into this run's summary.
+if [ -f "$_E2E_DIR/validate-group-organization.sh" ]; then
+  if BASE="$BASE" ADMIN_EMAIL="$ADMIN_EMAIL" ADMIN_PASS="$ADMIN_PASS" \
+     STUDENT_EMAIL="$STUDENT_EMAIL" STUDENT_PASS="$STUDENT_PASS" \
+     ADMIN2_EMAIL="$ADMIN2_EMAIL" ADMIN2_PASS="$ADMIN2_PASS" \
+     bash "$_E2E_DIR/validate-group-organization.sh"; then
+    ok "MODULE_02 verifier passed" "(see delegated section output above)"
+  else
+    no "MODULE_02 verifier reported failures" "(see delegated section output above)"
+  fi
+else
+  skip "MODULE_02 verifier" "deploy/validate-group-organization.sh not found"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
 sec "SUMMARY"
 TOTAL=$((PASS+FAIL))
 echo "  PASS=$PASS  FAIL=$FAIL  SKIP=$SKIP  (of $TOTAL asserted)"

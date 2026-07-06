@@ -238,6 +238,74 @@ export class CreateGroupDto {
   @Min(1)
   maxMembers?: number;
 
+  // ── Module 02 (GRP-003 / ORG-008) — extended metadata ──────────────────────
+  // Captured at creation and immutable in the current release (the service
+  // ignores these on update). All optional + length-bounded.
+  @Transform(({ value }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  country?: string;
+
+  @Transform(({ value }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  state?: string;
+
+  @Transform(({ value }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  city?: string;
+
+  @Transform(({ value }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  address?: string;
+
+  /** IANA timezone for the group display (null = inherit organization tz). */
+  @Transform(({ value }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  timezone?: string;
+
+  /** ISO 4217 currency code (e.g. INR). Upper-cased + length-bounded. */
+  @Transform(({ value }) =>
+    typeof value === 'string' ? value.trim().toUpperCase() : value,
+  )
+  @IsOptional()
+  @IsString()
+  @MaxLength(8)
+  currency?: string;
+
+  /** GRP-003 / MEM-004: enable admin approval for join requests. */
+  @IsOptional()
+  @IsBoolean()
+  joinApprovalRequired?: boolean;
+
+  /**
+   * GRP-013 / CFG-014: QR/Join-Code expiry in days. Omitted or 0 = Never
+   * expires. Bounded to a sane maximum (2 years).
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(730)
+  qrExpiryDays?: number;
+
   /**
    * mealConfig — optional at creation, defaults applied by service.
    * Serializer always returns nested mealConfig regardless.

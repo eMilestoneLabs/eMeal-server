@@ -6,6 +6,7 @@ import { MembersRepository } from '../repositories/members.repository';
 import { UsersRepository } from '../../users/repositories/users.repository';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AuditService } from '../../../audit/audit.service';
+import { ConfigService } from '@nestjs/config';
 import { GroupEntity } from '../entities/group.entity';
 import { GroupMemberEntity } from '../entities/group-member.entity';
 
@@ -122,6 +123,12 @@ describe('GroupsService', () => {
           provide: AuditService,
           useValue: { log: jest.fn() },
         },
+        {
+          // Module 02: groups.* config namespace — mock returns undefined so the
+          // service falls back to its documented defaults.
+          provide: ConfigService,
+          useValue: { get: jest.fn().mockReturnValue(undefined) },
+        },
       ],
     }).compile();
 
@@ -143,8 +150,10 @@ describe('GroupsService', () => {
         service.getGroupById('grp_01', 'org_ATTACKER', 'usr_attacker', 'hostelAdmin'),
       ).rejects.toThrow(NotFoundException);
 
-      // Verify repository was called with the org from JWT (not the attacker's org)
-      expect(groupsRepo.findById).toHaveBeenCalledWith('grp_01', 'org_ATTACKER');
+      // Verify repository was called with the org from JWT (not the attacker's org).
+      // Module 02 (GRP-018/019): admins pass includeInactive=true so they can
+      // open archived groups to restore / permanently delete them.
+      expect(groupsRepo.findById).toHaveBeenCalledWith('grp_01', 'org_ATTACKER', true);
     });
 
     it('returns group for admin without membership check', async () => {
@@ -238,6 +247,9 @@ describe('GroupsService', () => {
       expect(membersRepo.createMembership).toHaveBeenCalledWith({
         groupId: 'grp_01',
         userId: 'usr_new',
+        // Module 02 (MEM-004): status is now explicit — immediate-join groups
+        // (joinApprovalRequired falsey) create an ACTIVE membership.
+        status: 'active',
         // #2: additive per-group display role — null when the join omits it.
         functionalRole: null,
       });
@@ -266,6 +278,94 @@ describe('GroupsService', () => {
         expect.objectContaining({ status: 'active' }),
       );
       expect(membersRepo.createMembership).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── JOIN APPROVAL WORKFLOW (Module 02, MEM-004..007) ──────────────────────
+
+  describe('join approval workflow', () => {
+    const approvalGroup = new GroupEntity({
+      ...mockGroup,
+      joinApprovalRequired: true,
+    });
+
+    it('creates a PENDING membership and returns joinStatus=pending', async () => {
+      groupsRepo.findByJoinCode.mockResolvedValue(approvalGroup);
+      membersRepo.findMembership.mockResolvedValue(null);
+      membersRepo.createMembership.mockResolvedValue(mockActiveMember);
+      usersRepo.findById.mockResolvedValue({ id: 'usr_new', name: 'New User' } as any);
+
+      const result = await service.joinGroup('usr_new', { joinCode: 'HTL3K8XZ' });
+
+      expect(membersRepo.createMembership).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'pending' }),
+      );
+      // No org sync until approved.
+      expect(usersRepo.update).not.toHaveBeenCalled();
+      expect(result).toHaveProperty('joinStatus', 'pending');
+    });
+
+    it('counts pending toward capacity (GROUP_FULL when active+pending = max)', async () => {
+      const nearFull = new GroupEntity({
+        ...approvalGroup,
+        maxMembers: 2,
+        memberCount: 1,
+        pendingCount: 1,
+      });
+      groupsRepo.findByJoinCode.mockResolvedValue(nearFull);
+      membersRepo.findMembership.mockResolvedValue(null);
+
+      await expect(
+        service.joinGroup('usr_new', { joinCode: 'HTL3K8XZ' }),
+      ).rejects.toMatchObject({
+        status: 409,
+        response: expect.objectContaining({ code: 'GROUP_FULL' }),
+      });
+    });
+
+    it('approveJoinRequest activates a pending member', async () => {
+      groupsRepo.findById.mockResolvedValue(approvalGroup);
+      membersRepo.findMembership.mockResolvedValue(
+        new GroupMemberEntity({ ...mockActiveMember, status: 'pending' }),
+      );
+      membersRepo.updateMembership.mockResolvedValue(mockActiveMember as any);
+      usersRepo.findById.mockResolvedValue({ id: 'usr_student', organizationId: null } as any);
+
+      await service.approveJoinRequest('grp_01', 'usr_student', 'org_01', 'usr_admin');
+
+      expect(membersRepo.updateMembership).toHaveBeenCalledWith(
+        'grp_01',
+        'usr_student',
+        expect.objectContaining({ status: 'active', reviewedBy: 'usr_admin' }),
+      );
+    });
+
+    it('rejectJoinRequest removes the pending row', async () => {
+      groupsRepo.findById.mockResolvedValue(approvalGroup);
+      membersRepo.findMembership.mockResolvedValue(
+        new GroupMemberEntity({ ...mockActiveMember, status: 'pending' }),
+      );
+      (membersRepo as any).hardDelete = jest.fn().mockResolvedValue(undefined);
+
+      const res = await service.rejectJoinRequest(
+        'grp_01',
+        'usr_student',
+        'org_01',
+        'usr_admin',
+        'No capacity',
+      );
+
+      expect((membersRepo as any).hardDelete).toHaveBeenCalledWith('grp_01', 'usr_student');
+      expect(res).toMatchObject({ success: true });
+    });
+
+    it('approveJoinRequest 404s when there is no pending request', async () => {
+      groupsRepo.findById.mockResolvedValue(approvalGroup);
+      membersRepo.findMembership.mockResolvedValue(mockActiveMember); // already active
+
+      await expect(
+        service.approveJoinRequest('grp_01', 'usr_student', 'org_01', 'usr_admin'),
+      ).rejects.toThrow(NotFoundException);
     });
   });
 

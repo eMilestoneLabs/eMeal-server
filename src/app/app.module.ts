@@ -11,6 +11,7 @@ import authConfig from '../config/auth.config';
 import correctionsConfig from '../config/corrections.config';
 import preferencesConfig from '../config/preferences.config';
 import attendanceConfig from '../config/attendance.config';
+import groupsConfig from '../config/groups.config';
 
 // Infrastructure
 import { PrismaModule } from '../prisma/prisma.module';
@@ -64,6 +65,7 @@ import { HealthController } from './health.controller';
         correctionsConfig,
         preferencesConfig,
         attendanceConfig,
+        groupsConfig,
       ],
       envFilePath: ['.env'],
     }),

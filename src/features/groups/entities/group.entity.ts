@@ -22,6 +22,21 @@ export class GroupEntity {
   maxMembers: number | null;
   isActive: boolean;
 
+  // ── Module 02 (MODULE_02) — extended metadata + lifecycle ─────────────────
+  // GRP-003 / ORG-008: captured at creation, immutable in the current release.
+  country: string | null;
+  state: string | null;
+  city: string | null;
+  address: string | null;
+  timezone: string | null;
+  currency: string | null;
+  // GRP-003 / MEM-004: Join Approval Mode.
+  joinApprovalRequired: boolean;
+  // GRP-013 / CFG-014: QR expiry policy in days (null = Never).
+  qrExpiryDays: number | null;
+  // GRP-016/019: archive timestamp (null while active).
+  archivedAt: Date | null;
+
   // ── mealConfig flat columns — serialized as nested object ────────────────
   mealsEnabled: boolean;
   weeklyMenuEnabled: boolean;
@@ -60,6 +75,10 @@ export class GroupEntity {
   memberCount: number;
   memberIds: string[];
   blockedMemberIds: string[];
+  // MEM-008/010 / CFG-009: pending join requests — used for capacity math
+  // (Remaining = capacity − active − pending) and the admin approvals badge.
+  pendingCount: number;
+  pendingMemberIds: string[];
 
   // Additive (#8): the REQUESTER's functional role for this group, computed
   // per-request from their GroupMember.functionalRole. null -> client falls
@@ -81,6 +100,9 @@ export class GroupEntity {
     this.memberCount = this.memberCount ?? 0;
     this.memberIds = this.memberIds ?? [];
     this.blockedMemberIds = this.blockedMemberIds ?? [];
+    this.pendingCount = this.pendingCount ?? 0;
+    this.pendingMemberIds = this.pendingMemberIds ?? [];
+    this.joinApprovalRequired = this.joinApprovalRequired ?? false;
     this.functionalRole = this.functionalRole ?? null;
     this.enabledPreferences = this.enabledPreferences ?? [];
     this.mealPricingEnabled = this.mealPricingEnabled ?? false;

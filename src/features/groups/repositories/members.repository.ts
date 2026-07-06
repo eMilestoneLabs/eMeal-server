@@ -137,10 +137,14 @@ export class MembersRepository {
       role: string;
       functionalRole: string | null; // additive (#8)
       status: string;
-      blockedAt: Date;
-      blockedBy: string;
-      removedAt: Date;
-      removedBy: string;
+      blockedAt: Date | null;
+      blockedBy: string | null;
+      removedAt: Date | null;
+      removedBy: string | null;
+      // Module 02 (MEM-004/006/007): join-approval decision trail.
+      reviewedBy: string | null;
+      reviewedAt: Date | null;
+      reviewNote: string | null;
     }>,
   ): Promise<GroupMemberEntity> {
     const m = await this.prisma.groupMember.update({

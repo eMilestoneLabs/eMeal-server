@@ -18,6 +18,7 @@
 
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createHash } from 'crypto';
 import type { NotificationPayload } from './notification-payload.service';
 
 export interface NotificationDeliveryResult {
@@ -149,12 +150,31 @@ export class NotificationSendService implements OnModuleInit {
     userId: string,
   ): Promise<NotificationDeliveryResult> {
     try {
+      // PRIORITY-1 (duplicate-notification fix): a stable collapse identity for
+      // this logical event. Android `tag`/`collapseKey` and iOS
+      // `apns-collapse-id` make the OS REPLACE rather than stack, so the same
+      // notification can never appear twice — whether from an OS-tray + in-app
+      // double draw, a re-delivery, or an accidental double enqueue.
+      const tag = this.collapseTag(payload);
+      const dataWithTag = this.stringifyData({
+        route: payload.route,
+        // Forwarded so the client can render a single notification with a
+        // matching id/tag (see push_notification_service.dart).
+        dedupeId: tag,
+        ...(payload.data ?? {}),
+      });
       const message = {
         token: fcmToken,
         notification: { title: payload.title, body: payload.body },
-        data: this.stringifyData({ route: payload.route, ...(payload.data ?? {}) }),
-        android: { priority: 'high' as const },
-        apns: { headers: { 'apns-priority': '10' } },
+        data: dataWithTag,
+        android: {
+          priority: 'high' as const,
+          collapseKey: tag,
+          notification: { tag },
+        },
+        apns: {
+          headers: { 'apns-priority': '10', 'apns-collapse-id': tag },
+        },
       };
       const messageId: string = await this.messaging.send(message);
       return { success: true, messageId };
@@ -166,6 +186,27 @@ export class NotificationSendService implements OnModuleInit {
       this.logger.warn(`[FCM] send failed user=${userId} code=${errorCode}`);
       return { success: false, errorCode, error: e?.message };
     }
+  }
+
+  /**
+   * PRIORITY-1: a deterministic collapse tag for a notification. Prefers an
+   * explicit `data.dedupeId`; else derives one from the event type + the entity
+   * it concerns (noticeId / date / groupId / route) so two identical logical
+   * events map to the SAME tag. Bounded to a short, tag-safe hex string.
+   */
+  private collapseTag(payload: NotificationPayload): string {
+    const d = (payload.data ?? {}) as Record<string, unknown>;
+    const explicit = d.dedupeId ?? d.tag;
+    const base =
+      (explicit as string) ||
+      [
+        d.type ?? 'notif',
+        d.noticeId ?? d.date ?? d.groupId ?? payload.route ?? '',
+      ].join(':');
+    return createHash('sha1')
+      .update(`${base}|${payload.title}`)
+      .digest('hex')
+      .slice(0, 24);
   }
 
   /** FCM `data` payload values MUST be strings. */

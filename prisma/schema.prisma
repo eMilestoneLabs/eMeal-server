@@ -277,7 +277,32 @@ model Group {
   billNoShowGuests              Boolean @default(true) // LOOP-013 policy
 
   maxMembers Int?
+
+  // ── Module 02 (MODULE_02 SRS) — Organization & Group Management ────────────
+  // All additive + nullable so existing rows are untouched. GRP-003 lists these
+  // as captured at creation and immutable in the current release (ORG-008 /
+  // GRP-009) — the service ignores them on update. Kept configurable-ready for
+  // a future release without a schema change.
+  country  String? // GRP-003 (captured at create, immutable)
+  state    String? // GRP-003
+  city     String? // GRP-003
+  address  String? // GRP-003
+  timezone String? // GRP-003 — group display timezone (null = inherit org tz)
+  currency String? // GRP-003 — ISO 4217 code (null = inherit org / default)
+
+  // GRP-003 / MEM-004: Join Approval Mode. When true, a join creates a PENDING
+  // GroupMember that an admin must approve before it becomes active.
+  joinApprovalRequired Boolean @default(false)
+
+  // GRP-013 / CFG-014: QR/Join-Code expiry policy captured at creation, in
+  // days. Null = Never expires. The concrete deadline lives in
+  // joinTokenExpiresAt; this remembers the policy for regeneration.
+  qrExpiryDays Int?
+
   isActive   Boolean  @default(true)
+  // GRP-016/019: soft-archive marker for restore/permanent-delete workflow.
+  // isActive=false = archived; archivedAt records when. Null while active.
+  archivedAt DateTime?
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
@@ -314,6 +339,13 @@ model GroupMember {
   blockedBy String?   // userId of admin who blocked
   removedAt DateTime?
   removedBy String?   // userId of admin who removed
+
+  // ── Module 02 (MEM-004/006/007) — Join Approval workflow ───────────────────
+  // Set when an admin approves/rejects a PENDING join request. Additive +
+  // nullable so existing rows and the immediate-join path are unaffected.
+  reviewedBy String?   // admin userId who approved/rejected the pending request
+  reviewedAt DateTime? // when the decision was taken
+  reviewNote String?   // optional rejection reason (MEM-007)
 
   group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
   user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -811,6 +843,10 @@ model NoticeRead {
   noticeId String
   userId   String
   readAt   DateTime @default(now())
+  // NTF-006 (Module 02): per-member bell dismissal. When set, the notice is
+  // hidden from THIS user's bell (list + unread) without deleting the shared
+  // notice for others. Null = visible. Additive + nullable.
+  dismissedAt DateTime?
 
   notice Notice @relation(fields: [noticeId], references: [id], onDelete: Cascade)
 
