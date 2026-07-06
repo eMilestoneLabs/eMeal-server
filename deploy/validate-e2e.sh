@@ -417,22 +417,40 @@ if command -v docker >/dev/null; then
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "19. MODULE_02 — Organization & Group Management (delegated verifier)"
-# command_3: runs the full MODULE_02 end-to-end suite (limits, signed QR, join
-# preview, join-approval workflow, archive→restore→permanent-delete, self-leave,
-# bell dismissal, tenant isolation). Its detailed PASS/FAIL streams above; the
-# aggregate result rolls into this run's summary.
+sec "19. MODULE-01: AUTH & SIGNUP (delegated verifier)"
+# command_3: runs the full MODULE_01 auth suite (login + negatives, session/me,
+# token refresh, anti-enumeration on forgot-password & OTP, OTP send alias,
+# reset-password bad-code rejection, sign-up input validation, logout). Its
+# detailed PASS/FAIL streams above; the aggregate rolls into this run's summary.
+if [ -f "$_E2E_DIR/validate-auth-signup.sh" ]; then
+  if BASE="$BASE" ADMIN_EMAIL="$ADMIN_EMAIL" ADMIN_PASS="$ADMIN_PASS" \
+     STUDENT_EMAIL="$STUDENT_EMAIL" STUDENT_PASS="$STUDENT_PASS" \
+     bash "$_E2E_DIR/validate-auth-signup.sh"; then
+    ok "MODULE-01 AUTH & SIGNUP verifier passed" "(see delegated section output above)"
+  else
+    no "MODULE-01 AUTH & SIGNUP verifier reported failures" "(see delegated section output above)"
+  fi
+else
+  skip "MODULE-01 AUTH & SIGNUP verifier" "deploy/validate-auth-signup.sh not found"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+sec "20. MODULE-02: GROUPS & ORGANIZATION (delegated verifier)"
+# command_3: runs the full MODULE_02 end-to-end suite (limits + per-role member
+# caps, signed QR, join preview, join-approval workflow, archive→restore→
+# permanent-delete, self-leave, bell dismissal, tenant isolation). Its detailed
+# PASS/FAIL streams above; the aggregate result rolls into this run's summary.
 if [ -f "$_E2E_DIR/validate-group-organization.sh" ]; then
   if BASE="$BASE" ADMIN_EMAIL="$ADMIN_EMAIL" ADMIN_PASS="$ADMIN_PASS" \
      STUDENT_EMAIL="$STUDENT_EMAIL" STUDENT_PASS="$STUDENT_PASS" \
      ADMIN2_EMAIL="$ADMIN2_EMAIL" ADMIN2_PASS="$ADMIN2_PASS" \
      bash "$_E2E_DIR/validate-group-organization.sh"; then
-    ok "MODULE_02 verifier passed" "(see delegated section output above)"
+    ok "MODULE-02 GROUPS & ORGANIZATION verifier passed" "(see delegated section output above)"
   else
-    no "MODULE_02 verifier reported failures" "(see delegated section output above)"
+    no "MODULE-02 GROUPS & ORGANIZATION verifier reported failures" "(see delegated section output above)"
   fi
 else
-  skip "MODULE_02 verifier" "deploy/validate-group-organization.sh not found"
+  skip "MODULE-02 GROUPS & ORGANIZATION verifier" "deploy/validate-group-organization.sh not found"
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════

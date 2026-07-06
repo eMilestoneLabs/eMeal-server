@@ -103,26 +103,55 @@ if [ -n "$ADMIN2_EMAIL" ]; then ADMIN2_TOKEN="$(login "$ADMIN2_EMAIL" "$ADMIN2_P
   [ -n "$ADMIN2_TOKEN" ] && ok "Secondary admin login" || no "Secondary admin login"; else ADMIN2_TOKEN=""; skip "Secondary admin login" "no ADMIN2_EMAIL"; fi
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Housekeeping: sweep any leftover throwaway groups from a previously aborted run
+# so a full-org account does not stay wedged at its group limit forever, and
+# discover one real existing group to exercise read-only checks against even when
+# the account cannot create new groups (org at CFG-012 limit).
+req GET "/groups?includeInactive=true" "" "$ADMIN_TOKEN"
+for old in $(echo "$R_BODY" | jq -r '((.data // .)|map(select(.name|startswith("ZZ_M02_VERIFY_")))|.[].id) // empty' 2>/dev/null); do
+  req DELETE "/groups/$old/permanent" "" "$ADMIN_TOKEN"
+done
+req GET /groups "" "$ADMIN_TOKEN"
+EXIST_GID="$(echo "$R_BODY" | jq -r '((.data // .)[0].id) // empty' 2>/dev/null)"
+
+# ═════════════════════════════════════════════════════════════════════════════
 sec "1. LIMITS (ORG-012/013, GRP-004/005/010, CFG-002..013)"
 req GET /groups/limits "" "$ADMIN_TOKEN"
 assert_code "GET /groups/limits" 200 "$R_CODE"; perf "limits"
-CAN_CREATE="$(j '.canCreateGroup // .data.canCreateGroup')"
+# NB: jq's `//` operator treats a legitimate `false` as null-like and would
+# silently fall through to the next branch — so we must branch on has() to read
+# canCreateGroup correctly (a real `false` at the group limit is a valid answer).
+CAN_CREATE="$(echo "$R_BODY" | jq -r 'if has("canCreateGroup") then .canCreateGroup elif ((.data|type)=="object" and (.data|has("canCreateGroup"))) then .data.canCreateGroup else "null" end' 2>/dev/null)"
 MAX_GROUPS="$(j '.maxGroups // .data.maxGroups')"
 ROLE_LIMIT="$(j '.roleMemberLimit // .data.roleMemberLimit')"
 echo "      maxGroups=$MAX_GROUPS canCreate=$CAN_CREATE roleMemberLimit=$ROLE_LIMIT"
 [ "$MAX_GROUPS" != "null" ] && ok "limits.maxGroups present (config-driven)" || no "limits.maxGroups"
 [ "$ROLE_LIMIT" != "null" ] && ok "limits.roleMemberLimit present (GRP-004)" || no "limits.roleMemberLimit"
+# GRP-004: full per-role cap map + configurable floor exposed for the client so
+# the Maximum-Members input can be bounded by the SELECTED role (config-driven).
+HAS_RL_MAP=$(echo "$R_BODY" | jq 'has("roleMemberLimits") or ((.data|type=="object") and (.data|has("roleMemberLimits")))' 2>/dev/null)
+[ "$HAS_RL_MAP" = "true" ] && ok "limits.roleMemberLimits map present (per-role caps)" || no "limits.roleMemberLimits map"
+MIN_MEMBERS="$(j '.minMembers // .data.minMembers')"
+[ "$MIN_MEMBERS" != "null" ] && ok "limits.minMembers present (config floor)" "min=$MIN_MEMBERS" || no "limits.minMembers"
 
-# Role-member-limit enforcement — create with maxMembers over the role limit → 422.
+# Member-limit enforcement — over the role ceiling AND under the floor → 422.
 if [ "$CAN_CREATE" = "true" ] && [ "$ROLE_LIMIT" != "null" ]; then
   OVER=$((ROLE_LIMIT + 1))
   req POST /groups "$(jq -nc --arg n "ZZ_M02_VERIFY_over" --argjson m "$OVER" '{name:$n,type:"hostel",maxMembers:$m}')" "$ADMIN_TOKEN"
   { [ "$R_CODE" = "422" ] && echo "$R_BODY" | grep -q MEMBER_LIMIT_EXCEEDED; } \
     && ok "maxMembers > role limit rejected (422 MEMBER_LIMIT_EXCEEDED)" || no "role member-limit enforcement" "$R_CODE"
-else skip "role member-limit enforcement" "group limit reached or no roleLimit"; fi
+  UNDER=$(( ${MIN_MEMBERS:-2} - 1 )); [ "$UNDER" -lt 1 ] && UNDER=1
+  req POST /groups "$(jq -nc --arg n "ZZ_M02_VERIFY_under" --argjson m "$UNDER" '{name:$n,type:"hostel",maxMembers:$m}')" "$ADMIN_TOKEN"
+  { [ "$R_CODE" = "422" ] && echo "$R_BODY" | grep -q MEMBER_LIMIT_EXCEEDED; } \
+    && ok "maxMembers < min floor rejected (422)" || no "min member-floor enforcement" "$R_CODE"
+else skip "member-limit enforcement (over/under)" "group limit reached or no roleLimit"; fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 sec "2. CREATE + EXTENDED METADATA + SIGNED QR (GRP-003/011/012/013)"
+# When the org can create, create a fully-populated group and assert metadata
+# round-trips (GRP-003). When it cannot (org at limit), fall back to an existing
+# group so the signed-QR/preview/shape checks still run instead of skipping.
+G_META=""
 if [ "$CAN_CREATE" = "true" ]; then
   BODY=$(jq -nc '{name:"ZZ_M02_VERIFY_meta",type:"hostel",description:"verify",
     country:"India",state:"WB",city:"Kolkata",address:"Test St",currency:"INR",
@@ -133,9 +162,16 @@ if [ "$CAN_CREATE" = "true" ]; then
   req GET "/groups/$G_META" "" "$ADMIN_TOKEN"
   [ "$(j '.country // .data.country')" = "India" ] && ok "GRP-003 country persisted+returned" || no "GRP-003 country"
   [ "$(j '.currency // .data.currency')" = "INR" ] && ok "GRP-003 currency persisted+returned" || no "GRP-003 currency"
-  HAS_APPROVAL=$(echo "$R_BODY" | jq 'has("joinApprovalRequired") or (.data|has("joinApprovalRequired"))')
+else
+  skip "Create group w/ metadata" "org at group limit (CFG-012) — using existing group for read-only checks"
+  G_META="$EXIST_GID"
+fi
+# Read-only checks below run against G_META regardless of how it was obtained.
+if [ -n "$G_META" ]; then
+  req GET "/groups/$G_META" "" "$ADMIN_TOKEN"
+  HAS_APPROVAL=$(echo "$R_BODY" | jq 'has("joinApprovalRequired") or ((.data|type=="object") and (.data|has("joinApprovalRequired")))')
   [ "$HAS_APPROVAL" = "true" ] && ok "GRP-003 joinApprovalRequired exposed" || no "joinApprovalRequired key"
-  HAS_PENDING=$(echo "$R_BODY" | jq 'has("pendingCount") or (.data|has("pendingCount"))')
+  HAS_PENDING=$(echo "$R_BODY" | jq 'has("pendingCount") or ((.data|type=="object") and (.data|has("pendingCount")))')
   [ "$HAS_PENDING" = "true" ] && ok "MEM-008 pendingCount exposed" || no "pendingCount key"
   # Signed QR payload (GRP-012)
   req GET "/groups/$G_META/qr-token" "" "$ADMIN_TOKEN"; perf "qr-token"
@@ -146,7 +182,7 @@ if [ "$CAN_CREATE" = "true" ]; then
   assert_code "MEM-002 preview by join code" 200 "$R_CODE"
   HAS_APPROVED_KEY=$(echo "$R_BODY" | jq 'has("approvalRequired")')
   [ "$HAS_APPROVED_KEY" = "true" ] && ok "preview carries approvalRequired+capacity" || no "preview shape"
-else skip "create/metadata/QR/preview checks" "group limit reached (CFG-012)"; fi
+else skip "metadata/QR/preview checks" "no group available (cannot create and no existing group)"; fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 sec "3. JOIN-APPROVAL WORKFLOW (MEM-002..010, NTF-001/002)"

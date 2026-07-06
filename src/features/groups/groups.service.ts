@@ -185,17 +185,25 @@ export class GroupsService {
       });
     }
 
-    // GRP-004 / CFG-002/003/004: Maximum Members entered by the admin must not
-    // exceed the configured limit for their Organization Role. The creator's
-    // role is resolved from their User record (one indexed PK lookup at create).
+    // GRP-004 / CFG-002/003/004: Maximum Members must fall within the configured
+    // range for the role the admin selects FOR THIS GROUP (functionalRole) —
+    // e.g. Hostel Admin 2..50, Organization Manager 2..100. Falls back to the
+    // creator's Organization Role when no functional role is supplied. Both the
+    // floor (minMembers) and the per-role ceiling are config-driven (nothing
+    // hardcoded), so changing config updates enforcement everywhere.
     if (dto.maxMembers !== undefined && dto.maxMembers !== null) {
-      const creator = await this.usersRepo.findById(adminId);
-      const limit = this.roleMemberLimit(creator?.role ?? 'student');
-      if (dto.maxMembers > limit) {
+      const minMembers = this.groupsCfg<number>('minMembers', 2);
+      let capRole = dto.functionalRole;
+      if (!capRole) {
+        const creator = await this.usersRepo.findById(adminId);
+        capRole = creator?.role ?? 'student';
+      }
+      const limit = this.roleMemberLimit(capRole);
+      if (dto.maxMembers < minMembers || dto.maxMembers > limit) {
         throw new UnprocessableEntityException({
-          message: `Maximum Members (${dto.maxMembers}) exceeds your role limit of ${limit}.`,
+          message: `Maximum Members must be ${minMembers} to ${limit}.`,
           code: 'MEMBER_LIMIT_EXCEEDED',
-          errors: { maxMembers: `Must be ${limit} or fewer for your role` },
+          errors: { maxMembers: `Value must be ${minMembers} to ${limit}` },
         });
       }
     }
@@ -296,6 +304,19 @@ export class GroupsService {
       currentGroups,
       canCreateGroup: currentGroups < maxGroups,
       roleMemberLimit: this.roleMemberLimit(role),
+      // GRP-004 / CFG-002/003/004: full per-role member-cap map + floor +
+      // fallback, so the client can bound the Maximum-Members input by the
+      // SELECTED role (Hostel Admin 2..50, Org Manager 2..100…) without
+      // hardcoding — everything follows config.
+      roleMemberLimits: this.groupsCfg<Record<string, number>>(
+        'roleMemberLimits',
+        {},
+      ),
+      defaultRoleMemberLimit: this.groupsCfg<number>(
+        'defaultRoleMemberLimit',
+        50,
+      ),
+      minMembers: this.groupsCfg<number>('minMembers', 2),
     };
   }
 

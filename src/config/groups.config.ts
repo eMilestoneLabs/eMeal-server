@@ -58,6 +58,10 @@ export default registerAs('groups', () => {
     // Fallback role member limit for any role not explicitly configured above.
     defaultRoleMemberLimit: intOr(process.env.GROUPS_ROLE_LIMIT_DEFAULT, 50),
 
+    // GRP-004: minimum Maximum-Members an admin must set when capping a group.
+    // Used as the floor of the create-time range check (default 2 → "2 to N").
+    minMembers: intOr(process.env.GROUPS_MIN_MEMBERS, 2),
+
     // GRP-012: HMAC secret for the signed QR payload (org+group+expiry+sig).
     // Dedicated secret preferred; falls back to an existing app secret so
     // signing always works. Never logged, never returned in responses.
