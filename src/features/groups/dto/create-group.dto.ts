@@ -9,6 +9,7 @@ import {
   Max,
   MaxLength,
   Min,
+  MinLength,
   ValidateNested,
 } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
@@ -218,9 +219,12 @@ export class CreateGroupDto {
   @Transform(({ value }) =>
     typeof value === 'string' ? value.trim() : value,
   )
+  // SRS GRP-003: Group Name is 2–50 characters (trimmed). MinLength runs after
+  // the trim transform so whitespace can't pad a too-short name.
   @IsString()
   @IsNotEmpty()
-  @MaxLength(100)
+  @MinLength(2)
+  @MaxLength(50)
   name: string;
 
   // BUG-002 contract: Flutter's GroupType.factory_ serializes as "factory_"

@@ -7,6 +7,7 @@ import {
   IsString,
   MaxLength,
   Min,
+  MinLength,
   ValidateNested,
 } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
@@ -26,7 +27,8 @@ export class UpdateGroupDto {
   )
   @IsString()
   @IsNotEmpty({ message: 'Group name cannot be empty' })
-  @MaxLength(100)
+  @MinLength(2)
+  @MaxLength(50) // SRS GRP-003: Group Name 2–50 characters.
   name?: string;
 
   // BUG-002 contract: normalize Flutter's "factory_" → "factory" before @IsIn
