@@ -989,9 +989,14 @@ export class GroupsService {
    */
   async getMyJoinRequests(userId: string) {
     const pending = await this.membersRepo.findPendingGroupsForUser(userId);
+    // Hydrate all pending groups in ONE parallel wave (not sequentially) —
+    // identical queries and ordering, but the response costs 1 DB round-trip
+    // wave regardless of how many requests are pending.
+    const groups = await Promise.all(
+      pending.map((p) => this.groupsRepo.findById(p.groupId, p.organizationId)),
+    );
     const data: Array<Record<string, unknown>> = [];
-    for (const p of pending) {
-      const group = await this.groupsRepo.findById(p.groupId, p.organizationId);
+    for (const group of groups) {
       if (group) {
         data.push({ ...GroupSerializer.toResponse(group), joinStatus: 'pending' });
       }
