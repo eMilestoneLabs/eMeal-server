@@ -29,7 +29,10 @@ export class UpdateGroupDto {
   @MaxLength(100)
   name?: string;
 
+  // BUG-002 contract: normalize Flutter's "factory_" → "factory" before @IsIn
+  // (mirrors CreateGroupDto + GroupSerializer.normalizeTypeForDb).
   @IsOptional()
+  @Transform(({ value }) => (value === 'factory_' ? 'factory' : value))
   @IsIn(VALID_GROUP_TYPES)
   type?: string;
 

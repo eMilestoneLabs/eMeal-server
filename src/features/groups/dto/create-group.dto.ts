@@ -223,6 +223,12 @@ export class CreateGroupDto {
   @MaxLength(100)
   name: string;
 
+  // BUG-002 contract: Flutter's GroupType.factory_ serializes as "factory_"
+  // (Dart reserves `factory`), but the DB + VALID_GROUP_TYPES use "factory".
+  // Normalize BEFORE @IsIn so the Factory type validates — mirrors
+  // GroupSerializer.normalizeTypeForDb (which the service also applies). Without
+  // this, creating a Factory group failed with a 422 "Validation failed".
+  @Transform(({ value }) => (value === 'factory_' ? 'factory' : value))
   @IsIn(VALID_GROUP_TYPES, {
     message: `type must be one of: ${VALID_GROUP_TYPES.join(', ')}`,
   })

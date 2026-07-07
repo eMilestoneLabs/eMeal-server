@@ -227,6 +227,13 @@ if [ "$CAN_CREATE" = "true" ] && [ -n "$STUDENT_TOKEN" ]; then
   req GET "/groups/$G_APR/join-requests" "" "$ADMIN_TOKEN"; perf "join-requests"
   PCOUNT="$(echo "$R_BODY" | jq -r '((.data // .)|length)')"
   [ "${PCOUNT:-0}" -ge 1 ] && ok "MEM-006 admin lists pending request" "n=$PCOUNT" || no "MEM-006 list pending" "n=$PCOUNT"
+  # Batch-3 live fix (Issue 3): the member ROSTER must EXCLUDE pending members —
+  # they belong only in the Join Requests view. Before approval, GET members
+  # must NOT return the pending student.
+  req GET "/groups/$G_APR/members" "" "$ADMIN_TOKEN"
+  RPEND="$(echo "$R_BODY" | jq -r '[((.data // .))[] | select(.status=="pending")] | length')"
+  [ "${RPEND:-0}" = "0" ] && ok "Issue3 roster excludes PENDING members" "pending_in_roster=$RPEND" \
+    || no "Issue3 roster LEAKS pending members" "pending_in_roster=$RPEND (expected 0)"
   # The approve/reject endpoints key on the USER id. The member serializer
   # exposes that as `userId` (and nested `user.id`); the top-level `id` is the
   # GroupMember row id — using it here 404s. Prefer userId → user.id → id.
@@ -261,6 +268,39 @@ if [ "$CAN_CREATE" = "true" ]; then
   req GET "/groups/$G_LC" "" "$ADMIN_TOKEN"
   assert_code "GRP-019 gone after permanent delete" 404 "$R_CODE"
 else skip "lifecycle (archive/restore/delete)" "group limit reached (archive a group to free a slot)"; fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+sec "4b. BATCH-3 LIVE FIXES (Factory type + duplicate-name guard)"
+if [ "$CAN_CREATE" = "true" ]; then
+  # Batch-3 fix (Issue 3, prev): selecting the Factory type sends "factory_"
+  # (Dart reserves `factory`); the DTO now normalizes it → create must succeed.
+  FNAME="ZZ_M02_VERIFY_factory_$$"
+  req POST /groups "$(jq -nc --arg n "$FNAME" '{name:$n,type:"factory_",maxMembers:5}')" "$ADMIN_TOKEN"
+  G_FAC="$(j '.id // .data.id')"; [ -n "$G_FAC" ] && [ "$G_FAC" != "null" ] && CLEANUP_GROUPS+=("$G_FAC")
+  { [ "$R_CODE" = "201" ] || [ "$R_CODE" = "200" ]; } \
+    && ok "Factory type create (factory_ → factory)" "($R_CODE)" \
+    || no "Factory type create rejected" "$R_CODE (was the 'Validation failed' bug)"
+  # Serializer must map DB "factory" back to Flutter "factory_".
+  req GET "/groups/$G_FAC" "" "$ADMIN_TOKEN"
+  FT="$(echo "$R_BODY" | jq -r '.type // .data.type')"
+  [ "$FT" = "factory_" ] && ok "Factory type round-trips as factory_" "type=$FT" \
+    || no "Factory type round-trip" "type=$FT (expected factory_)"
+  # Batch-3 fix (new): a 2nd ACTIVE group with the SAME name + type → 409.
+  req POST /groups "$(jq -nc --arg n "$FNAME" '{name:$n,type:"factory_",maxMembers:5}')" "$ADMIN_TOKEN"
+  DUPCODE="$(echo "$R_BODY" | jq -r '.code // .data.code // empty')"
+  { [ "$R_CODE" = "409" ] && [ "$DUPCODE" = "GROUP_NAME_DUPLICATE" ]; } \
+    && ok "Duplicate name+type rejected (409 GROUP_NAME_DUPLICATE)" "($R_CODE)" \
+    || no "Duplicate name+type NOT rejected" "code=$R_CODE dupcode=$DUPCODE (expected 409)"
+  # Free the slot BEFORE the next create so a near-full org can still run this.
+  [ -n "$G_FAC" ] && [ "$G_FAC" != "null" ] && req DELETE "/groups/$G_FAC/permanent" "" "$ADMIN_TOKEN" >/dev/null 2>&1
+  # A different type with the same name is allowed (guard is name+type scoped).
+  req POST /groups "$(jq -nc --arg n "$FNAME" '{name:$n,type:"hostel",maxMembers:5}')" "$ADMIN_TOKEN"
+  G_DIFF="$(j '.id // .data.id')"; [ -n "$G_DIFF" ] && [ "$G_DIFF" != "null" ] && CLEANUP_GROUPS+=("$G_DIFF")
+  { [ "$R_CODE" = "201" ] || [ "$R_CODE" = "200" ]; } \
+    && ok "Same name, DIFFERENT type still allowed" "($R_CODE)" \
+    || no "Same name diff type wrongly blocked" "$R_CODE"
+  [ -n "$G_DIFF" ] && [ "$G_DIFF" != "null" ] && req DELETE "/groups/$G_DIFF/permanent" "" "$ADMIN_TOKEN" >/dev/null 2>&1
+else skip "batch-3 live fixes (factory + duplicate name)" "group limit reached (archive a group to free a slot)"; fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 sec "5. NOTIFICATION BELL — dismiss + retention (NTF-005/006/007)"

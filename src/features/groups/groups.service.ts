@@ -66,8 +66,16 @@ export class GroupsService {
     private readonly realtime: RealtimeEventsService | null = null,
     // Module 02: bell + push for group/member lifecycle. @Optional so unit
     // tests can construct the service without wiring these providers.
-    @Optional() private readonly notices: NoticesService | null = null,
-    @Optional() private readonly notifications: NotificationsService | null = null,
+    //
+    // CRITICAL: the explicit @Inject(...) tokens are REQUIRED. The `| null`
+    // union type makes TypeScript emit `Object` for design:paramtypes, so
+    // type-based DI cannot resolve these — without the token @Optional silently
+    // injects null and NO bell notice is ever created (join-request / approval
+    // notifications went missing live). The token restores resolution.
+    @Optional() @Inject(NoticesService)
+    private readonly notices: NoticesService | null = null,
+    @Optional() @Inject(NotificationsService)
+    private readonly notifications: NotificationsService | null = null,
   ) {}
 
   /** Typed access to the `groups.*` configuration namespace (CFG-001). */
@@ -208,6 +216,25 @@ export class GroupsService {
       }
     }
 
+    // Duplicate-name guard (live fix): reject a second ACTIVE group with the
+    // same name + type in this org — two identical "Test / Community" groups
+    // are confusing and were being created. Uses the normalized DB type so it
+    // matches stored rows (factory_ → factory). Case-insensitive; DTO-trimmed.
+    const normalizedType = GroupSerializer.normalizeTypeForDb(dto.type);
+    if (
+      await this.groupsRepo.existsActiveByNameType(
+        organizationId,
+        dto.name,
+        normalizedType,
+      )
+    ) {
+      throw new ConflictException({
+        message: `A ${normalizedType} group named "${dto.name}" already exists.`,
+        code: 'GROUP_NAME_DUPLICATE',
+        errors: { name: 'A group with this name and type already exists' },
+      });
+    }
+
     // Generate collision-resistant join code (length is config-driven, CFG-015).
     const joinToken = await this.generateUniqueJoinCode();
 
@@ -224,7 +251,7 @@ export class GroupsService {
     const group = await this.groupsRepo.create({
       organizationId,
       name: dto.name,
-      type: GroupSerializer.normalizeTypeForDb(dto.type),  // BUG-002: factory_ → factory for DB
+      type: normalizedType, // BUG-002: factory_ → factory for DB (computed above)
       description: dto.description,
       adminId,
       joinToken,

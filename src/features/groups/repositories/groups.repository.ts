@@ -114,6 +114,29 @@ export class GroupsRepository {
     });
   }
 
+  /**
+   * Duplicate-name guard (live fix): is there already an ACTIVE group with this
+   * name (case-insensitive) AND type in the org? Prevents confusing same-name /
+   * same-type duplicates. Archived groups don't reserve the name — it frees up
+   * once a group is archived.
+   */
+  async existsActiveByNameType(
+    organizationId: string,
+    name: string,
+    type: string,
+  ): Promise<boolean> {
+    const found = await this.prisma.group.findFirst({
+      where: {
+        organizationId,
+        isActive: true,
+        type: type as any,
+        name: { equals: name, mode: 'insensitive' },
+      },
+      select: { id: true },
+    });
+    return found != null;
+  }
+
   async findAll(
     organizationId: string,
     opts: {

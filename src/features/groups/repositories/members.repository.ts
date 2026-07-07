@@ -29,7 +29,13 @@ export class MembersRepository {
     const where = {
       groupId,
       group: { organizationId }, // org isolation through relation
-      ...(opts.status ? { status: opts.status as any } : {}),
+      // Issue 3 (live): the member ROSTER must never include PENDING (awaiting
+      // approval — they live in the Join Requests view) or REMOVED members.
+      // An explicit status query still does an exact match (e.g. admin listing
+      // pending); only the default (no status) roster excludes them.
+      ...(opts.status
+        ? { status: opts.status as any }
+        : { status: { notIn: ['pending', 'removed'] } as any }),
     };
     const skip = (opts.page - 1) * opts.limit;
 
