@@ -161,7 +161,7 @@ if [ "$CAN_CREATE" = "true" ]; then
     maxMembers:10,joinApprovalRequired:false,qrExpiryDays:0,mealConfig:{mealsEnabled:true}}')
   req POST /groups "$BODY" "$ADMIN_TOKEN"
   { [ "$R_CODE" = "201" ] || [ "$R_CODE" = "200" ]; } && ok "Create group w/ metadata" "($R_CODE)" || no "Create group" "$R_CODE"
-  G_META="$(j '.id // .data.id')"; CLEANUP_GROUPS+=("$G_META")
+  G_META="$(j '.id // .data.id')"; CLEANUP_GROUPS+=("$G_META"); G_META_NEW=1
   req GET "/groups/$G_META" "" "$ADMIN_TOKEN"
   [ "$(j '.country // .data.country')" = "India" ] && ok "GRP-003 country persisted+returned" || no "GRP-003 country"
   [ "$(j '.currency // .data.currency')" = "INR" ] && ok "GRP-003 currency persisted+returned" || no "GRP-003 currency"
@@ -188,6 +188,10 @@ if [ -n "$G_META" ]; then
   HAS_APPROVED_KEY=$(echo "$R_BODY" | jq 'has("approvalRequired")')
   [ "$HAS_APPROVED_KEY" = "true" ] && ok "preview carries approvalRequired+capacity" || no "preview shape"
 else skip "metadata/QR/preview checks" "no group available (cannot create and no existing group)"; fi
+# Free the §2 throwaway NOW (only if WE created it — never delete an existing
+# real group) so create-heavy sections below have room on a near-full org.
+[ "${G_META_NEW:-0}" = "1" ] && [ -n "$G_META" ] && [ "$G_META" != "null" ] \
+  && req DELETE "/groups/$G_META/permanent" "" "$ADMIN_TOKEN" >/dev/null 2>&1
 
 # ═════════════════════════════════════════════════════════════════════════════
 sec "3. JOIN-APPROVAL WORKFLOW (MEM-002..010, NTF-001/002)"
@@ -227,6 +231,12 @@ if [ "$CAN_CREATE" = "true" ] && [ -n "$STUDENT_TOKEN" ]; then
   req GET "/groups/$G_APR/join-requests" "" "$ADMIN_TOKEN"; perf "join-requests"
   PCOUNT="$(echo "$R_BODY" | jq -r '((.data // .)|length)')"
   [ "${PCOUNT:-0}" -ge 1 ] && ok "MEM-006 admin lists pending request" "n=$PCOUNT" || no "MEM-006 list pending" "n=$PCOUNT"
+  # The approve/reject endpoints key on the USER id. The member serializer
+  # exposes that as `userId` (and nested `user.id`); the top-level `id` is the
+  # GroupMember row id — using it here 404s. Prefer userId → user.id → id.
+  # CAPTURE SUID FROM THE JOIN-REQUESTS BODY NOW — before any other GET below
+  # overwrites the shared $R_BODY (the roster GET would otherwise clobber it).
+  SUID="$(echo "$R_BODY" | jq -r '((.data // .)[0].userId // (.data // .)[0].user.id // (.data // .)[0].id // empty)')"
   # Batch-3 live fix (Issue 3): the member ROSTER must EXCLUDE pending members —
   # they belong only in the Join Requests view. Before approval, GET members
   # must NOT return the pending student.
@@ -234,10 +244,6 @@ if [ "$CAN_CREATE" = "true" ] && [ -n "$STUDENT_TOKEN" ]; then
   RPEND="$(echo "$R_BODY" | jq -r '[((.data // .))[] | select(.status=="pending")] | length')"
   [ "${RPEND:-0}" = "0" ] && ok "Issue3 roster excludes PENDING members" "pending_in_roster=$RPEND" \
     || no "Issue3 roster LEAKS pending members" "pending_in_roster=$RPEND (expected 0)"
-  # The approve/reject endpoints key on the USER id. The member serializer
-  # exposes that as `userId` (and nested `user.id`); the top-level `id` is the
-  # GroupMember row id — using it here 404s. Prefer userId → user.id → id.
-  SUID="$(echo "$R_BODY" | jq -r '((.data // .)[0].userId // (.data // .)[0].user.id // (.data // .)[0].id // empty)')"
   # Approve → active
   req PATCH "/groups/$G_APR/join-requests/$SUID/approve" "" "$ADMIN_TOKEN"
   { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; } && ok "MEM-006 approve → active" "($R_CODE)" || no "MEM-006 approve" "$R_CODE"
@@ -248,6 +254,9 @@ if [ "$CAN_CREATE" = "true" ] && [ -n "$STUDENT_TOKEN" ]; then
   req POST /groups/join "$(jq -nc --arg c "$ACODE" '{joinCode:$c}')" "$STUDENT_TOKEN"
   req DELETE "/groups/$G_APR/join-request" "" "$STUDENT_TOKEN"
   { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; } && ok "MEM-005 cancel own pending request" "($R_CODE)" || no "MEM-005 cancel" "$R_CODE"
+  # Free the §3 throwaway NOW (always verifier-created) so §4/§4b have room.
+  [ -n "$G_APR" ] && [ "$G_APR" != "null" ] \
+    && req DELETE "/groups/$G_APR/permanent" "" "$ADMIN_TOKEN" >/dev/null 2>&1
 else skip "join-approval workflow" "needs create capacity + STUDENT_EMAIL (archive a group to free a slot on a full org)"; fi
 
 # ═════════════════════════════════════════════════════════════════════════════
