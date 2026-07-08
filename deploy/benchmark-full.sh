@@ -37,16 +37,32 @@ command -v jq >/dev/null 2>&1 || { echo "jq is required (apt install jq)"; exit 
 [ -n "${ADMIN_EMAIL:-}" ] && [ -n "${ADMIN_PASS:-}" ] || { echo "Set ADMIN_EMAIL / ADMIN_PASS"; exit 1; }
 [ -n "${STUDENT_EMAIL:-}" ] && [ -n "${STUDENT_PASS:-}" ] || { echo "Set STUDENT_EMAIL / STUDENT_PASS"; exit 1; }
 
-login() { # $1=email $2=pass → prints accessToken or empty
-  curl -s -X POST "$BASE/auth/login" -H 'Content-Type: application/json' \
-    -d "{\"identifier\":\"$1\",\"password\":\"$2\"}" | jq -r '.accessToken // empty'
+# Trim stray whitespace/newlines from pasted credentials (a line-break inside
+# a quoted env value silently corrupts the JSON login payload).
+trim() { printf '%s' "$1" | tr -d '\r\n' | sed 's/^ *//; s/ *$//'; }
+ADMIN_EMAIL="$(trim "$ADMIN_EMAIL")";   ADMIN_PASS="$(trim "$ADMIN_PASS")"
+STUDENT_EMAIL="$(trim "$STUDENT_EMAIL")"; STUDENT_PASS="$(trim "$STUDENT_PASS")"
+
+login() { # $1=email $2=pass → prints accessToken or empty; diagnostics to stderr
+  local body code resp
+  resp=$(curl -s -w '\n%{http_code}' -X POST "$BASE/auth/login" \
+    -H 'Content-Type: application/json' \
+    -d "{\"identifier\":\"$1\",\"password\":\"$2\"}")
+  code="${resp##*$'\n'}"; body="${resp%$'\n'*}"
+  if [ "$code" = "200" ] || [ "$code" = "201" ]; then
+    echo "$body" | jq -r '.accessToken // empty'
+  else
+    # Show WHY it failed (wrong password vs 429 throttle vs 422 shape) —
+    # never guess. /auth/login is throttled 10/min/IP: on 429 wait 60s.
+    echo "   login $1 → HTTP $code: $(echo "$body" | jq -r '.message // .' 2>/dev/null | head -c 200)" >&2
+  fi
 }
 
 echo "── Logging in (2 requests) ──"
 ADMIN_TOKEN="$(login "$ADMIN_EMAIL" "$ADMIN_PASS")"
 STUDENT_TOKEN="$(login "$STUDENT_EMAIL" "$STUDENT_PASS")"
-[ -n "$ADMIN_TOKEN" ]   || { echo "Admin login FAILED — check credentials"; exit 1; }
-[ -n "$STUDENT_TOKEN" ] || { echo "Student login FAILED — check credentials"; exit 1; }
+[ -n "$ADMIN_TOKEN" ]   || { echo "Admin login FAILED — see the HTTP line above (429 = throttled, wait 60s; 401 = wrong email/password)"; exit 1; }
+[ -n "$STUDENT_TOKEN" ] || { echo "Student login FAILED — see the HTTP line above (429 = throttled, wait 60s; 401 = wrong email/password)"; exit 1; }
 echo "   admin ✓   student ✓"
 
 # ── Discover a real groupId per role (the fix for the empty-path gotcha) ────
@@ -58,7 +74,11 @@ AGID="${GROUP_ID:-$(discover_group "$ADMIN_TOKEN")}"
 SGID="${GROUP_ID:-$(discover_group "$STUDENT_TOKEN")}"
 [ -n "$AGID" ] || { echo "No admin-visible group found — set GROUP_ID"; exit 1; }
 [ -n "$SGID" ] || SGID="$AGID"
-echo "   admin groupId=$AGID   student groupId=$SGID"
+
+# A real mealId for /attendance/meal-summary (its DTO requires mealId+date).
+AMID=$(curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "$BASE/meals?groupId=$AGID&page=1&limit=5" | jq -r '.data[0].id // empty')
+echo "   admin groupId=$AGID   student groupId=$SGID   mealId=${AMID:-none}"
 echo
 
 # ── Bench engine ─────────────────────────────────────────────────────────────
@@ -118,8 +138,14 @@ bench "/groups/$AGID/meal-config"                                   "$T" 60
 bench "/groups/limits"                                              "$T" 40
 bench "/meals?groupId=$AGID"                                        "$T" 120
 bench "/meals/today?groupId=$AGID"                                  "$T" 250
-bench "/attendance?groupId=$AGID&date=$TO"                          "$T" 60
-bench "/attendance/meal-summary?groupId=$AGID&date=$TO"             "$T" 80
+# QueryAttendanceDto takes fromDate/toDate (a bare `date` param is 422-rejected
+# by the whitelist — correct behaviour; the script must speak the real contract).
+bench "/attendance?groupId=$AGID&fromDate=$TO&toDate=$TO"           "$T" 60
+if [ -n "$AMID" ]; then
+  bench "/attendance/meal-summary?mealId=$AMID&date=$TO"            "$T" 80
+else
+  echo "  (skipped /attendance/meal-summary — group has no configured meals)"
+fi
 bench "/attendance/vacation-members?groupId=$AGID&date=$TO"         "$T" 80
 bench "/attendance/billing-summary?groupId=$AGID"                   "$T" 120
 bench "/attendance/billing-series?groupId=$AGID&fromDate=$FROM&toDate=$TO" "$T" 120
@@ -127,7 +153,7 @@ bench "/reports/analytics?fromDate=$FROM&toDate=$TO"                "$T" 120
 bench "/notices?page=1&limit=20"                                    "$T" 60
 bench "/notices/unread-count"                                       "$T" 40
 bench "/schedules?groupId=$AGID"                                    "$T" 80
-bench "/exports/attendance?fromDate=$FROM&toDate=$TO"               "$T" 300
+bench "/exports/attendance?groupId=$AGID&fromDate=$FROM&toDate=$TO" "$T" 300
 
 hdr "STUDENT — $STUDENT_EMAIL"
 T="$STUDENT_TOKEN"

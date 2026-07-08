@@ -208,3 +208,53 @@ features are checked with `deploy/audit-pass11-13.sh` + feature smoke calls.
   empty path; use `benchmark-full.sh` for real numbers.
 - Planner drafts and billing figures are never SWR-cached (draft-clobber /
   money-staleness) — parallelize their fetches instead.
+
+---
+
+## 9. Audit/validation script rules (MANDATORY for every new script)
+
+`deploy/run.sh` is the single audit entry point. Any new check — including
+the FUTURE SRS module scripts (Modules 03+ following the Module 01/02
+pattern) — must plug into it, not fork a new workflow.
+
+1. **ZERO PRODUCTION IMPACT.** Audit scripts OBSERVE the golden baseline;
+   they never modify application code, config, env, nginx, PM2, docker,
+   schema, or infra. The baseline is the gold — scripts only assay it.
+2. **Impact class is declared, not implied.** Read-only (RO) by default.
+   Anything that creates data must be SELF-CLEANING (create → verify →
+   delete/revert in the same run) and registered as WRITE so it only runs
+   behind `--writes`. Heavy traffic = HEAVY behind `--load`.
+3. **Standalone + registered.** Each script runs on its own
+   (`bash deploy/<name>.sh`) AND is added to `deploy/run.sh` with ONE `reg`
+   line (name, impact, description) + one case-arm in `run_module`.
+4. **Accounts come from `deploy/srs/accounts.sh`** (2 admins + 2 students,
+   env-overridable) — never hardcode credentials elsewhere; never create
+   permanent accounts.
+5. **Contract:** exit 0 = pass, 1 = advisory, ≥2 = fail. Print human-readable
+   PASS/FAIL per check. Trim pasted whitespace from env inputs. On login
+   failure print the HTTP status + body (never just "failed").
+6. **Never bench an error path silently** — non-expected status codes must be
+   flagged (`CHECK!`), or the timings become false evidence (this bug shipped
+   twice). Always parameterize endpoints with REAL ids discovered at runtime.
+7. **Gotchas that already bit us:** `/auth/login` = `{identifier,password}`
+   only, throttled 10/min; `/attendance` takes fromDate/toDate (not `date`);
+   `/attendance/meal-summary` needs `mealId+date`; `/exports/attendance`
+   needs `groupId`; psql runs via
+   `docker exec emeal_postgres bash -c 'psql -U "$POSTGRES_USER" …'`
+   (no `postgres` role); redis needs `-a $REDIS_PASSWORD` from the HOST .env;
+   k6 runs via `docker run --rm -i --network host -v "$PWD/deploy:/s"
+   grafana/k6 run /s/<file>.js`.
+8. **SRS module scripts** live in `deploy/srs/`, source `lib.sh` +
+   `accounts.sh`, assert against `manifest.tsv` requirement IDs, and stay
+   read-only unless `WRITE_TESTS=1`.
+9. **Reports** go under `deploy/audit-reports/<timestamp>/` (never /tmp-only,
+   never committed); the frozen infra scripts (deploy.sh, setup-vps.sh,
+   backup.sh, harden-server.sh) are NEVER edited to accommodate an audit.
+- DATABASE_URL carries `connection_limit=10&pool_timeout=20` — 4 PM2 workers
+  × 10 = 40 connections, deliberately under Postgres max_connections=100.
+  Never raise connection_limit without redoing that math (or add PgBouncer).
+- No global `statement_timeout` is set — DELIBERATE: Prisma interactive
+  transactions are already time-bounded (5 s default), all queries are
+  indexed (9–18 ms measured), and a URL-level timeout would break long
+  migrations/exports. If ever added, do it at the ROLE level for the app
+  user only, never on the migration path.

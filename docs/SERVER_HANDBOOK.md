@@ -416,6 +416,10 @@ echo "── PUBLIC PORTS (only 22/80/443) ──"; sudo ss -tlnp | grep -vE '12
 | **Storage orphan-sweep** | `bash deploy/minio-reconcile.sh` (dry-run) → `--apply` | lists/deletes bucket objects no DB row references AND older than `ORPHAN_MIN_AGE_DAYS` (7). Aborts if the DB ref list is empty (never wipes the bucket on a query error). Suggested monthly cron |
 | **Authenticated load test** | `… grafana/k6 run - < deploy/loadtest-auth.js` (see file header) | logs in, measures Dashboard/Analytics p95 vs SLOs. Run from a **separate** box for a trustworthy 5000-VU number |
 | **Pin DB pool** | edit `DATABASE_URL` in `.env.production` | append `&connection_limit=10&pool_timeout=20`, then `pm2 delete emeal-server && pm2 start ecosystem.config.js --env production` |
+| **Master audit (2026-07-08)** | `bash deploy/run.sh --all --yes` | ONE command: every read-only audit module + aggregated `MASTER_AUDIT.md` certificate (PART 16.2) |
+| **Full endpoint battery** | `ADMIN_EMAIL=.. ADMIN_PASS=.. STUDENT_EMAIL=.. STUDENT_PASS=.. bash deploy/benchmark-full.sh` | admin+student p95 per endpoint vs SLO budgets (supersedes benchmark-endpoints.sh) |
+| **Graded certificate** | same env + `bash deploy/generate-certificate.sh --apk-mb 31.2 --device-smoke pass` | A+/A/B/FAIL per parameter → `deploy/CERTIFICATION_<date>.md` |
+| **Thumbnail backfill** | `set -a; source .env; set +a; node deploy/backfill-thumbnails.js --apply` | one-time: `_thumb.jpg` for pre-pipeline images (dry-run without `--apply`; idempotent) |
 
 Apply the `connection_limit` to the live server:
 ```bash
@@ -653,6 +657,10 @@ limit to **5mb** (`app.use(json({ limit: '5mb' }))`), matching Nginx's existing 
 Oversized bodies are still capped at the proxy.
 
 ## 14.3 Per-endpoint benchmark
+> **⚠ SUPERSEDED (2026-07-08):** use `deploy/benchmark-full.sh` (PART 16.2) —
+> this older script hits `/meals*` WITHOUT groupId, so those rows measure the
+> empty early-return path, not real data. Kept for history only.
+
 `deploy/benchmark-endpoints.sh` measures backend compute (localhost = no client network) for every hot
 endpoint. Run on the VPS:
 ```bash
@@ -719,6 +727,9 @@ echo "token length: ${#TOKEN}"
 for i in 1 2 3 4 5; do curl -s -o /dev/null -w "overview %{time_total}s http=%{http_code}\n" \
   -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:3000/api/v1/dashboard/admin/overview?date=$(date +%F)"; done
 BENCH_TOKEN="$TOKEN" bash deploy/benchmark-endpoints.sh
+# ⚠ 2026-07-08: prefer the superseding full battery (admin+student, real params):
+#   ADMIN_EMAIL=.. ADMIN_PASS=.. STUDENT_EMAIL=.. STUDENT_PASS=.. bash deploy/benchmark-full.sh
+#   — or simply: bash deploy/run.sh --all --yes   (PART 16.2 — runs everything)
 # ── C. Load + concurrency (k6 installed) ──────────────────────────────────────
 k6 run deploy/loadtest.js          # NOTE: served-request p95 is the real number;
                                    # the error % is the per-IP throttle by design
@@ -791,3 +802,65 @@ script "pass" would require weakening production rate-limiting — do NOT do tha
 Housekeeping noted during the run: `systemctl reload nginx` warned "unit file changed … run
 daemon-reload" — cosmetic (a package update touched the unit file); clear it once with
 `sudo systemctl daemon-reload`.
+
+# PART 16 — MASTER AUDIT & CERTIFICATION (2026-07-08 wave)
+
+## 16.1 What changed since PART 15 (all additive, baseline preserved)
+- **App resilience**: process-level safety net in `src/main.ts` — an unhandled
+  promise rejection now LOGS instead of killing a worker; uncaught exceptions
+  log structured then exit for a clean PM2 replace.
+- **Images**: every upload auto-generates a `_thumb.jpg`; legacy objects are
+  backfilled once via `node deploy/backfill-thumbnails.js --apply` (idempotent,
+  dry-run by default). The Flutter client loads thumb-first with a session
+  negative-cache for 404s.
+- **Flutter wave** (same release): every screen boots in ONE parallel network
+  wave, shared groups/meals caches unified + write-through on mutations,
+  socket paused in background (battery), decoded-image RAM capped 48 MiB,
+  Inter font bundled (no runtime font fetch), R8 + split-per-abi APKs
+  (arm64 ≈ 31 MB vs 83 MB universal).
+- **Benchmarking**: `deploy/benchmark-full.sh` SUPERSEDES `benchmark-endpoints.sh`
+  for baselines — the old script hit `/meals*` without groupId and measured the
+  empty path (use benchmark-full for §15.3's per-endpoint step from now on).
+
+## 16.2 THE ONE COMMAND — master audit orchestrator
+```
+bash deploy/run.sh --help                       # list modules
+bash deploy/run.sh --all --yes                  # every READ-ONLY audit, no prompts
+bash deploy/run.sh --benchmark                  # any single module
+bash deploy/run.sh --all --writes --load --yes  # full 1,000+ datapoint run (off-peak)
+```
+- Modules: benchmark · certificate · srs (664-req manifest) · security · db ·
+  system · recovery (all READ-ONLY) + e2e/production (self-cleaning WRITES,
+  gated) + load (k6 GET-only ramp 100→500→1000 VUs, gated).
+- **Zero-impact contract**: audits only OBSERVE the golden baseline — no code,
+  config, infra, or schema is ever touched. Default runs make zero writes.
+- Accounts: defaults from `deploy/srs/accounts.sh` (2 admins + 2 students,
+  env-overridable); the script offers custom credentials interactively.
+- Output: `deploy/audit-reports/<timestamp>/<module>.log` + aggregated
+  `MASTER_AUDIT.md` certificate (module verdicts, Capacity & Limits section,
+  overall verdict; exit 0 pass / 2 fail). Reports are gitignored — they can
+  never trip deploy.sh's clean-tree gate.
+- Graded certificate alone: `ADMIN_EMAIL=.. ADMIN_PASS=.. STUDENT_EMAIL=..
+  STUDENT_PASS=.. bash deploy/generate-certificate.sh --apk-mb 31.2
+  --device-smoke pass` → `deploy/CERTIFICATION_<date>.md` (A+/A/B/FAIL rows).
+
+## 16.3 Interpreting a run
+- Any table row not ✅/A+ → open its `<module>.log`, find the failing line,
+  hand the log to the AI assistant — the parameters and golden bands are
+  encoded in the scripts, so the output alone is sufficient context.
+- Login gotchas: `/auth/login` takes `{identifier,password}` only, 10/min/IP
+  throttle (HTTP 429 = wait 60s); creds are auto-trimmed of pasted newlines.
+- k6 note from §15.5 still applies: single-IP floods trip the per-IP throttle
+  BY DESIGN — read the `expected_response:true` p95 line.
+
+## 16.4 Golden reference (2026-07-07 run, release 680ef21)
+32-row battery: 29/29 valid rows PASS, 0 SLO breaches — /dashboard/admin
+9 ms avg / 13 ms p95 · overview 96 ms avg · /dashboard/student 7 ms ·
+my-billing 16 ms · unauth reject 5 ms · PG cache-hit 100.00 % · workers
+153-155 MB · pm2 unstable 0. (3 CHECK rows in that run were script-parameter
+bugs, fixed in benchmark-full.sh the same day.)
+
+## 16.5 Writing new audit scripts
+Follow `docs/OPUS_DEVELOPMENT_GUIDEBOOK.md` §9 (mandatory): zero prod impact,
+declared impact class, standalone + one `reg` line in run.sh, accounts from
+srs/accounts.sh, exit contract 0/1/2, never bench an error path silently.

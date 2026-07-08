@@ -104,7 +104,8 @@ else grade_row "System RAM" "B" "${RAM_USED}/${RAM_TOT}MB (${RAM_PCT}%) — head
 
 # ── 4. DATABASE ──────────────────────────────────────────────────────────────
 echo "── [4/7] Database ──"
-PG=$(docker exec emeal_postgres bash -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SELECT round(100*sum(blks_hit)::numeric/nullif(sum(blks_hit)+sum(blks_read),0),2)||\" \"||pg_size_pretty(pg_database_size(current_database())) FROM pg_stat_database WHERE datname=current_database();"' 2>/dev/null || echo "")
+# chr(32) = space — avoids any nested shell/SQL quoting of a literal ' '.
+PG=$(docker exec emeal_postgres bash -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SELECT concat(round(100*sum(blks_hit)::numeric/nullif(sum(blks_hit)+sum(blks_read),0),2), chr(32), pg_size_pretty(pg_database_size(current_database()))) FROM pg_stat_database WHERE datname=current_database();"' 2>/dev/null || echo "")
 PG_HIT=$(echo "$PG" | awk '{print $1}'); PG_SIZE=$(echo "$PG" | awk '{print $2$3}')
 if [ -n "$PG_HIT" ] && awk "BEGIN{exit !($PG_HIT>=99)}"; then
   grade_row "PostgreSQL cache-hit" "A+" "${PG_HIT}% (db ${PG_SIZE:-?})"
@@ -113,7 +114,10 @@ else grade_row "PostgreSQL cache-hit" "B" "could not measure"; fi
 
 # ── 5. CACHE (Redis) ─────────────────────────────────────────────────────────
 echo "── [5/7] Redis ──"
-RINFO=$(docker exec emeal_redis sh -c 'redis-cli -a "$REDIS_PASSWORD" --no-auth-warning INFO stats 2>/dev/null' 2>/dev/null || echo "")
+# Redis password lives in the app's .env on the HOST (the container itself
+# may not carry the env var) — read it from there.
+RP=$(grep -m1 '^REDIS_PASSWORD=' .env 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'" || echo "")
+RINFO=$(docker exec emeal_redis redis-cli -a "$RP" --no-auth-warning INFO stats 2>/dev/null || echo "")
 EVICTED=$(echo "$RINFO" | grep -oP 'evicted_keys:\K[0-9]+' || echo "")
 HITS=$(echo "$RINFO" | grep -oP 'keyspace_hits:\K[0-9]+' || echo 0)
 MISSES=$(echo "$RINFO" | grep -oP 'keyspace_misses:\K[0-9]+' || echo 0)
@@ -125,7 +129,8 @@ else grade_row "Redis cache" "B" "could not measure"; fi
 
 # ── 6. SECURITY ──────────────────────────────────────────────────────────────
 echo "── [6/7] Security ──"
-UFW_OK=$(sudo -n ufw status 2>/dev/null | grep -c 'Status: active' || true)
+# systemd unit states need no sudo (ufw.service loads the firewall rules).
+UFW_OK=$(systemctl is-active ufw 2>/dev/null | grep -c '^active' || true)
 F2B_OK=$(systemctl is-active fail2ban 2>/dev/null | grep -c '^active' || true)
 if [ "${UFW_OK:-0}" -ge 1 ] && [ "${F2B_OK:-0}" -ge 1 ]; then
   grade_row "Perimeter (UFW+Fail2Ban)" "A+" "firewall active, fail2ban active"

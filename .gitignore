@@ -12,6 +12,11 @@ prisma/migrations/*.sql
 logs/
 *.log
 coverage/
+
+# Master-audit run outputs (deploy/run.sh) — reports stay on the box, never
+# committed, and never trip deploy.sh's clean-tree gate
+deploy/audit-reports/
+deploy/CERTIFICATION_*.md
 .DS_Store
 .vscode/
 
@@ -35,6 +40,13 @@ B5_VERIFY.sh
 B6_VERIFY.sh
 B7_VERIFY.sh
 CLAUDE.md
+docs/SOURCE_OF_REQUIREMENTS_END_USER_FEATURES/Admin.md
+docs/SOURCE_OF_REQUIREMENTS_END_USER_FEATURES/Event_Guest.md
+docs/SOURCE_OF_REQUIREMENTS_END_USER_FEATURES/Home.md
+docs/SOURCE_OF_REQUIREMENTS_END_USER_FEATURES/Student.md
+docs/NOTIFICATION_OTP_PLAN.md
+docs/PERGROUP_ROLE_AND_ZEROMEAL_ROLLOUT_2026-06-15.md
+docs/SOURCE_OF_REQUIREMENTS_END_USER_FEATURES/DETAILED_WORKFLOWS/
 
 # CI-generated (export artifacts, coverage reports)
 artifacts/

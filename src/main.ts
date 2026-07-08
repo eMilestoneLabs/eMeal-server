@@ -8,6 +8,26 @@ import { AppModule } from './app/app.module';
 import { setupBullBoard } from './app/bull-board.setup';
 import { RedisIoAdapter } from './realtime/adapters/redis-io.adapter';
 
+// ── Long-term resilience safety net (process-level) ─────────────────────────
+// The codebase fires many fire-and-forget side effects (push, audit, bell
+// notices, cache bumps) as `void promise`. Each is written to catch its own
+// errors — but Node's DEFAULT for any unhandled rejection that slips through
+// (today's code or a future change) is to KILL the worker mid-request. A
+// failed side effect must never take down a process serving live traffic:
+// log it loudly and continue. Synchronous unknown-state crashes still exit
+// (PM2 replaces the worker cleanly) — but now with structured forensics.
+process.on('unhandledRejection', (reason) => {
+  const logger = new Logger('UnhandledRejection');
+  logger.error(
+    reason instanceof Error ? (reason.stack ?? reason.message) : String(reason),
+  );
+});
+process.on('uncaughtException', (err) => {
+  const logger = new Logger('UncaughtException');
+  logger.error(err.stack ?? err.message);
+  process.exit(1); // state unknown — let PM2 restart a clean worker
+});
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
     logger: ['log', 'warn', 'error'],
