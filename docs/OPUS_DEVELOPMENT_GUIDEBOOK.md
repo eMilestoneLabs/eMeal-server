@@ -250,6 +250,20 @@ pattern) — must plug into it, not fork a new workflow.
 9. **Reports** go under `deploy/audit-reports/<timestamp>/` (never /tmp-only,
    never committed); the frozen infra scripts (deploy.sh, setup-vps.sh,
    backup.sh, harden-server.sh) are NEVER edited to accommodate an audit.
+10. **Login-throttle ordering (learned 2026-07-08):** a module that FLOODS
+    login (security's SEC-F, srs's capacity ramp) leaves the per-IP window
+    (10/min) HOT — the NEXT authenticating module 429s on its own login →
+    empty token → false failures. Rules: order flooders LAST; run.sh sleeps
+    `COOLDOWN` (65s) before each login-heavy module; auth-probe scripts use a
+    throttle-tolerant `login_hard` (retry through the window) + `req_settle`;
+    and a security probe treats **429 as an ACCEPTABLE reject** for a
+    malicious login (the rate limiter rejecting it un-processed IS the pass).
+11. **Test allow-lists drift:** any vocabulary a test hard-codes (e.g. valid
+    notice `linkType` values) MUST be regenerated from the code
+    (`grep "linkType: '" src/features`) whenever the feature grows — a stale
+    allow-list is a FALSE failure, not a real one.
+12. **Exit honesty:** a probe script that prints a summary must also `exit 2`
+    when it recorded failures, or the orchestrator marks it ✅ despite fails.
 - DATABASE_URL carries `connection_limit=10&pool_timeout=20` — 4 PM2 workers
   × 10 = 40 connections, deliberately under Postgres max_connections=100.
   Never raise connection_limit without redoing that math (or add PgBouncer).

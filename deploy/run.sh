@@ -41,13 +41,19 @@ REPORT_DIR="$ROOT/deploy/audit-reports/$TS"
 MOD_NAMES=(); declare -A MOD_IMPACT MOD_DESC
 reg() { MOD_NAMES+=("$1"); MOD_IMPACT["$1"]="$2"; MOD_DESC["$1"]="$3"; }
 
+# ORDER MATTERS: modules that FLOOD login (security's SEC-F, srs's capacity ramp)
+# leave the per-IP login throttle (10/min) HOT. Any login-authenticating module
+# that runs immediately after gets 429 on its OWN login → empty token → false
+# failures. So: light login-free/low-login modules first, and a throttle
+# cooldown (COOLDOWN below) is inserted before each login-heavy module. srs runs
+# LAST because its capacity ramp is the heaviest flooder.
 reg benchmark   RO    "Endpoint speed battery — admin+student p95 vs SLO budgets (benchmark-full.sh)"
 reg certificate RO    "Graded production certificate — speed+stability+memory+db+redis+security+disk (generate-certificate.sh)"
-reg srs         RO    "SRS requirement validation — functional+security+performance vs the 664-req manifest (srs/run.sh; read-only unless --writes)"
-reg security    RO    "Security / pen-test probes — auth, isolation, injection, headers (srs/security.sh)"
 reg db          RO    "Database deep parameters — cache-hit, connections, index usage, bloat, autovacuum"
 reg system      RO    "System health — CPU, RAM, disk, PM2, docker, logs, TLS, uptime"
 reg recovery    RO    "Auto-recovery configuration audit (verify-auto-recovery.sh)"
+reg security    RO    "Security / pen-test probes — auth, isolation, injection, headers (srs/security.sh)"
+reg srs         RO    "SRS requirement validation — functional+security+performance vs the 664-req manifest (srs/run.sh; read-only unless --writes)"
 reg e2e         WRITE "Full feature end-to-end with SELF-CLEANING test writes (validate-e2e.sh)"
 reg production  WRITE "Full production validation incl. tenant-isolation writes (validate-production.sh)"
 reg load        HEAVY "EXTREME load / peak-hours simulation — k6 high-concurrency against localhost (loadtest.js)"
@@ -177,7 +183,7 @@ run_module() { # $1 = name
   echo; echo "═════ MODULE: $m  [${MOD_IMPACT[$m]}] ═════"
   case "$m" in
     benchmark)   bash deploy/benchmark-full.sh                 2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
-    certificate) bash deploy/generate-certificate.sh "${CERT_ARGS[@]:-}" 2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
+    certificate) bash deploy/generate-certificate.sh "${CERT_ARGS[@]+"${CERT_ARGS[@]}"}" 2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     srs)         ( WRITE_TESTS=$WRITES bash deploy/srs/run.sh )  2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     security)    ( cd deploy/srs && bash security.sh )          2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     db)          mod_db                                         2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
@@ -197,7 +203,23 @@ CERT_ARGS=()
 [ -n "${APK_MB:-}" ] && CERT_ARGS+=(--apk-mb "$APK_MB")
 [ -n "${DEVICE_SMOKE:-}" ] && CERT_ARGS+=(--device-smoke "$DEVICE_SMOKE")
 
-for m in "${SELECTED[@]}"; do [ -n "$m" ] && run_module "$m"; done
+# Login-throttle cooldown: modules that authenticate freshly (each logs in for
+# its own tokens) must start from a COLD per-IP login window (10/min), or a
+# preceding flooder leaves them 429'd → empty token → false failures. Sleep the
+# throttle window before each such module (skip before the very first module,
+# and skip entirely with COOLDOWN=0).
+COOLDOWN="${COOLDOWN:-65}"
+declare -A NEEDS_COLD=( [security]=1 [srs]=1 [e2e]=1 [production]=1 )
+FIRST=1
+for m in "${SELECTED[@]}"; do
+  [ -n "$m" ] || continue
+  if [ "$FIRST" -ne 1 ] && [ -n "${NEEDS_COLD[$m]:-}" ] && [ "$COOLDOWN" -gt 0 ]; then
+    echo "   ⏳ login-throttle cooldown ${COOLDOWN}s before '$m' (COOLDOWN=0 to disable)…"
+    sleep "$COOLDOWN"
+  fi
+  FIRST=0
+  run_module "$m"
+done
 
 # ── Master certificate ───────────────────────────────────────────────────────
 MASTER="$REPORT_DIR/MASTER_AUDIT.md"

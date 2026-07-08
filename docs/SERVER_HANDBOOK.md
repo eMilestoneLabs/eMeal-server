@@ -393,6 +393,8 @@ echo "── PUBLIC PORTS (only 22/80/443) ──"; sudo ss -tlnp | grep -vE '12
 | exporter `connection timed out` | bridge can't reach host loopback DB | exporters use `network_mode: host` (already set) |
 | `.env` parse error | malformed line / special chars | values with `$ # ( )` must be single-quoted in `.env`; validate `docker compose config` |
 | `reboot` "interactive auth required" | needs sudo | `sudo reboot` |
+| deploy fails `nest: not found` + npm ci installs ~526 pkgs (not ~1068) | shell has `NODE_ENV=production` exported (e.g. after `set -a; source .env`) → `npm ci` skips devDependencies incl. the Nest CLI; deploy auto-rolls back | `unset NODE_ENV` (or fresh SSH session) then `bash deploy/deploy.sh`. Never `source .env` in the same shell you deploy from |
+| deploy fails "Working tree not clean: ?? deploy/CERTIFICATION_*.md" | audit output predates the .gitignore that excludes it | `rm` the stray report (regenerated any time) and redeploy — releases ≥ fe5f4b4 gitignore all audit outputs |
 
 ---
 

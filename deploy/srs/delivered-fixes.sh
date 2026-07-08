@@ -165,7 +165,11 @@ _HASTGT="$(jbody '[.data[]?|has("targetUserId")]|all')"
 [ "$_HASTGT" = "true" ] \
   && ok "notices expose targetUserId (per-member routing)" "" "FR-NOTX-031" \
   || no "targetUserId field missing on notices" "" "FR-NOTX-031"
-_BADLINK="$(jbody '[.data[]? | .linkType | select(.!=null) | . as $lt | select(["vacationRequests","correctionRequests","guestRequests","myVacations","myCorrections"] | index($lt) | not)] | length')"
+# Canonical linkType vocabulary — MUST stay in sync with the values the backend
+# emits (grep: linkType: ' in src/features). As of MODULE_02 there are 8:
+# admin queues (vacationRequests/correctionRequests/guestRequests/groupJoinRequests),
+# member deep-links (myVacations/myCorrections/myGroups), and groupMembers.
+_BADLINK="$(jbody '[.data[]? | .linkType | select(.!=null) | . as $lt | select(["vacationRequests","correctionRequests","guestRequests","groupJoinRequests","groupMembers","myVacations","myCorrections","myGroups"] | index($lt) | not)] | length')"
 [ "${_BADLINK:-0}" = "0" ] \
   && ok "linkType values from known vocabulary" "0 unknown" "FR-NOTX-032" \
   || no "unknown linkType value present" "${_BADLINK} bad" "FR-NOTX-032"
