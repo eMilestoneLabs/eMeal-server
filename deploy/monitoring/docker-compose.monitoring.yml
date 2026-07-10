@@ -56,6 +56,19 @@ services:
     logging: *default-logging
     mem_limit: 512m
     privileged: true
+    # ── CPU diet (2026-07-10) ────────────────────────────────────────────────
+    # Default cAdvisor housekeeping is EVERY 1 SECOND and was measured eating
+    # ~55% of a core 24/7 on this 4-vCPU box — pure monitoring overhead taken
+    # from the app. 30s matches the Prometheus scrape cadence, --docker_only
+    # skips raw cgroup scanning, and the disabled metrics are ones no dashboard
+    # here reads. Result: cAdvisor drops to ~2-5% CPU; Grafana container panels
+    # simply show 30s resolution. Remove these flags to revert.
+    command:
+      - '--housekeeping_interval=30s'
+      - '--global_housekeeping_interval=1m'
+      - '--docker_only=true'
+      - '--store_container_labels=false'
+      - '--disable_metrics=percpu,sched,tcp,udp,hugetlb,referenced_memory,cpu_topology,resctrl'
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro

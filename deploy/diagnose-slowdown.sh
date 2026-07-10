@@ -25,11 +25,18 @@ uptime
 
 echo
 echo "── 2. CPU sample over 10s — watch 'st' (steal) and 'id' (idle) ──"
-# vmstat: 3 samples, 5s apart; first line is since-boot garbage — use the rest.
-VM_OUT=$(vmstat 5 3 | tail -2)
+# vmstat: 3 samples, 5s apart; first data line is since-boot garbage.
+# IMPORTANT: newer procps adds a 'gu' (guest) column after 'st', so columns
+# must be located from the HEADER row, never counted from the end.
+VM_ALL=$(vmstat 5 3)
+VM_HDR=$(echo "$VM_ALL" | sed -n '2p')
+VM_OUT=$(echo "$VM_ALL" | tail -2)
+echo "$VM_HDR"
 echo "$VM_OUT"
-AVG_ST=$(echo "$VM_OUT" | awk '{s+=$NF; n++} END {printf "%d", (n?s/n:0)}')
-AVG_ID=$(echo "$VM_OUT" | awk '{s+=$(NF-2); n++} END {printf "%d", (n?s/n:0)}')
+ID_COL=$(echo "$VM_HDR" | awk '{for(i=1;i<=NF;i++) if($i=="id") print i}')
+ST_COL=$(echo "$VM_HDR" | awk '{for(i=1;i<=NF;i++) if($i=="st") print i}')
+AVG_ID=$(echo "$VM_OUT" | awk -v c="${ID_COL:-15}" '{s+=$c; n++} END {printf "%d", (n?s/n:0)}')
+AVG_ST=$(echo "$VM_OUT" | awk -v c="${ST_COL:-17}" '{s+=$c; n++} END {printf "%d", (n?s/n:0)}')
 echo "   → avg steal=${AVG_ST}%  avg idle=${AVG_ID}%"
 
 echo
