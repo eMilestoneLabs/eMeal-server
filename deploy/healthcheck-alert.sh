@@ -27,6 +27,23 @@ SMTP_PASS="${ALERT_SMTP_PASS:-}"          # mailbox password
 SMTP_TO="${ALERT_SMTP_TO:-$SMTP_USER}"    # defaults to the sender
 STATE="${ALERT_STATE_DIR:-$HOME/backups}/.health_alert_state"
 
+# ── Auto-heal (guarded hang recovery) ─────────────────────────────────────────
+# Closes the "app HANG (alive but 502) is alerted, not restarted" gap. When the
+# API health check fails for AUTOHEAL_MIN_FAILS consecutive runs, we do ONE
+# `pm2 reload` (zero-downtime cluster reload), then cool down for
+# AUTOHEAL_COOLDOWN seconds and cap heals per day — so a genuine crash-loop or a
+# dependency outage (Postgres down) can NOT become a restart storm; past the cap
+# we go back to alert-only and leave it for a human. Fully additive & opt-out:
+# set AUTOHEAL_ENABLED=0 to disable, and it silently no-ops if pm2 isn't present.
+AUTOHEAL_ENABLED="${AUTOHEAL_ENABLED:-1}"
+AUTOHEAL_APP="${AUTOHEAL_APP:-emeal-server}"
+AUTOHEAL_MIN_FAILS="${AUTOHEAL_MIN_FAILS:-2}"     # consecutive bad runs before acting
+AUTOHEAL_COOLDOWN="${AUTOHEAL_COOLDOWN:-600}"     # seconds between heals (10 min)
+AUTOHEAL_MAX_PER_DAY="${AUTOHEAL_MAX_PER_DAY:-6}" # daily ceiling → then alert-only
+FAILS_FILE="${STATE}.fails"       # consecutive API-down counter
+HEAL_TS_FILE="${STATE}.lastheal"  # epoch of last heal (cooldown gate)
+HEAL_DAY_FILE="${STATE}.healday"  # "YYYY-MM-DD count" (daily-cap gate)
+
 # Telegram (instant push)
 send_tg() {  # $1 = text
   [ -n "$TG_TOKEN" ] && [ -n "$TG_CHAT" ] || { echo "note: telegram not configured"; return; }
@@ -50,13 +67,51 @@ send() {  # $1 = subject/short, $2 = full body (defaults to $1)
   send_mail "$1" "${2:-$1}"
 }
 
+# Guarded remediation: ONE pm2 reload for a persistent API hang, rate-limited by
+# a cooldown and a daily cap. Returns 0 if it acted, 1 otherwise. Never fatal.
+maybe_autoheal() {  # $1 = http code seen (for the message)
+  [ "$AUTOHEAL_ENABLED" = "1" ] || return 1
+  command -v pm2 >/dev/null 2>&1 || { echo "note: autoheal skipped (pm2 not on PATH)"; return 1; }
+
+  # Consecutive-failure gate: don't act on a single transient blip.
+  local fails; fails=$(cat "$FAILS_FILE" 2>/dev/null || echo 0)
+  [ "$fails" -ge "$AUTOHEAL_MIN_FAILS" ] || { echo "autoheal: ${fails}/${AUTOHEAL_MIN_FAILS} consecutive fails — waiting"; return 1; }
+
+  # Cooldown gate: at most one heal per AUTOHEAL_COOLDOWN seconds.
+  local now last; now=$(date +%s); last=$(cat "$HEAL_TS_FILE" 2>/dev/null || echo 0)
+  if [ $(( now - last )) -lt "$AUTOHEAL_COOLDOWN" ]; then
+    echo "autoheal: within cooldown ($(( now - last ))s < ${AUTOHEAL_COOLDOWN}s) — alert-only"
+    return 1
+  fi
+
+  # Daily-cap gate: past the ceiling, stop touching it (a human is needed).
+  local today count rec; today=$(date +%F); rec=$(cat "$HEAL_DAY_FILE" 2>/dev/null || echo "")
+  if [ "${rec%% *}" = "$today" ]; then count="${rec##* }"; else count=0; fi
+  if [ "$count" -ge "$AUTOHEAL_MAX_PER_DAY" ]; then
+    send "🛑 eMeal auto-heal capped" "🛑 eMeal ($(hostname)): API still unhealthy (http=${1}) but auto-heal hit its daily cap (${count}/${AUTOHEAL_MAX_PER_DAY}). NOT restarting again — needs manual investigation."
+    echo "autoheal: daily cap reached (${count}/${AUTOHEAL_MAX_PER_DAY}) — alert-only"
+    return 1
+  fi
+
+  # ACT: one zero-downtime cluster reload.
+  echo "autoheal: reloading ${AUTOHEAL_APP} (fails=${fails}, http=${1})"
+  pm2 reload "$AUTOHEAL_APP" --update-env >/dev/null 2>&1 || pm2 restart "$AUTOHEAL_APP" >/dev/null 2>&1 || true
+  echo "$now" > "$HEAL_TS_FILE"
+  echo "$today $(( count + 1 ))" > "$HEAL_DAY_FILE"
+  echo 0 > "$FAILS_FILE"   # reset streak; next run confirms recovery
+  send "🔧 eMeal auto-heal" "🔧 eMeal ($(hostname)): API health FAILED (http=${1}) for ${fails} consecutive checks — performed 'pm2 reload ${AUTOHEAL_APP}'. Verifying recovery on the next check. (heal ${count}→$(( count + 1 )) today)"
+  return 0
+}
+
 problems=""
+api_down=0
 
 # 1) API health (must be HTTP 200 AND status:ok)
 code=$(curl -s -o /tmp/.hc.$$ -w '%{http_code}' --max-time 10 "$HEALTH_URL" 2>/dev/null || echo 000)
 body=$(cat /tmp/.hc.$$ 2>/dev/null || true); rm -f /tmp/.hc.$$
 if [ "$code" != "200" ] || ! printf '%s' "$body" | grep -q '"status":"ok"'; then
   problems="${problems}"$'\n'"❌ API health FAIL (http=${code}) ${HEALTH_URL}"
+  api_down=1
 fi
 
 # 2) TLS certificate expiry
@@ -76,9 +131,23 @@ if [ -n "$problems" ]; then
   [ "$prev" != "down" ] && send "🚨 eMeal infra ALERT" "🚨 eMeal infra alert ($(hostname)):${problems}"
   echo "down $(date -Iseconds)" > "$STATE"
   echo "[$(date -Iseconds)] ALERT:${problems}"
+
+  # Track consecutive API-down streak, then attempt guarded self-healing. Only a
+  # genuine API health failure counts toward remediation — a TLS-cert warning
+  # alone must never trigger a restart. A cert/other problem still alerts above.
+  if [ "$api_down" = "1" ]; then
+    echo $(( $(cat "$FAILS_FILE" 2>/dev/null || echo 0) + 1 )) > "$FAILS_FILE"
+    maybe_autoheal "$code"
+  else
+    # API is healthy — only a cert/other warning remains. The streak must reset
+    # here too, or a later single API blip could inherit a stale count and heal
+    # one check early.
+    echo 0 > "$FAILS_FILE"
+  fi
 else
   [ "$prev" = "down" ] && send "✅ eMeal recovered" "✅ eMeal recovered — API healthy + certs OK ($(hostname))"
   echo "ok $(date -Iseconds)" > "$STATE"
+  echo 0 > "$FAILS_FILE"   # clear the streak on any healthy check
   echo "[$(date -Iseconds)] OK — no problems"
 fi
 

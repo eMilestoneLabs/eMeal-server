@@ -48,6 +48,8 @@ import { ReportsModule } from '../features/reports/reports.module';
 // Phase B6
 import { QueueModule } from '../queue/queue.module';
 import { WorkersModule } from '../workers/workers.module';
+// Observability — client-side crash telemetry ingestion (additive, no DB)
+import { TelemetryModule } from '../features/telemetry/telemetry.module';
 
 // App-level
 import { HealthController } from './health.controller';
@@ -115,6 +117,8 @@ import { HealthController } from './health.controller';
     // Phase B6 — Queue infrastructure + background workers
     QueueModule,
     WorkersModule,
+    // Observability — Flutter crash-report sink (structured logs → Loki/Grafana)
+    TelemetryModule,
   ],
   controllers: [HealthController],
   providers: [

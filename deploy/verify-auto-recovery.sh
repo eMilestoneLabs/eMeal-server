@@ -75,12 +75,18 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-sec "A4. Health-alert cron (notify only — does NOT restart)"
+sec "A4. Health-alert cron + guarded auto-heal (hang remediation)"
+ALERT_SH="$(dirname "${BASH_SOURCE[0]}")/healthcheck-alert.sh"
 if crontab -l 2>/dev/null | grep -q "healthcheck-alert.sh"; then
   ok "healthcheck-alert cron present" "(Telegram/email on state change)"
-  gap "alerter does NOT remediate" "a HANG (app alive but 502) is NOT auto-restarted by anything — only alerted"
 else
-  inf "healthcheck-alert cron not found for this user"
+  inf "healthcheck-alert cron not found for this user (run: add the */5 cron line)"
+fi
+# Does the alerter now REMEDIATE a hang (pm2 reload), guarded by cooldown + cap?
+if [ -f "$ALERT_SH" ] && grep -q 'maybe_autoheal' "$ALERT_SH"; then
+  ok "hang auto-heal wired" "(pm2 reload after AUTOHEAL_MIN_FAILS fails, cooldown + daily-cap guarded)"
+else
+  gap "alerter does NOT remediate" "a HANG (app alive but 502) is only alerted, not auto-restarted"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -89,11 +95,16 @@ cat <<'TXT'
   • Worker CRASH or OOM (>512MB)      → YES, PM2 respawns automatically in ~2s.
   • Data container stop (pg/redis)    → YES, Docker restart policy brings it back.
   • Full server REBOOT                → YES *iff* the PM2 systemd unit is enabled (A2).
-  • App HANG (alive, returns 502)     → NO. Nothing HTTP-health-restarts it — the
-                                        cron only ALERTS. This is the one real gap.
-  • Tight crash-LOOP (>max_restarts)  → NO. PM2 stops retrying → needs manual restart.
-  So your 502 most likely self-healed via PM2 (crash/OOM) BEFORE your manual deploy,
-  UNLESS it was a hang/crash-loop — in which case your deploy.sh reload is what fixed it.
+  • App HANG (alive, returns 502)     → YES (now). The health-alert cron does ONE
+                                        guarded `pm2 reload` after N consecutive
+                                        failed checks, then cools down + caps per
+                                        day so it can't storm. Persistent failure
+                                        past the cap falls back to alert-only.
+  • Tight crash-LOOP (>max_restarts)  → NO. PM2 stops retrying → needs manual restart
+                                        (auto-heal's daily cap deliberately won't
+                                        fight a crash-loop — it alerts instead).
+  So a transient hang now self-heals within ~1–2 cron cycles without a deploy;
+  a genuine crash-loop or dependency outage still pages a human (by design).
 TXT
 
 # ─────────────────────────────────────────────────────────────────────────────
