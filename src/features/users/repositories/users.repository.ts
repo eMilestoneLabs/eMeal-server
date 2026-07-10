@@ -320,4 +320,36 @@ export class UsersRepository {
       }),
     ]);
   }
+
+  /**
+   * REQ (delete → smooth re-create): when the LAST active member of an
+   * organization deletes their account, the org's name/slug would otherwise
+   * stay locked forever and block the founder from ever re-registering the
+   * same organization name (409 slug conflict on admin signup). Archive-rename
+   * the now-empty org so the name becomes available again. Groups, billing
+   * and audit history are untouched — only the org's display name and slug
+   * change. Best-effort: account deletion must never fail because of this.
+   */
+  async archiveOrganizationIfEmpty(organizationId: string): Promise<void> {
+    try {
+      const remaining = await this.prisma.user.count({
+        where: { organizationId, isActive: true },
+      });
+      if (remaining > 0) return;
+      const org = await this.prisma.organization.findUnique({
+        where: { id: organizationId },
+        select: { name: true, slug: true },
+      });
+      if (!org || org.slug.includes('-archived-')) return;
+      await this.prisma.organization.update({
+        where: { id: organizationId },
+        data: {
+          name: `${org.name} (archived)`,
+          slug: `${org.slug}-archived-${Date.now()}`,
+        },
+      });
+    } catch {
+      /* best-effort — never blocks the deletion that triggered it */
+    }
+  }
 }

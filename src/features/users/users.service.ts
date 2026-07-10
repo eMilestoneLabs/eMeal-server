@@ -306,6 +306,15 @@ export class UsersService {
     const avatarKey = this.storage.keyFromUrl(user.avatarUrl);
     await this.usersRepo.deleteAccount(userId);
 
+    // REQ (delete → smooth re-create): if that was the organization's last
+    // active member, archive-rename the org so its name/slug are free for a
+    // future re-signup — a returning founder can recreate "Their Org" instead
+    // of hitting a 409 slug conflict. Optional-chained so partial test stubs
+    // of the repo don't need the method.
+    if (user.organizationId) {
+      await this.usersRepo.archiveOrganizationIfEmpty?.(user.organizationId);
+    }
+
     // Best-effort PII cleanup of the stored avatar object; never blocks.
     if (avatarKey) {
       this.storage
