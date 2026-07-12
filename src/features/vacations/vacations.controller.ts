@@ -14,6 +14,7 @@ import {
 import { Request } from 'express';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { EmailVerifiedGuard } from '../../common/guards/email-verified.guard';
 import {
   CurrentUser,
   JwtPayload,
@@ -40,6 +41,8 @@ export class VacationsController {
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
+  // SRS Module 03 ACC-005: verification required to participate.
+  @UseGuards(EmailVerifiedGuard)
   async create(
     @CurrentUser() user: JwtPayload,
     @Body() dto: CreateVacationRequestDto,

@@ -15,6 +15,8 @@ export class CorrectionRequestSerializer {
       requestType: r.requestType,
       requestedStatus: r.requestedStatus ?? null,
       requestedPreference: r.requestedPreference ?? null,
+      // ATT-004/COR-006: member-submitted selection set (admin views, never edits).
+      requestedSelections: r.requestedSelections ?? null,
       reason: r.reason ?? null,
       evidenceUrl: r.evidenceUrl ?? null,
       status: r.status,

@@ -24,6 +24,10 @@ export class NoticesRepository {
       linkType: raw.linkType ?? null,
       targetUserId: raw.targetUserId ?? null,
       pinned: raw.pinned,
+      imageUrl: raw.imageUrl ?? null,
+      documentUrl: raw.documentUrl ?? null,
+      documentName: raw.documentName ?? null,
+      externalLinks: raw.externalLinks ?? [],
       publishedAt: raw.publishedAt,
       expiresAt: raw.expiresAt ?? null,
       isActive: raw.isActive,
@@ -117,6 +121,9 @@ export class NoticesRepository {
     targetUserId?: string | null;
     pinned: boolean;
     expiresAt: Date | null;
+    // NTC-003: external links ride the create; attachment URLs are patched
+    // in AFTER upload (the notice id keys the MinIO objects).
+    externalLinks?: string[];
   }): Promise<NoticeEntity> {
     const raw = await this.prisma.notice.create({
       data: { ...data, audience: data.audience ?? 'all' },
@@ -234,6 +241,10 @@ export class NoticesRepository {
       pinned?: boolean;
       expiresAt?: Date | null;
       isActive?: boolean;
+      // NTC-012/013: MinIO attachment URLs patched in after upload.
+      imageUrl?: string | null;
+      documentUrl?: string | null;
+      documentName?: string | null;
     },
   ): Promise<NoticeEntity> {
     await this.prisma.notice.updateMany({ where: { id, organizationId }, data });

@@ -10,10 +10,15 @@ import { registerAs } from '@nestjs/config';
  *   FR-PG-041 — quantity bounds cap.
  */
 export default registerAs('preferences', () => ({
-  // Max preference groups bindable to one meal.
-  maxGroupsPerMeal: parseInt(process.env.PG_MAX_GROUPS_PER_MEAL ?? '8', 10),
-  // Max options inside one preference group.
-  maxOptionsPerGroup: parseInt(process.env.PG_MAX_OPTIONS_PER_GROUP ?? '15', 10),
+  // SRS Module 03 PREF-006.2: max preference groups bindable to one meal.
+  maxGroupsPerMeal: parseInt(process.env.PG_MAX_GROUPS_PER_MEAL ?? '5', 10),
+  // SRS Module 03 PREF-006.3: max options (tags) inside one preference group.
+  maxOptionsPerGroup: parseInt(process.env.PG_MAX_OPTIONS_PER_GROUP ?? '5', 10),
+  // SRS Module 03 PREF-006.1: max standalone preference tags on one meal.
+  maxStandaloneTags: parseInt(process.env.PG_MAX_STANDALONE_TAGS ?? '5', 10),
   // Absolute cap for per-option quantity selection.
   maxQuantityCap: parseInt(process.env.PG_MAX_QUANTITY_CAP ?? '10', 10),
+  // SRS Module 03 PREF-005: Allow-Multiple ceiling — the admin sets
+  // Max Picks 1..N per group; the SRS fixes N at 3.
+  maxSelectCap: parseInt(process.env.PG_MAX_SELECT_CAP ?? '3', 10),
 }));

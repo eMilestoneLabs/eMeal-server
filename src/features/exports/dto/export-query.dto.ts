@@ -6,6 +6,15 @@ import {
   IsDateString,
 } from 'class-validator';
 
+/**
+ * SRS Module 03 RPT-001: exports are Excel (.xlsx) multi-sheet workbooks with
+ * an optional PDF summary — CSV is NOT supported. 'csv' is rejected with a
+ * clear message so pre-RPT-001 APKs get an actionable error instead of a
+ * generic validation failure.
+ */
+const CSV_REMOVED_MESSAGE =
+  'CSV export is no longer supported. Please use Excel (.xlsx) instead.';
+
 export class AttendanceExportQueryDto {
   @IsString()
   @IsNotEmpty()
@@ -19,8 +28,8 @@ export class AttendanceExportQueryDto {
 
   @IsOptional()
   @IsString()
-  @IsIn(['csv', 'xlsx'])
-  format?: 'csv' | 'xlsx'; // default = 'csv'
+  @IsIn(['xlsx'], { message: CSV_REMOVED_MESSAGE })
+  format?: 'xlsx'; // default = 'xlsx' (RPT-001)
 
   @IsOptional()
   @IsString()
@@ -34,6 +43,6 @@ export class EventExportQueryDto {
 
   @IsOptional()
   @IsString()
-  @IsIn(['csv', 'xlsx'])
-  format?: 'csv' | 'xlsx'; // default = 'csv'
+  @IsIn(['xlsx'], { message: CSV_REMOVED_MESSAGE })
+  format?: 'xlsx'; // default = 'xlsx' (RPT-001)
 }

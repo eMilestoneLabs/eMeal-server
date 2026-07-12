@@ -15,6 +15,7 @@ import {
 import { GuestsService } from './guests.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { EmailVerifiedGuard } from '../../common/guards/email-verified.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import {
@@ -142,6 +143,8 @@ export class GuestsController {
   }
 
   // Parameterised meal route LAST so 'guests' literals above win matching.
+  // SRS Module 03 ACC-005: verification required to participate.
+  @UseGuards(EmailVerifiedGuard)
   @Post(':mealId/guests')
   @HttpCode(HttpStatus.OK)
   async bookGuests(

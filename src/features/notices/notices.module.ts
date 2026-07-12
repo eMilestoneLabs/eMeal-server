@@ -3,6 +3,7 @@ import { PrismaModule } from '../../prisma/prisma.module';
 import { AuditModule } from '../../audit/audit.module';
 import { RealtimeModule } from '../../realtime/realtime.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { StorageModule } from '../../storage/storage.module';
 
 import { NoticesController } from './notices.controller';
 import { NoticesService } from './notices.service';
@@ -18,7 +19,14 @@ import { NoticesRepository } from './repositories/notices.repository';
  *   NotificationsModule — best-effort push on publish (FR-NOTX-006 / ISSUE-15)
  */
 @Module({
-  imports: [PrismaModule, AuditModule, RealtimeModule, NotificationsModule],
+  imports: [
+    PrismaModule,
+    AuditModule,
+    RealtimeModule,
+    NotificationsModule,
+    // SRS Module 03 NTC-012/013: notice attachments live in MinIO.
+    StorageModule,
+  ],
   controllers: [NoticesController],
   providers: [NoticesService, NoticesRepository],
   exports: [NoticesService, NoticesRepository],

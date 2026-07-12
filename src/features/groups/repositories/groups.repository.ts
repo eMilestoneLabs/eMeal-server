@@ -298,6 +298,7 @@ export class GroupsRepository {
       vacationRequiresApproval: boolean;
       billingCycleStartDay: number | null;
       mealPricingEnabled: boolean;
+      billSkippedMeals: boolean;
       attendanceGraceMinutes: number | null;
       attendanceDefault: string | null;
       minOptOutMinutes: number | null;
@@ -308,6 +309,7 @@ export class GroupsRepository {
       guestAdultPrice: number | null;
       guestChildPrice: number | null;
       guestSurcharge: number | null;
+      guestSurchargeType: string | null;
       guestRequiresApproval: boolean;
       guestCutoffMinutesBeforeClose: number | null;
       guestAdvanceBookingDays: number | null;

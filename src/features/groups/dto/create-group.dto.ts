@@ -95,6 +95,15 @@ export class GuestConfigDto {
   @Max(100000)
   guestSurcharge?: number;
 
+  /**
+   * SRS Module 03 GST-011: surcharge calculation method for flatSurcharge
+   * mode — 'fixed' (₹ amount, default) or 'percent' (% of the final effective
+   * member price). When 'percent', guestSurcharge holds the percentage.
+   */
+  @IsOptional()
+  @IsIn(['fixed', 'percent'])
+  guestSurchargeType?: string;
+
   @IsOptional()
   @IsBoolean()
   guestRequiresApproval?: boolean;
@@ -163,19 +172,30 @@ export class MealConfigDto {
   vacationRequiresApproval?: boolean;
 
   /**
-   * SRS FR-BILLX-020 (Pass 12): day-of-month the billing cycle starts (1–28).
-   * Null/omitted = calendar month. Period math uses the org timezone.
+   * SRS FR-BILLX-020 (Pass 12) + Module 03 BILL-012: day-of-month the billing
+   * cycle starts (1–31; days missing from a short month clamp to its last
+   * calendar day). Null/omitted = calendar month. Org-timezone period math.
    */
   @IsOptional()
   @IsInt()
   @Min(1)
-  @Max(28)
+  @Max(31)
   billingCycleStartDay?: number;
 
   /** Additive: when ON, meals carry a ₹ price (master + per-day). */
   @IsOptional()
   @IsBoolean()
   mealPricingEnabled?: boolean;
+
+  /**
+   * SRS Module 03 (survey Q17/Q22) — "Bill Skip" policy: when ON,
+   * member-chosen Absent and system-generated Skip are billed at the final
+   * scheduled price (base + day override, no add-ons). Kitchen counts are
+   * unaffected (Present only). Default OFF.
+   */
+  @IsOptional()
+  @IsBoolean()
+  billSkippedMeals?: boolean;
 
   /**
    * SRS FR-TIME-005 (LOOP-090): grace period in minutes that extends the

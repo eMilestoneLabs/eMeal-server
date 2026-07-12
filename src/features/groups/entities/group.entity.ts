@@ -51,6 +51,8 @@ export class GroupEntity {
   billingCycleStartDay: number | null;
   // Additive: ₹ pricing toggle
   mealPricingEnabled: boolean;
+  // SRS Module 03 (survey Q17/Q22): Bill-Skip policy (default OFF).
+  billSkippedMeals: boolean;
   // SRS FR-TIME-005: per-group late-marking grace (minutes). Null = 0.
   attendanceGraceMinutes: number | null;
   // SRS FR-TRUST-001: group trust model ('absent' opt-in | 'present' opt-out).
@@ -65,6 +67,8 @@ export class GroupEntity {
   guestAdultPrice: number | null;
   guestChildPrice: number | null;
   guestSurcharge: number | null;
+  // SRS Module 03 GST-011: 'fixed' | 'percent' (null = fixed).
+  guestSurchargeType: string | null;
   guestRequiresApproval: boolean;
   guestCutoffMinutesBeforeClose: number | null;
   guestAdvanceBookingDays: number | null;
@@ -107,6 +111,7 @@ export class GroupEntity {
     this.functionalRole = this.functionalRole ?? null;
     this.enabledPreferences = this.enabledPreferences ?? [];
     this.mealPricingEnabled = this.mealPricingEnabled ?? false;
+    this.billSkippedMeals = this.billSkippedMeals ?? false;
     this.description = this.description ?? null;
     this.adminId = this.adminId ?? null;
     this.maxMembers = this.maxMembers ?? null;

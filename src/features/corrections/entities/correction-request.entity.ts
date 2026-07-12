@@ -1,10 +1,11 @@
 /**
  * AttendanceCorrectionRequestEntity — domain model for Module 33 (FR-ACR-*).
  *
- * requestType: claim_present | correct_to_absent | correct_to_skip |
- *              fix_preference | dispute_charge
+ * requestType: claim_present | correct_to_absent | fix_preference |
+ *              dispute_charge (SRS Module 03 COR-004: correct_to_skip REMOVED)
  * status:      pending | approved | rejected | expired | cancelled
- * sourceChannel: member | admin_prompt (FR-OVR-020 member confirmation)
+ * sourceChannel: member (SRS Module 03 ATT-004: the admin_prompt override
+ *                channel has been removed — corrections are member-initiated)
  */
 export class CorrectionRequestEntity {
   id: string;
@@ -21,6 +22,8 @@ export class CorrectionRequestEntity {
   requestType: string;
   requestedStatus: string | null;
   requestedPreference: string | null;
+  /** ATT-004/COR-006: member-submitted selection set (same shape as marking). */
+  requestedSelections: unknown | null;
   reason: string | null;
   evidenceUrl: string | null;
 

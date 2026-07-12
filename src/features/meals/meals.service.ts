@@ -29,6 +29,7 @@ import {
 import { hhmmToMinutes } from './utils/entry-chrono.util';
 import { StorageService } from '../../storage/storage.service';
 import { PreferencesService } from '../preferences/preferences.service';
+import { ConfigService } from '@nestjs/config';
 
 /**
  * Matches a base64 image data URI (jpeg/png) so the meal photo can be uploaded
@@ -61,9 +62,71 @@ export class MealsService {
     private readonly audit: AuditService,
     private readonly storage: StorageService,
     private readonly preferencesService: PreferencesService,
+    private readonly config: ConfigService,
     @Optional() @Inject('REALTIME_GATEWAY')
     private readonly realtime: RealtimeEventsService | null = null,
   ) {}
+
+  /** SRS MMT-001/MMT-014: configurable Master Meal Template cap (default 10). */
+  private get maxMealsPerGroup(): number {
+    return this.config.get<number>('meals.maxMealsPerGroup', 10);
+  }
+
+  /** SRS Module 03 MODE-003: Master Attendance Template window cap. */
+  private get attendanceMaxWindows(): number {
+    return this.config.get<number>('meals.attendanceMaxWindows', 5);
+  }
+
+  /**
+   * SRS Module 03 MODE-003: Attendance-Only Mode has NO meal features — an
+   * attendance window carries only name/order/open/close/enabled. Reject any
+   * meal-only field so AO groups can never accumulate hidden pricing state.
+   */
+  private assertAttendanceOnlyFields(dto: {
+    price?: number | null;
+    preferencesEnabled?: boolean;
+    enabledPreferences?: string[];
+    menuItems?: string[];
+    imageUrl?: string | null;
+  }): void {
+    const errors: Record<string, string> = {};
+    if (dto.price != null) errors.price = 'No meal pricing in Attendance-Only Mode';
+    if (dto.preferencesEnabled === true) {
+      errors.preferencesEnabled = 'No meal preferences in Attendance-Only Mode';
+    }
+    if (dto.enabledPreferences?.length) {
+      errors.enabledPreferences = 'No meal preferences in Attendance-Only Mode';
+    }
+    if (dto.menuItems?.length) {
+      errors.menuItems = 'No menus in Attendance-Only Mode';
+    }
+    if (dto.imageUrl) errors.imageUrl = 'No meal images in Attendance-Only Mode';
+    if (Object.keys(errors).length > 0) {
+      throw new BadRequestException({
+        message:
+          'Attendance-Only Mode supports attendance windows only — meal pricing, menus, images and preferences are not available.',
+        errors,
+      });
+    }
+  }
+
+  /** SRS Module 03 PREF-006.1: max standalone preference tags per meal. */
+  private get maxStandaloneTags(): number {
+    return this.config.get<number>('preferences.maxStandaloneTags', 5);
+  }
+
+  /**
+   * SRS Module 03 PREF-006.1 — a meal carries at most maxStandaloneTags
+   * standalone preference tags. Enforced on create and update.
+   */
+  private assertStandaloneTagCap(tags: string[] | undefined): void {
+    if (tags && tags.length > this.maxStandaloneTags) {
+      throw new BadRequestException({
+        message: `A meal supports at most ${this.maxStandaloneTags} standalone preference tags`,
+        errors: { enabledPreferences: `Tag limit reached (${this.maxStandaloneTags})` },
+      });
+    }
+  }
 
   /**
    * Module 36 (FR-PG-090): attach the effective preference groups to serialized
@@ -134,13 +197,60 @@ export class MealsService {
       });
     }
 
-    // Verify mealsEnabled on group config
-    if (!group.mealsEnabled) {
+    // SRS Module 03 MODE-003: Attendance-Only groups use the Master
+    // Attendance Template — up to attendanceMaxWindows admin-named windows
+    // (name, order, open/close, enabled), auto-applied every day. Windows are
+    // stored as window-only meal rows: the whole attendance engine (marking,
+    // corrections, sweeps, analytics) is reused with zero duplication, and a
+    // future free-tier/subscription gate slots in at this single seam.
+    const attendanceOnly = !group.mealsEnabled;
+    if (attendanceOnly) {
+      this.assertAttendanceOnlyFields(dto);
+      if (!dto.attendanceWindow) {
+        throw new BadRequestException({
+          message: 'An attendance window needs an open and close time',
+          errors: { attendanceWindow: 'Provide openTime and closeTime' },
+        });
+      }
+    }
+
+    // SRS Module 03 MMT-001/MMT-014 + MODE-003.2: the Master Meal Template
+    // holds at most maxMealsPerGroup active meals (default 10); the Master
+    // Attendance Template holds at most attendanceMaxWindows windows
+    // (default 5, ATTENDANCE_MAX_WINDOWS). The implicit general-attendance
+    // slot never counts against either cap.
+    const cap = attendanceOnly ? this.attendanceMaxWindows : this.maxMealsPerGroup;
+    const capLabel = attendanceOnly ? 'attendance windows' : 'meals';
+    const activeCount = await this.mealsRepo.countActiveInGroup(
+      dto.groupId,
+      organizationId,
+      GENERAL_ATTENDANCE_SLOT_KEY,
+    );
+    if (activeCount >= cap) {
       throw new BadRequestException({
-        message: 'Meals are disabled for this group',
-        errors: { groupId: 'Enable meals in group settings before adding meal slots' },
+        message: `A group supports at most ${cap} ${capLabel}`,
+        errors: {
+          groupId: `Limit reached (${cap}) — disable or delete an existing one first`,
+        },
       });
     }
+
+    // SRS Module 03 MMT-003: meal Name is unique per group (case-insensitive).
+    if (
+      await this.mealsRepo.existsByNameInGroup(
+        dto.groupId,
+        organizationId,
+        dto.name,
+      )
+    ) {
+      throw new BadRequestException({
+        message: 'Validation failed',
+        errors: { name: 'A meal with this name already exists in this group' },
+      });
+    }
+
+    // SRS Module 03 PREF-006.1: standalone tag cap.
+    this.assertStandaloneTagCap(dto.enabledPreferences);
 
     // A base64 data-URI image is uploaded to MinIO AFTER the row exists (the
     // meal id keys the object); store null first, then patch the resolved URL —
@@ -615,9 +725,66 @@ export class MealsService {
     }
 
     // Build update payload — only include explicitly provided fields
+    // SRS Module 03 MMT-003: renaming must not collide with another active
+    // meal in the same group (case-insensitive).
+    if (dto.name !== undefined && dto.name !== existing.name) {
+      if (
+        await this.mealsRepo.existsByNameInGroup(
+          existing.groupId,
+          organizationId,
+          dto.name,
+          id,
+        )
+      ) {
+        throw new BadRequestException({
+          message: 'Validation failed',
+          errors: { name: 'A meal with this name already exists in this group' },
+        });
+      }
+    }
+
+    // SRS Module 03 MODE-003: window-only fields in Attendance-Only groups.
+    const parentGroup = await this.groupsRepo.findById(
+      existing.groupId,
+      organizationId,
+    );
+    const attendanceOnly = parentGroup ? !parentGroup.mealsEnabled : false;
+    if (attendanceOnly) {
+      this.assertAttendanceOnlyFields({
+        price: dto.price ?? null,
+        preferencesEnabled: dto.preferencesEnabled,
+        enabledPreferences: dto.enabledPreferences,
+        menuItems: dto.menuItems,
+        imageUrl: dto.imageUrl ?? null,
+      });
+    }
+
+    // SRS Module 03 MMT-001/MMT-014 + MODE-003.2: re-enabling an archived
+    // meal/window counts against the same cap as creating one.
+    if (dto.isEnabled === true && existing.isActive === false) {
+      const cap = attendanceOnly
+        ? this.attendanceMaxWindows
+        : this.maxMealsPerGroup;
+      const activeCount = await this.mealsRepo.countActiveInGroup(
+        existing.groupId,
+        organizationId,
+        GENERAL_ATTENDANCE_SLOT_KEY,
+      );
+      if (activeCount >= cap) {
+        throw new BadRequestException({
+          message: `A group supports at most ${cap} ${attendanceOnly ? 'attendance windows' : 'meals'}`,
+          errors: {
+            isEnabled: `Limit reached (${cap}) — disable or delete an existing one first`,
+          },
+        });
+      }
+    }
+
     const updateData: Parameters<typeof this.mealsRepo.update>[2] = {};
 
-    if (dto.slotKey !== undefined)   updateData.slotKey = dto.slotKey;
+    // SRS Module 03 MMT-002: the Slot Key is IMMUTABLE after creation — it is
+    // the analytics/billing continuity key (per-slot rollups, snapshots). A
+    // slotKey in the patch body is ignored; the Flutter app never sends one.
     if (dto.name !== undefined)       updateData.name = dto.name;
     if ('displayName' in dto)         updateData.displayName = dto.displayName ?? null;
     if (dto.order !== undefined)      updateData.order = dto.order;
@@ -627,7 +794,11 @@ export class MealsService {
     if (dto.menuItems !== undefined)  updateData.menuItems = dto.menuItems;
     if ('imageUrl' in dto)            updateData.imageUrl = await this.resolveMealImageUrl(organizationId, id, dto.imageUrl, existing.imageUrl) ?? null;
     if (dto.preferencesEnabled !== undefined) updateData.preferencesEnabled = dto.preferencesEnabled;
-    if (dto.enabledPreferences !== undefined) updateData.enabledPreferences = dto.enabledPreferences;
+    if (dto.enabledPreferences !== undefined) {
+      // SRS Module 03 PREF-006.1: standalone tag cap.
+      this.assertStandaloneTagCap(dto.enabledPreferences);
+      updateData.enabledPreferences = dto.enabledPreferences;
+    }
     if (dto.price !== undefined) updateData.price = dto.price;
 
     // Handle attendanceWindow — null clears the window; object updates both fields
@@ -675,13 +846,25 @@ export class MealsService {
   ) {
     await this.mealsRepo.softDelete(id, organizationId);
 
+    // SRS Module 03 MMT-011: a deleted master meal is removed from all future
+    // days — purge its entries from every DRAFT schedule right away so the
+    // planner never shows a ghost meal and publish is never blocked. Published
+    // schedules stay untouched (members keep the last published version until
+    // re-publish, where the publish self-heal drops the stale entries).
+    // Historical attendance/billing stay intact via the immutable slot key and
+    // per-record price snapshots (MMT-012/013).
+    const purgedDraftEntries = await this.schedulesRepo.deleteDraftEntriesForMeal(
+      id,
+      organizationId,
+    );
+
     this.audit.log({
       organizationId,
       actorId: adminId,
       targetId: id,
       targetType: 'Meal',
       action: 'delete',
-      metadata: { soft: true },
+      metadata: { soft: true, purgedDraftEntries },
       requestId,
     });
 

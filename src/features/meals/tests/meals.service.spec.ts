@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { ConfigService } from '@nestjs/config';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { PreferencesService } from '../../preferences/preferences.service';
 import { MealsService } from '../meals.service';
@@ -90,6 +91,18 @@ describe('MealsService', () => {
             softDelete: jest.fn(),
             reorder: jest.fn(),
             verifyGroupOwnership: jest.fn(),
+            // SRS MMT-001/003 guards — permissive defaults keep the existing
+            // create/update tests on the happy path.
+            countActiveInGroup: jest.fn().mockResolvedValue(0),
+            existsByNameInGroup: jest.fn().mockResolvedValue(false),
+          },
+        },
+        {
+          provide: ConfigService,
+          useValue: {
+            get: jest.fn(
+              (_key: string, def?: unknown) => def,
+            ),
           },
         },
         {
@@ -98,6 +111,9 @@ describe('MealsService', () => {
             // Planner overlay is empty by default — tests exercise the plain
             // master-meal path unless they override this mock.
             findTodayOverlay: jest.fn().mockResolvedValue(new Map()),
+            // MMT-011: delete-time draft purge (no drafts in unit tests).
+            deleteDraftEntriesForMeal: jest.fn().mockResolvedValue(0),
+            deleteEntriesByIds: jest.fn().mockResolvedValue(0),
           },
         },
         {

@@ -75,4 +75,11 @@ export default registerAs('attendance', () => ({
     process.env.REMINDER_SCHEDULE_SWEEP_MINUTES ?? '15',
     10,
   ),
+  // SRS Module 03 ATT-010: Personal Auto-Attendance materialization sweep —
+  // marks opted-in members Present as soon as a window OPENS (cadence bounds
+  // "immediately"; each meal/date materializes exactly once). 0 disables.
+  autoAttendanceSweepMinutes: parseInt(
+    process.env.ATTENDANCE_AUTO_SWEEP_MINUTES ?? '2',
+    10,
+  ),
 }));

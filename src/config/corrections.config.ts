@@ -6,21 +6,25 @@ import { registerAs } from '@nestjs/config';
  * environment-overridable.
  *
  * Backed requirements:
- *   FR-ACR-001  — bounded backfill (maxAgeDays) + per-member rate limits.
  *   FR-ACR-011  — pending requests auto-expire after expiryHours.
- *   FR-ACR-001  — liability-DECREASING corrections may auto-approve
- *                 (absentAutoApprove, default true — favors the member).
+ *   SRS Module 03 COR-005 — the member submission window is SAME CALENDAR DAY
+ *                 ONLY (until 11:59:59 PM IST) and deliberately NOT
+ *                 configurable; the former ACR_MAX_AGE_DAYS backfill knob no
+ *                 longer applies to creation.
+ *   SRS Module 03 ATT-004 — every correction awaits an explicit admin
+ *                 approve/reject decision; auto-approval is OFF by default.
  */
 export default registerAs('corrections', () => ({
-  // Hours a pending request stays actionable before it auto-expires.
+  // Hours a pending request stays actionable before it auto-expires. COR-005
+  // keeps pending requests reviewable after the member's same-day submission
+  // deadline — this bounds how long they stay actionable.
   expiryHours: parseInt(process.env.ACR_EXPIRY_HOURS ?? '48', 10),
-  // How many days back a member may request a correction (bounded backfill).
-  maxAgeDays: parseInt(process.env.ACR_MAX_AGE_DAYS ?? '7', 10),
   // Max simultaneously-open (pending) requests per member.
   maxOpenPerMember: parseInt(process.env.ACR_MAX_OPEN_PER_MEMBER ?? '3', 10),
   // Max requests a member may create per calendar day (org timezone).
   maxPerDay: parseInt(process.env.ACR_MAX_PER_DAY ?? '5', 10),
-  // Auto-approve liability-decreasing corrections (correct_to_absent/skip).
+  // SRS Module 03 ATT-004: admin reviews everything — OFF unless deliberately
+  // re-enabled via env.
   absentAutoApprove:
-    (process.env.ACR_ABSENT_AUTO_APPROVE ?? 'true') !== 'false',
+    (process.env.ACR_ABSENT_AUTO_APPROVE ?? 'false') === 'true',
 }));

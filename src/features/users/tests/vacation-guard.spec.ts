@@ -30,6 +30,8 @@ describe('users service — PATCH /users/me vacation approval guard', () => {
         .mockImplementation((_id: string, data: any) =>
           Promise.resolve({ ...baseUser, ...data }),
         ),
+      // VAC-005/012: return-early ends the covering approved request.
+      endCoveringVacationRequests: jest.fn().mockResolvedValue([]),
     };
     const storage: any = { keyFromUrl: jest.fn(), deleteImage: jest.fn() };
     return { service: new UsersService(usersRepo, storage), usersRepo };
@@ -60,5 +62,29 @@ describe('users service — PATCH /users/me vacation approval guard', () => {
       'u1',
       expect.objectContaining({ isVacationMode: false }),
     );
+  });
+
+  // SRS Module 03 VAC-012 (BUG-VAC-SELF-SERVE): OFF must PERSIST — the covering
+  // approved request is ended so the read-time sync cannot force-re-enable.
+  it('OFF via profile update ends the covering approved vacation request', async () => {
+    const { service, usersRepo } = build({ requiresApproval: true, vacationOn: true });
+    await service.updateMe('u1', { isVacationMode: false } as any);
+    expect(usersRepo.endCoveringVacationRequests).toHaveBeenCalledWith('u1');
+  });
+
+  it('OFF via the dedicated toggle ends the covering approved vacation request', async () => {
+    const { service, usersRepo } = build({ requiresApproval: true, vacationOn: true });
+    await service.setVacationMode('u1', false);
+    expect(usersRepo.endCoveringVacationRequests).toHaveBeenCalledWith('u1');
+    expect(usersRepo.update).toHaveBeenCalledWith(
+      'u1',
+      expect.objectContaining({ isVacationMode: false }),
+    );
+  });
+
+  it('ON never touches existing vacation requests', async () => {
+    const { service, usersRepo } = build({ requiresApproval: false });
+    await service.setVacationMode('u1', true);
+    expect(usersRepo.endCoveringVacationRequests).not.toHaveBeenCalled();
   });
 });

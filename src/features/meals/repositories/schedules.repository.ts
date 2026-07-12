@@ -554,6 +554,47 @@ export class SchedulesRepository {
     return this.findById(id, organizationId) as Promise<MealScheduleEntity>;
   }
 
+  /**
+   * SRS Module 03 MMT-011: remove specific (stale) entries from one schedule —
+   * used by the publish self-heal when a master meal was deleted/disabled
+   * after the entries were drafted. Tenant-isolated via the schedule relation.
+   */
+  async deleteEntriesByIds(
+    scheduleId: string,
+    organizationId: string,
+    entryIds: string[],
+  ): Promise<number> {
+    if (entryIds.length === 0) return 0;
+    const result = await this.prisma.scheduleEntry.deleteMany({
+      where: {
+        id: { in: entryIds },
+        scheduleId,
+        schedule: { organizationId },
+      },
+    });
+    return result.count;
+  }
+
+  /**
+   * SRS Module 03 MMT-011: when a master meal is deleted it is removed from
+   * all future days — purge its entries from every UNPUBLISHED (draft)
+   * schedule of the org. Published schedules are left untouched so members
+   * keep seeing the last published version until the admin re-publishes
+   * (the publish self-heal drops the stale entries at that point).
+   */
+  async deleteDraftEntriesForMeal(
+    mealId: string,
+    organizationId: string,
+  ): Promise<number> {
+    const result = await this.prisma.scheduleEntry.deleteMany({
+      where: {
+        mealId,
+        schedule: { organizationId, isPublished: false },
+      },
+    });
+    return result.count;
+  }
+
   async publish(id: string, organizationId: string): Promise<MealScheduleEntity> {
     // Freeze the current live entries as the published snapshot students read.
     const current = await this.findById(id, organizationId);

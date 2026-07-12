@@ -78,7 +78,7 @@ export class ExportsService {
     const toDate = parseLocalDate(dto.toDate);
     this.validateDateRange(fromDate, toDate);
 
-    const format = dto.format ?? 'csv';
+    const format = dto.format ?? 'xlsx'; // RPT-001: xlsx-only
 
     // Safety: count rows first — reject if over hard cap (prevents OOM on large orgs)
     const rowCount = await this.prisma.attendanceRecord.count({
@@ -225,7 +225,7 @@ export class ExportsService {
     const fromDate = parseLocalDate(dto.fromDate);
     const toDate = parseLocalDate(dto.toDate);
     this.validateDateRange(fromDate, toDate);
-    const format = dto.format ?? 'csv';
+    const format = dto.format ?? 'xlsx'; // RPT-001: xlsx-only
 
     const recordWhere = {
       organizationId,
@@ -398,7 +398,7 @@ export class ExportsService {
       });
     }
 
-    const format = dto.format ?? 'csv';
+    const format = dto.format ?? 'xlsx'; // RPT-001: xlsx-only
 
     // Safety: count rows first — reject if over hard cap
     const personCount = await this.prisma.eventPerson.count({

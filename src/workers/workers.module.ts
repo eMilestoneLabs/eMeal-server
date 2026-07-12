@@ -27,6 +27,8 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { RedisModule } from '../redis/redis.module';
 import { AuditModule } from '../audit/audit.module';
 import { RealtimeModule } from '../realtime/realtime.module';
+import { GroupsModule } from '../features/groups/groups.module';
+import { RetentionModule } from '../features/retention/retention.module';
 
 @Module({
   imports: [
@@ -36,6 +38,8 @@ import { RealtimeModule } from '../realtime/realtime.module';
     RedisModule,
     AuditModule,
     RealtimeModule, // 'ATTENDANCE_GATEWAY' for sweep realtime emits (@Optional)
+    GroupsModule,   // GLC-003: GroupsRepository.hardDelete for archive purge
+    RetentionModule, // RET-001..015: RetentionService for the retention sweep
 
     // BullMQ requires queue registration in the consuming module as well
     BullModule.registerQueue(

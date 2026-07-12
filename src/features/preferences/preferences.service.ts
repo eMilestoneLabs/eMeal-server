@@ -307,7 +307,7 @@ export class PreferencesService {
   ) {
     const meal = await this.assertMeal(mealId, organizationId);
 
-    const maxGroups = this.cfg('maxGroupsPerMeal', 8);
+    const maxGroups = this.cfg('maxGroupsPerMeal', 5);
     const bound = await this.repo.countBindingsForMeal(mealId);
     if (bound >= maxGroups) {
       throw new BadRequestException({
@@ -344,6 +344,15 @@ export class PreferencesService {
         options: dto.options,
       });
       groupId = created.id;
+    }
+
+    // SRS Module 03 PREF-005: a per-meal Max Picks override obeys the same cap.
+    const maxSelectCap = this.cfg('maxSelectCap', 3);
+    if (dto.maxSelectOverride != null && dto.maxSelectOverride > maxSelectCap) {
+      throw new BadRequestException({
+        message: `Max Picks cannot exceed ${maxSelectCap}`,
+        errors: { maxSelectOverride: `Capped at ${maxSelectCap}` },
+      });
     }
 
     const binding = await this.repo.bindToMeal({
@@ -439,8 +448,10 @@ export class PreferencesService {
     const group = await this.repo.findById(groupId, organizationId);
     if (!group) throw new NotFoundException('Preference group not found');
 
-    const maxOptions = this.cfg('maxOptionsPerGroup', 15);
-    if (group.options.length >= maxOptions) {
+    // SRS Module 03 PREF-006.3: cap counts ACTIVE options so deactivated tags
+    // can be replaced without permanently consuming the quota.
+    const maxOptions = this.cfg('maxOptionsPerGroup', 5);
+    if (group.options.filter((o) => o.isActive).length >= maxOptions) {
       throw new BadRequestException({
         message: `A group supports at most ${maxOptions} options`,
         errors: { groupId: 'Option limit reached' },
@@ -622,6 +633,11 @@ export class PreferencesService {
     if (selectionType === 'multiple' && maxSelect < 2) {
       errors.maxSelect = 'multiple-select groups need maxSelect >= 2';
     }
+    // SRS Module 03 PREF-005: Max Picks is capped (default 3, config-driven).
+    const maxSelectCap = this.cfg('maxSelectCap', 3);
+    if (maxSelect > maxSelectCap) {
+      errors.maxSelect = `Max Picks cannot exceed ${maxSelectCap}`;
+    }
     if (required && minSelect < 1) errors.minSelect = 'required groups need minSelect >= 1';
     if (!required && minSelect !== 0) errors.minSelect = 'optional groups must have minSelect = 0';
     if (Object.keys(errors).length > 0) {
@@ -633,6 +649,16 @@ export class PreferencesService {
   private validateOptionList(options: PreferenceOptionDto[]): void {
     const keys = new Set<string>();
     const maxQtyCap = this.cfg('maxQuantityCap', 10);
+    // SRS Module 03 PREF-006.3: a group carries at most N tags (default 5) —
+    // enforced here so inline creation (createForMeal / createTemplate) obeys
+    // the same cap as incremental addOption.
+    const maxOptions = this.cfg('maxOptionsPerGroup', 5);
+    if (options.length > maxOptions) {
+      throw new BadRequestException({
+        message: `A group supports at most ${maxOptions} options`,
+        errors: { options: 'Option limit reached' },
+      });
+    }
     for (const o of options) {
       if (keys.has(o.key)) {
         throw new BadRequestException({

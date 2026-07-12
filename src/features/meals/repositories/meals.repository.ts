@@ -109,6 +109,49 @@ export class MealsRepository {
     };
   }
 
+  /**
+   * SRS Module 03 MMT-001/MMT-014: active meals currently in the group,
+   * excluding the implicit general-attendance slot — the cap governs the
+   * admin-visible Master Meal Template, not the hidden AO-mode slot.
+   */
+  async countActiveInGroup(
+    groupId: string,
+    organizationId: string,
+    excludeSlotKey?: string,
+  ): Promise<number> {
+    return this.prisma.meal.count({
+      where: {
+        groupId,
+        organizationId, // CRITICAL: tenant isolation
+        isActive: true,
+        ...(excludeSlotKey ? { slotKey: { not: excludeSlotKey } } : {}),
+      },
+    });
+  }
+
+  /**
+   * SRS Module 03 MMT-003: meal Name is unique per group (case-insensitive,
+   * active meals only — an archived meal's name is reusable).
+   */
+  async existsByNameInGroup(
+    groupId: string,
+    organizationId: string,
+    name: string,
+    excludeId?: string,
+  ): Promise<boolean> {
+    const hit = await this.prisma.meal.findFirst({
+      where: {
+        groupId,
+        organizationId, // CRITICAL: tenant isolation
+        isActive: true,
+        name: { equals: name, mode: 'insensitive' },
+        ...(excludeId ? { id: { not: excludeId } } : {}),
+      },
+      select: { id: true },
+    });
+    return !!hit;
+  }
+
   async create(data: {
     organizationId: string;
     groupId: string;

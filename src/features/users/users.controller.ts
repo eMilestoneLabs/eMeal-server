@@ -16,6 +16,7 @@ import {
 import { UsersService } from './users.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { EmailVerifiedGuard } from '../../common/guards/email-verified.guard';
 import { Roles, ALL_ADMIN_ROLES } from '../../common/decorators/roles.decorator';
 import { CurrentUser, JwtPayload } from '../../common/decorators/current-user.decorator';
 import { UpdateUserDto, VacationModeDto, DefaultAttendanceDto } from './dto/update-user.dto';
@@ -52,8 +53,15 @@ export class UsersController {
 
   @Patch('me/vacation-mode')
   @HttpCode(HttpStatus.OK)
+  // SRS Module 03 ACC-005: vacation participation requires a verified email.
+  @UseGuards(EmailVerifiedGuard)
   async setMyVacationMode(@CurrentUser() user: JwtPayload, @Body() dto: VacationModeDto) {
-    return this.usersService.setVacationMode(user.sub, dto.enabled);
+    // VAC-013: actor rides along so a self return-early (OFF while an approved
+    // vacation covers today) is auditable; isSelf semantics are unchanged.
+    return this.usersService.setVacationMode(user.sub, dto.enabled, {
+      id: user.sub,
+      organizationId: user.organizationId,
+    });
   }
 
   @Patch('me/default-attendance')

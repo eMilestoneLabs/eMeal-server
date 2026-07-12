@@ -41,6 +41,8 @@ import {
   getWindowState,
 } from '../common/utils/date.utils';
 import { getVacationCoveredUserIds } from '../common/utils/vacation-coverage.util';
+import { GroupsRepository } from '../features/groups/repositories/groups.repository';
+import { RetentionService } from '../features/retention/retention.service';
 
 function todayInTimezone(tz: string): string {
   return new Intl.DateTimeFormat('en-CA', {
@@ -77,6 +79,16 @@ export class SystemDefaultWorker extends WorkerHost {
     private readonly gateway?: {
       emitToGroup(groupId: string, event: string, payload: unknown): void;
     } | null,
+    // SRS Module 03 GLC-003: shared hard-delete path for the archive purge.
+    // @Optional so existing unit tests construct the worker unchanged.
+    @Optional()
+    @Inject(GroupsRepository)
+    private readonly groupsRepo?: GroupsRepository | null,
+    // SRS Module 03 RET-001..015: rolling retention sweep delegate.
+    // @Optional so existing unit tests construct the worker unchanged.
+    @Optional()
+    @Inject(RetentionService)
+    private readonly retention?: RetentionService | null,
   ) {
     super();
   }
@@ -96,6 +108,70 @@ export class SystemDefaultWorker extends WorkerHost {
     // Pass 15 (FR-NOTX-010): attendance reminder scheduling.
     if (job.name === JOB_TYPES.REMINDER_SCHEDULE_SWEEP) {
       return this.reminderScheduleSweep();
+    }
+    // SRS Module 03 ATT-010: Personal Auto-Attendance at window OPEN.
+    if (job.name === JOB_TYPES.AUTO_ATTENDANCE_SWEEP) {
+      return this.autoAttendanceSweep();
+    }
+    // SRS Module 03 GLC-003: archived-group retention purge.
+    if (job.name === JOB_TYPES.GROUP_ARCHIVE_PURGE_SWEEP) {
+      return this.groupArchivePurgeSweep();
+    }
+    // SRS Module 03 RET-001..015: rolling 3-month data-retention lifecycle.
+    if (job.name === JOB_TYPES.RETENTION_SWEEP) {
+      return this.retention?.sweep();
+    }
+  }
+
+  // ── SRS Module 03 GLC-003 — archived-group retention purge ────────────────
+  //
+  // Archive = soft delete (restorable). After the retention period (default
+  // 30 days, GROUP_ARCHIVE_RETENTION_DAYS) the archived group is PERMANENTLY
+  // deleted automatically — deliberately WITHOUT the GLC-004 operational
+  // checks: those apply only to immediate "Delete Now"; a group inactive for
+  // a month has nothing live to protect (survey Q7 final decision).
+  private async groupArchivePurgeSweep(): Promise<void> {
+    if (!this.groupsRepo) return; // not wired (unit-test construction)
+    const retentionDays = this.config.get<number>(
+      'groups.archiveRetentionDays',
+      30,
+    );
+    if (!retentionDays || retentionDays <= 0) return;
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+
+    const expired = await this.prisma.group.findMany({
+      where: { isActive: false, archivedAt: { not: null, lte: cutoff } },
+      select: { id: true, organizationId: true, name: true, archivedAt: true },
+      take: 50, // bounded batch per sweep — the cadence drains any backlog
+    });
+    if (!expired.length) return;
+
+    for (const g of expired) {
+      try {
+        // Audit BEFORE the row disappears (same discipline as manual delete).
+        this.audit.log({
+          organizationId: g.organizationId,
+          targetId: g.id,
+          targetType: 'Group',
+          action: AuditAction.delete,
+          metadata: {
+            name: g.name,
+            permanent: true,
+            autoPurge: true,
+            archivedAt: g.archivedAt?.toISOString() ?? null,
+            retentionDays,
+            reason: 'GLC-003 — archive retention period expired',
+          },
+        });
+        await this.groupsRepo.hardDelete(g.id, g.organizationId);
+        this.logger.warn(
+          `Archived group auto-purged (GLC-003): ${g.name} [${g.id}] org=${g.organizationId}`,
+        );
+      } catch (err) {
+        this.logger.error(
+          `Archive purge failed group=${g.id}: ${(err as Error).message}`,
+        );
+      }
     }
   }
 
@@ -509,12 +585,288 @@ export class SystemDefaultWorker extends WorkerHost {
     }
   }
 
-  private async sweep(): Promise<void> {
+  // ── SRS Module 03 ATT-010 — Personal Auto-Attendance (window OPEN) ────────
+  //
+  // Members who enable Personal Auto-Attendance are marked Present the moment
+  // an eligible meal's attendance window OPENS (not at close), so kitchen
+  // dashboards and billing see real-time expected counts. Eligibility per
+  // ATT-010: toggle ON · active member · not on approved vacation · the meal
+  // does NOT require preference selection (ATT-011 suspends auto-attendance
+  // for preference meals — those stay manual and become Skipped at close per
+  // the group policy) · window open · no record yet. Each (meal, date) pair
+  // materializes exactly once (Redis dedup); a member enabling the toggle
+  // mid-window starts from the NEXT window ("window has just opened").
+  private async autoAttendanceSweep(): Promise<void> {
+    // Only groups that actually have opted-in active members.
+    const optedIn = await this.prisma.groupMember.findMany({
+      where: { status: 'active', user: { isDefaultAttendance: true } },
+      select: { groupId: true },
+      distinct: ['groupId'],
+    });
+    if (!optedIn.length) return;
+
     const groups = await this.prisma.group.findMany({
-      where: { attendanceDefault: 'present', isActive: true },
+      where: { id: { in: optedIn.map((g) => g.groupId) }, isActive: true },
       select: {
         id: true,
         organizationId: true,
+        attendanceGraceMinutes: true,
+        mealsEnabled: true,
+        weeklyMenuEnabled: true,
+        dayWiseMealsEnabled: true,
+        organization: { select: { timezone: true } },
+      },
+    });
+
+    for (const group of groups) {
+      try {
+        await this.autoAttendanceSweepGroup(group);
+      } catch (err) {
+        this.logger.error(
+          `Auto-attendance sweep failed group=${group.id}: ${(err as Error).message}`,
+        );
+      }
+    }
+  }
+
+  private async autoAttendanceSweepGroup(group: {
+    id: string;
+    organizationId: string;
+    attendanceGraceMinutes: number | null;
+    mealsEnabled: boolean;
+    weeklyMenuEnabled: boolean;
+    dayWiseMealsEnabled: boolean;
+    organization: { timezone: string | null } | null;
+  }): Promise<void> {
+    const tz = group.organization?.timezone ?? 'Asia/Kolkata';
+    const todayStr = todayInTimezone(tz);
+    const nowTime = getCurrentTimeInTimezone(tz);
+    const dateUtc = toUtcMidnight(todayStr);
+    const grace = Math.max(0, group.attendanceGraceMinutes ?? 0);
+
+    const [meals, entries] = await Promise.all([
+      this.prisma.meal.findMany({
+        where: {
+          groupId: group.id,
+          organizationId: group.organizationId,
+          isActive: true,
+          attendanceEnabled: true,
+        },
+        select: {
+          id: true,
+          name: true,
+          preferencesEnabled: true,
+          attendanceWindowOpen: true,
+          attendanceWindowClose: true,
+          price: true,
+        },
+      }),
+      this.prisma.scheduleEntry.findMany({
+        where: {
+          date: dateUtc,
+          schedule: {
+            groupId: group.id,
+            organizationId: group.organizationId,
+            isPublished: true,
+          },
+        },
+        select: { mealId: true, openTime: true, closeTime: true, price: true },
+      }),
+    ]);
+    if (!meals.length) return;
+
+    // ATT-011/013: preference-group meals are excluded from auto-attendance.
+    const boundGroups = await this.prisma.mealPreferenceGroup.findMany({
+      where: { mealId: { in: meals.map((m) => m.id) } },
+      select: { mealId: true },
+      distinct: ['mealId'],
+    });
+    const hasGroups = new Set(boundGroups.map((b) => b.mealId));
+
+    const entryMap = new Map(entries.map((e) => [e.mealId, e]));
+    const plannerActive =
+      group.mealsEnabled !== false &&
+      (group.weeklyMenuEnabled === true || group.dayWiseMealsEnabled === true);
+
+    for (const meal of meals) {
+      const entry = entryMap.get(meal.id);
+      // FR-MODE-032: holiday / no-meal day in planner mode → nothing to mark.
+      if (plannerActive && !entry) continue;
+      // ATT-011: preference-required meals stay manual (flat tags OR groups).
+      if (meal.preferencesEnabled === true || hasGroups.has(meal.id)) continue;
+
+      const open = entry?.openTime ? entry.openTime : meal.attendanceWindowOpen;
+      const close = entry?.openTime
+        ? entry.closeTime
+        : meal.attendanceWindowClose;
+      if (!open || !close) continue;
+
+      // ATT-010: materialize while the window is OPEN (grace still counts as
+      // markable, so a sweep tick landing in grace still marks correctly).
+      const state = getWindowState(nowTime, open, close, grace);
+      if (state !== 'open' && state !== 'grace') continue;
+
+      await this.materializeAutoAttendance({
+        group,
+        mealId: meal.id,
+        mealName: meal.name,
+        dateUtc,
+        dateStr: todayStr,
+        price: entry?.price != null ? entry.price : (meal.price ?? null),
+        openTime: open,
+      });
+    }
+  }
+
+  private async materializeAutoAttendance(params: {
+    group: { id: string; organizationId: string };
+    mealId: string;
+    mealName: string;
+    dateUtc: Date;
+    dateStr: string;
+    price: number | null;
+    openTime: string | null;
+  }): Promise<void> {
+    const { group, mealId, dateUtc, dateStr, price } = params;
+
+    // Once per (meal, date): members who later unmark/change are never
+    // re-defaulted — their explicit action always wins (FR-TRUST-002).
+    const onceKey = `autoattend:done:${group.organizationId}:${mealId}:${dateStr}`;
+    if (!(await this.redis.setDedup(onceKey, 48 * 60 * 60))) return;
+
+    const [members, existing] = await Promise.all([
+      this.prisma.groupMember.findMany({
+        where: {
+          groupId: group.id,
+          status: 'active',
+          user: { isDefaultAttendance: true },
+        },
+        select: {
+          userId: true,
+          user: { select: { isVacationMode: true } },
+        },
+      }),
+      this.prisma.attendanceRecord.findMany({
+        where: { mealId, attendanceDate: dateUtc },
+        select: { userId: true },
+      }),
+    ]);
+    if (!members.length) return;
+
+    // ATT-010 eligibility: never auto-mark a member on approved vacation.
+    const onVacation = await getVacationCoveredUserIds(this.prisma as any, {
+      organizationId: group.organizationId,
+      groupId: group.id,
+      dateUtc,
+      mealOpenTime: params.openTime,
+      candidates: members.map((m) => ({
+        userId: m.userId,
+        isVacationMode: m.user.isVacationMode === true,
+      })),
+    });
+
+    const already = new Set(existing.map((r) => r.userId));
+    const eligible = members.filter(
+      (m) => !already.has(m.userId) && !onVacation.has(m.userId),
+    );
+    if (!eligible.length) return;
+
+    await this.prisma.attendanceRecord.createMany({
+      data: eligible.map((m) => ({
+        organizationId: group.organizationId,
+        groupId: group.id,
+        userId: m.userId,
+        mealId,
+        attendanceDate: dateUtc,
+        status: 'present' as const,
+        markedAt: new Date(),
+        markedBy: null,
+        price,
+        source: 'system_default',
+      })),
+      skipDuplicates: true, // races with self-marks: the member always wins
+    });
+
+    const created = await this.prisma.attendanceRecord.findMany({
+      where: {
+        mealId,
+        attendanceDate: dateUtc,
+        source: 'system_default',
+        userId: { in: eligible.map((m) => m.userId) },
+      },
+      select: { id: true, userId: true },
+    });
+    for (const rec of created) {
+      this.audit.log({
+        organizationId: group.organizationId,
+        targetId: rec.id,
+        targetType: 'Attendance',
+        action: AuditAction.create,
+        metadata: {
+          source: 'system_default',
+          status: 'present',
+          reason:
+            'Personal Auto-Attendance — marked Present at window open (ATT-010)',
+        },
+      });
+    }
+
+    // Cache parity + billing version bump + live kitchen count — identical
+    // discipline to the close-time sweep so dashboards update in real time.
+    const cacheKeys = [
+      `attendance:group:${group.organizationId}:${group.id}:${dateStr}`,
+      `attendance:meal:${group.organizationId}:${mealId}:${dateStr}`,
+      `dashboard:admin:${group.organizationId}`,
+      ...created.flatMap((r) => [
+        `attendance:summary:${group.organizationId}:${r.userId}:${group.id}`,
+        `dashboard:student:${group.organizationId}:${r.userId}`,
+      ]),
+    ];
+    try {
+      await this.redis.del(...cacheKeys);
+    } catch (_) {
+      /* best-effort */
+    }
+    try {
+      await this.redis.set(`bill:ver:${group.id}`, Date.now().toString());
+    } catch (_) {
+      /* best-effort */
+    }
+    try {
+      this.gateway?.emitToGroup(group.id, 'attendance.updated.v1', {
+        groupId: group.id,
+        mealId,
+        date: dateStr,
+        source: 'system_default',
+        count: created.length,
+      });
+    } catch (_) {
+      /* best-effort */
+    }
+
+    this.logger.log(
+      `Auto-attendance sweep: group=${group.id} meal=${mealId} date=${dateStr} created=${created.length}`,
+    );
+  }
+
+  private async sweep(): Promise<void> {
+    // Two materialization modes share this sweep:
+    //  • opt-out groups (attendanceDefault='present') → unmarked members are
+    //    marked PRESENT at close (FR-TRUST-001/002/003), and
+    //  • SRS Module 03 Bill-Skip groups (billSkippedMeals=true) → unmarked
+    //    members get a SYSTEM-GENERATED SKIP record at close so the internal
+    //    Skip is billable per policy (survey Q17/Q22 — a member cannot gain
+    //    by doing nothing). Opt-out wins when both flags are on.
+    const groups = await this.prisma.group.findMany({
+      where: {
+        isActive: true,
+        OR: [{ attendanceDefault: 'present' }, { billSkippedMeals: true }],
+      },
+      select: {
+        id: true,
+        organizationId: true,
+        attendanceDefault: true,
+        billSkippedMeals: true,
         attendanceGraceMinutes: true,
         minOptOutMinutes: true,
         mealsEnabled: true,
@@ -546,6 +898,8 @@ export class SystemDefaultWorker extends WorkerHost {
     group: {
       id: string;
       organizationId: string;
+      attendanceDefault?: string | null;
+      billSkippedMeals?: boolean;
       attendanceGraceMinutes: number | null;
       minOptOutMinutes: number | null;
       mealsEnabled: boolean;
@@ -555,6 +909,10 @@ export class SystemDefaultWorker extends WorkerHost {
     },
     defaultFloor: number,
   ): Promise<void> {
+    // Opt-out (auto-Present) wins when both policies are enabled — a group
+    // where everyone defaults to Present has no unmarked members to Skip.
+    const materializeStatus: 'present' | 'skipped' =
+      group.attendanceDefault === 'present' ? 'present' : 'skipped';
     const tz = group.organization?.timezone ?? 'Asia/Kolkata';
     const todayStr = todayInTimezone(tz);
     const nowTime = getCurrentTimeInTimezone(tz);
@@ -621,6 +979,7 @@ export class SystemDefaultWorker extends WorkerHost {
         dateStr: todayStr,
         price: entry?.price != null ? entry.price : (meal.price ?? null),
         openTime: open,
+        status: materializeStatus,
       });
     }
   }
@@ -633,8 +992,10 @@ export class SystemDefaultWorker extends WorkerHost {
     dateStr: string;
     price: number | null;
     openTime: string | null;
+    /** 'present' = opt-out policy · 'skipped' = Bill-Skip system Skip. */
+    status: 'present' | 'skipped';
   }): Promise<void> {
-    const { group, mealId, dateUtc, dateStr, price } = params;
+    const { group, mealId, dateUtc, dateStr, price, status } = params;
 
     // Sweep-level idempotency flag: each (meal, date) is materialized once —
     // members who mark/unmark afterwards are never re-defaulted, so a member
@@ -709,7 +1070,7 @@ export class SystemDefaultWorker extends WorkerHost {
         userId: m.userId,
         mealId,
         attendanceDate: dateUtc,
-        status: 'present' as const,
+        status,
         markedAt: new Date(),
         markedBy: null,
         price,
@@ -736,8 +1097,11 @@ export class SystemDefaultWorker extends WorkerHost {
         action: AuditAction.create,
         metadata: {
           source: 'system_default',
-          status: 'present',
-          reason: 'Group opt-out policy — unmarked at window close',
+          status,
+          reason:
+            status === 'present'
+              ? 'Group opt-out policy — unmarked at window close'
+              : 'Bill-Skip policy — no attendance submitted before window close',
         },
       });
     }

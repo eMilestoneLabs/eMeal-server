@@ -379,359 +379,69 @@ describe('AttendanceService', () => {
     });
   });
 
-  // ── adminOverride ──────────────────────────────────────────────────────────
+  // ── adminOverride — REMOVED (SRS Module 03 ATT-004) ────────────────────────
 
-  describe('adminOverride', () => {
-    it('throws NotFoundException when meal not found in org', async () => {
-      (prisma.meal.findFirst as jest.Mock).mockResolvedValue(null);
-
+  describe('adminOverride (ATT-004: removed for other members)', () => {
+    it('rejects an admin marking ANOTHER member with 403 ADMIN_OVERRIDE_REMOVED', async () => {
       await expect(
         service.adminOverride('admin_01', 'org_01', {
           userId: 'usr_01',
-          mealId: 'meal_FAKE',
+          mealId: 'meal_01',
           attendanceDate: '2026-01-05',
           status: 'absent',
         }),
-      ).rejects.toThrow(NotFoundException);
-    });
-
-    it('sets markedBy=adminId (tracks who performed override)', async () => {
-      (prisma.meal.findFirst as jest.Mock).mockResolvedValue({
-        id: 'meal_01',
-        groupId: 'grp_01',
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'ADMIN_OVERRIDE_REMOVED' }),
       });
-      (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'usr_01' });
-      (attendanceRepo.upsert as jest.Mock).mockResolvedValue(mockMealRecord);
-      (redis.del as jest.Mock).mockResolvedValue(undefined);
-
-      await service.adminOverride('admin_01', 'org_01', {
-        userId: 'usr_01',
-        mealId: 'meal_01',
-        attendanceDate: '2026-01-05',
-        status: 'absent',
-      });
-
-      // Admin override sets markedBy to adminId
-      expect(attendanceRepo.upsert).toHaveBeenCalledWith(
-        expect.objectContaining({ markedBy: 'admin_01' }),
-      );
-    });
-
-    it('admin override does NOT check membership (bypasses student restriction)', async () => {
-      (prisma.meal.findFirst as jest.Mock).mockResolvedValue({
-        id: 'meal_01',
-        groupId: 'grp_01',
-      });
-      (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'usr_01' });
-      (attendanceRepo.upsert as jest.Mock).mockResolvedValue(mockMealRecord);
-      (redis.del as jest.Mock).mockResolvedValue(undefined);
-
-      await service.adminOverride('admin_01', 'org_01', {
-        userId: 'usr_01',
-        mealId: 'meal_01',
-        attendanceDate: '2026-01-05',
-        status: 'present',
-      });
-
-      // membersRepo.isActiveMember should NOT be called in admin override path
-      expect(membersRepo.isActiveMember).not.toHaveBeenCalled();
-    });
-
-    // ── FR-OVR-001 / FR-FAIR-010 (Module 33): Δliability classifier ─────────
-
-    const pricedMeal = {
-      id: 'meal_01',
-      groupId: 'grp_01',
-      price: 60,
-      group: { mealPricingEnabled: true },
-    };
-
-    it('liability INCREASE (none→present, priced) is NOT applied — creates a member confirmation', async () => {
-      (prisma.meal.findFirst as jest.Mock).mockResolvedValue(pricedMeal);
-      (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'usr_01' });
-      (attendanceRepo.findByKey as jest.Mock).mockResolvedValue(null); // no record
-      ((prisma as any).attendanceCorrectionRequest.create as jest.Mock).mockResolvedValue({
-        id: 'acr_01',
-        status: 'pending',
-        requestType: 'claim_present',
-        sourceChannel: 'admin_prompt',
-        userId: 'usr_01',
-        mealId: 'meal_01',
-        attendanceDate: new Date('2026-01-05T00:00:00.000Z'),
-        expiresAt: new Date('2026-01-07T00:00:00.000Z'),
-      });
-
-      const result: any = await service.adminOverride('admin_01', 'org_01', {
-        userId: 'usr_01',
-        mealId: 'meal_01',
-        attendanceDate: '2026-01-05',
-        status: 'present',
-      });
-
-      expect(result.requiresMemberConsent).toBe(true);
-      expect(result.correctionRequest.sourceChannel).toBe('admin_prompt');
       // The attendance record (and therefore the bill) must NOT change.
       expect(attendanceRepo.upsert).not.toHaveBeenCalled();
     });
 
-    it('SELF-override (admin marks own present, priced) applies directly — no member confirmation', async () => {
-      // command_3 bug: an admin marking their OWN attendance is self-consenting;
-      // it must NOT be routed through the FR-OVR-001 confirmation path (which
-      // returned requiresMemberConsent and blocked the admin from marking).
-      (prisma.meal.findFirst as jest.Mock).mockResolvedValue(pricedMeal);
-      (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'admin_01' });
-      (attendanceRepo.findByKey as jest.Mock).mockResolvedValue(null); // no record yet
-      (attendanceRepo.upsert as jest.Mock).mockResolvedValue(mockMealRecord);
-      (redis.del as jest.Mock).mockResolvedValue(undefined);
+    it('SELF-mark delegates to the normal member marking path (same rules)', async () => {
+      const markSpy = jest
+        .spyOn(service, 'markAttendance')
+        .mockResolvedValue({ id: 'att_01' } as any);
 
-      const result: any = await service.adminOverride('admin_01', 'org_01', {
+      await service.adminOverride('admin_01', 'org_01', {
         userId: 'admin_01', // same as adminId → self
         mealId: 'meal_01',
         attendanceDate: '2026-01-05',
         status: 'present',
       });
 
-      expect(result.requiresMemberConsent).toBeUndefined();
-      expect(attendanceRepo.upsert).toHaveBeenCalledWith(
-        expect.objectContaining({ status: 'present', source: 'admin' }),
-      );
-    });
-
-    it('liability DECREASE (present→absent, priced) applies immediately', async () => {
-      (prisma.meal.findFirst as jest.Mock).mockResolvedValue(pricedMeal);
-      (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'usr_01' });
-      (attendanceRepo.upsert as jest.Mock).mockResolvedValue(mockMealRecord);
-      (redis.del as jest.Mock).mockResolvedValue(undefined);
-
-      await service.adminOverride('admin_01', 'org_01', {
-        userId: 'usr_01',
-        mealId: 'meal_01',
-        attendanceDate: '2026-01-05',
-        status: 'absent',
-      });
-
-      expect(attendanceRepo.upsert).toHaveBeenCalledWith(
-        expect.objectContaining({ status: 'absent', source: 'admin' }),
-      );
-    });
-
-    it('present→present (already billed, priced) is neutral and applies', async () => {
-      (prisma.meal.findFirst as jest.Mock).mockResolvedValue(pricedMeal);
-      (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'usr_01' });
-      (attendanceRepo.findByKey as jest.Mock).mockResolvedValue({
-        ...mockMealRecord,
-        status: 'present',
-      });
-      (attendanceRepo.upsert as jest.Mock).mockResolvedValue(mockMealRecord);
-      (redis.del as jest.Mock).mockResolvedValue(undefined);
-
-      await service.adminOverride('admin_01', 'org_01', {
-        userId: 'usr_01',
-        mealId: 'meal_01',
-        attendanceDate: '2026-01-05',
-        status: 'present',
-      });
-
-      expect(attendanceRepo.upsert).toHaveBeenCalled();
-    });
-
-    it('unpriced groups keep the original unrestricted override behavior', async () => {
-      (prisma.meal.findFirst as jest.Mock).mockResolvedValue({
-        id: 'meal_01',
-        groupId: 'grp_01',
-        price: null,
-        group: { mealPricingEnabled: false },
-      });
-      (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'usr_01' });
-      (attendanceRepo.upsert as jest.Mock).mockResolvedValue(mockMealRecord);
-      (redis.del as jest.Mock).mockResolvedValue(undefined);
-
-      await service.adminOverride('admin_01', 'org_01', {
-        userId: 'usr_01',
-        mealId: 'meal_01',
-        attendanceDate: '2026-01-05',
-        status: 'present',
-      });
-
-      expect(attendanceRepo.upsert).toHaveBeenCalledWith(
-        expect.objectContaining({ status: 'present', markedBy: 'admin_01' }),
-      );
-    });
-
-    // ── Pass 7: LOOP-024 bounded backfill + FR-DISP-010 period lock ─────────
-
-    const todayStr = new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'Asia/Kolkata',
-    }).format(new Date());
-
-    it('rejects overrides for future dates (LOOP-024)', async () => {
-      (prisma.meal.findFirst as jest.Mock).mockResolvedValue({
-        id: 'meal_01',
-        groupId: 'grp_01',
-      });
-      const future = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000)
-        .toISOString()
-        .slice(0, 10);
-
-      await expect(
-        service.adminOverride('admin_01', 'org_01', {
-          userId: 'usr_01',
-          mealId: 'meal_01',
-          attendanceDate: future,
-          status: 'absent',
-        }),
-      ).rejects.toThrow(UnprocessableEntityException);
-      expect(attendanceRepo.upsert).not.toHaveBeenCalled();
-    });
-
-    it('rejects overrides older than adminBackfillDays (LOOP-024)', async () => {
-      config.get.mockImplementation((key: string) =>
-        key === 'attendance.adminBackfillDays' ? 30 : undefined,
-      );
-      (prisma.meal.findFirst as jest.Mock).mockResolvedValue({
-        id: 'meal_01',
-        groupId: 'grp_01',
-      });
-
-      await expect(
-        service.adminOverride('admin_01', 'org_01', {
-          userId: 'usr_01',
-          mealId: 'meal_01',
-          attendanceDate: '2026-01-05', // ~180 days back
-          status: 'absent',
-        }),
-      ).rejects.toMatchObject({
-        response: expect.objectContaining({ code: 'BACKFILL_LIMIT' }),
-      });
-    });
-
-    it('rejects writes into a FINALIZED billing period with 423 PERIOD_FINALIZED (FR-DISP-010)', async () => {
-      billing.isDateFinalized.mockResolvedValue({
-        locked: true,
-        periodEnd: todayStr,
-      });
-      (prisma.meal.findFirst as jest.Mock).mockResolvedValue({
-        id: 'meal_01',
-        groupId: 'grp_01',
-      });
-
-      await expect(
-        service.adminOverride('admin_01', 'org_01', {
-          userId: 'usr_01',
-          mealId: 'meal_01',
-          attendanceDate: todayStr,
-          status: 'absent',
-        }),
-      ).rejects.toMatchObject({
-        status: 423,
-        response: expect.objectContaining({ code: 'PERIOD_FINALIZED' }),
-      });
-      expect(attendanceRepo.upsert).not.toHaveBeenCalled();
-    });
-
-    // ── Pass 7: FR-TRUST-011 notify + LOOP-031 self-action flag ─────────────
-
-    it('notifies the member on a non-self change; flags admin self-actions in audit', async () => {
-      (prisma.meal.findFirst as jest.Mock).mockResolvedValue({
-        id: 'meal_01',
-        groupId: 'grp_01',
-      });
-      (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'usr_01' });
-      (attendanceRepo.upsert as jest.Mock).mockResolvedValue(mockMealRecord);
-      (redis.del as jest.Mock).mockResolvedValue(undefined);
-
-      await service.adminOverride('admin_01', 'org_01', {
-        userId: 'usr_01',
-        mealId: 'meal_01',
-        attendanceDate: todayStr,
-        status: 'absent',
-      });
-      expect(notifications.notifyAttendanceChanged).toHaveBeenCalledWith(
-        expect.objectContaining({ userId: 'usr_01', newStatus: 'absent' }),
-      );
-
-      // Self-action: no member notify, but the audit row carries the flag.
-      notifications.notifyAttendanceChanged.mockClear();
-      (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'admin_01' });
-      await service.adminOverride('admin_01', 'org_01', {
-        userId: 'admin_01',
-        mealId: 'meal_01',
-        attendanceDate: todayStr,
-        status: 'absent',
-      });
-      expect(notifications.notifyAttendanceChanged).not.toHaveBeenCalled();
-      expect(audit.log).toHaveBeenCalledWith(
+      expect(markSpy).toHaveBeenCalledWith(
+        'admin_01',
+        'org_01',
         expect.objectContaining({
-          metadata: expect.objectContaining({ selfAction: true }),
+          mealId: 'meal_01',
+          attendanceDate: '2026-01-05',
+          status: 'present',
         }),
+        undefined,
       );
+      markSpy.mockRestore();
     });
   });
 
-  // ── Pass 7: FR-ATT-033 governed bulk override ──────────────────────────────
+  // ── adminBulkOverride — REMOVED (SRS Module 03 ATT-004) ───────────────────
 
-  describe('adminBulkOverride', () => {
-    const todayStr = new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'Asia/Kolkata',
-    }).format(new Date());
-
-    it('applies decreases and holds increases per row (LOOP-025)', async () => {
-      // Priced meal → none→present is an increase; absent is a decrease.
-      (prisma.meal.findFirst as jest.Mock).mockResolvedValue({
-        id: 'meal_01',
-        groupId: 'grp_01',
-        price: 60,
-        group: { mealPricingEnabled: true },
-      });
-      (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'usr_01' });
-      (attendanceRepo.findByKey as jest.Mock).mockResolvedValue(null);
-      (attendanceRepo.upsert as jest.Mock).mockResolvedValue(mockMealRecord);
-      (redis.del as jest.Mock).mockResolvedValue(undefined);
-      ((prisma as any).attendanceCorrectionRequest.create as jest.Mock).mockResolvedValue({
-        id: 'acr_bulk_01',
-        status: 'pending',
-        requestType: 'claim_present',
-        sourceChannel: 'admin_prompt',
-        userId: 'usr_02',
-        mealId: 'meal_01',
-        attendanceDate: new Date(`${todayStr}T00:00:00.000Z`),
-        expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
-      });
-
-      const result = await service.adminBulkOverride('admin_01', 'org_01', {
-        rows: [
-          { userId: 'usr_01', mealId: 'meal_01', attendanceDate: todayStr, status: 'absent' },
-          { userId: 'usr_02', mealId: 'meal_01', attendanceDate: todayStr, status: 'present' },
-        ],
-      });
-
-      expect(result.applied).toBe(1);
-      expect(result.requiresConsent).toBe(1);
-      expect(result.failed).toBe(0);
-      expect(result.results[0]).toMatchObject({ outcome: 'applied' });
-      expect(result.results[1]).toMatchObject({
-        outcome: 'requiresConsent',
-        correctionRequestId: 'acr_bulk_01',
-      });
-    });
-
-    it('enforces the configurable row cap (LOOP-032 partial control)', async () => {
-      config.get.mockImplementation((key: string) =>
-        key === 'attendance.bulkOverrideMaxRows' ? 2 : undefined,
-      );
-      const row = {
-        userId: 'usr_01',
-        mealId: 'meal_01',
-        attendanceDate: todayStr,
-        status: 'absent',
-      };
+  describe('adminBulkOverride (ATT-004: removed)', () => {
+    it('always rejects with 403 ADMIN_OVERRIDE_REMOVED', async () => {
       await expect(
         service.adminBulkOverride('admin_01', 'org_01', {
-          rows: [row, row, row],
+          rows: [
+            {
+              userId: 'usr_01',
+              mealId: 'meal_01',
+              attendanceDate: '2026-01-05',
+              status: 'absent',
+            },
+          ],
         }),
       ).rejects.toMatchObject({
-        response: expect.objectContaining({ code: 'BULK_ROW_LIMIT' }),
+        response: expect.objectContaining({ code: 'ADMIN_OVERRIDE_REMOVED' }),
       });
+      expect(attendanceRepo.upsert).not.toHaveBeenCalled();
     });
   });
 

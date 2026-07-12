@@ -6,6 +6,7 @@ import { AttendanceModule } from '../attendance/attendance.module';
 import { RealtimeModule } from '../../realtime/realtime.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { NoticesModule } from '../notices/notices.module';
+import { PreferencesModule } from '../preferences/preferences.module';
 
 import { CorrectionsController } from './corrections.controller';
 import { CorrectionsService } from './corrections.service';
@@ -30,6 +31,9 @@ import { CorrectionRequestsRepository } from './repositories/correction-requests
     RealtimeModule,
     NotificationsModule,
     NoticesModule,
+    // SRS Module 03 ATT-004/COR-006: correction submissions validate the full
+    // preference-selection set exactly like normal marking.
+    PreferencesModule,
   ],
   controllers: [CorrectionsController],
   providers: [CorrectionsService, CorrectionRequestsRepository],

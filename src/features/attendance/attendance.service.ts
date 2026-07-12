@@ -676,297 +676,69 @@ export class AttendanceService {
     };
   }
 
-  // ── Admin override — bypasses window + vacation mode ─────────────────────
+  // ── Admin override — REMOVED (SRS Module 03 ATT-004) ─────────────────────
 
+  /**
+   * SRS Module 03 ATT-004: Administrators and Managers shall NEVER mark,
+   * modify, or override another member's attendance — attendance ownership
+   * belongs to the member alone, and post-window changes flow exclusively
+   * through the member-initiated Correction Request workflow (admin only
+   * approves or rejects).
+   *
+   * An admin marking their OWN attendance is member behaviour: it delegates
+   * to the normal marking path and follows the exact same window, vacation
+   * and preference rules as every other member.
+   */
   async adminOverride(
     adminId: string,
     organizationId: string,
     dto: AdminOverrideDto,
     requestId?: string,
   ) {
-    // 1. Verify meal exists in org (+ pricing flag for the FR-OVR-001 gate)
-    const meal = await this.prisma.meal.findFirst({
-      where: { id: dto.mealId, organizationId },
-      select: {
-        id: true,
-        groupId: true,
-        price: true,
-        group: { select: { mealPricingEnabled: true } },
-        organization: { select: { timezone: true } },
-      },
-    });
-    if (!meal) throw new NotFoundException('Meal not found');
-
-    // SRS FR-TIME-006 (LOOP-024): bounded admin backfill — an override may not
-    // reach further back than adminBackfillDays, and never into the future.
-    const backfillDays = this.config.get<number>(
-      'attendance.adminBackfillDays',
-      30,
-    );
-    const orgTzForBound =
-      (meal as any).organization?.timezone ?? 'Asia/Kolkata';
-    const todayStr = getTodayInTimezone(orgTzForBound);
-    const dateStr = dto.attendanceDate;
-    if (dateStr > todayStr) {
-      throw new UnprocessableEntityException({
-        message: 'Attendance cannot be overridden for future dates',
-        errors: { attendanceDate: 'Must be today or a past date' },
-      });
-    }
-    const backfillAgeMs =
-      toUtcMidnight(todayStr).getTime() - toUtcMidnight(dateStr).getTime();
-    if (backfillAgeMs > backfillDays * 24 * 60 * 60 * 1000) {
-      throw new UnprocessableEntityException({
-        message: `Overrides are limited to the last ${backfillDays} days`,
-        code: 'BACKFILL_LIMIT',
-        errors: { attendanceDate: `Older than ${backfillDays} days` },
-      });
-    }
-
-    // SRS FR-DISP-010: no writes into a finalized billing period.
-    await this.assertPeriodNotFinalized(
-      organizationId,
-      meal.groupId,
-      dto.attendanceDate,
-    );
-
-    // 2. Verify target user belongs to org
-    const targetUser = await this.prisma.user.findFirst({
-      where: { id: dto.userId, organizationId },
-      select: { id: true },
-    });
-    if (!targetUser) throw new NotFoundException('User not found in organization');
-
-    // 3. Admin override bypasses window validation and vacation mode
-    const attendanceDateUtc = toUtcMidnight(dto.attendanceDate);
-    const overridePrice = await this.resolveEffectiveMealPrice(
-      meal.id,
-      meal.groupId,
-      organizationId,
-      dto.attendanceDate,
-      (meal as any).price ?? null,
-    );
-
-    // FR-OVR-001 / FR-FAIR-010 (Module 33): the Δliability classifier.
-    // billable(present) = effectivePrice; billable(anything else / none) = 0.
-    // A liability-INCREASING override (none/absent/skip/vacation → present on
-    // a priced meal) is never applied unilaterally — it becomes a pending
-    // member confirmation (FR-OVR-020) and the record changes only after the
-    // member consents. Neutral/decrease overrides apply exactly as before,
-    // so Attendance-Only and unpriced groups are completely unaffected.
-    const pricingActive =
-      (meal as any).group?.mealPricingEnabled === true &&
-      (overridePrice ?? 0) > 0;
-    // An admin overriding their OWN attendance is self-consenting by the act of
-    // marking — routing a self-mark through a "member confirmation to yourself"
-    // both blocks the action (it never applies) and is nonsensical. Self-marks
-    // apply directly; the FR-OVR-001 liability-increase gate still governs
-    // overrides that target OTHER members exactly as before.
-    if (pricingActive && dto.status === 'present' && adminId !== dto.userId) {
-      const existing = await this.attendanceRepo.findByKey(
-        dto.userId,
-        dto.mealId,
-        attendanceDateUtc,
-        organizationId,
-      );
-      if (existing?.status !== 'present') {
-        const confirmation = await this.createMemberConfirmation({
-          adminId,
-          organizationId,
-          groupId: meal.groupId,
-          userId: dto.userId,
-          mealId: dto.mealId,
-          attendanceDate: attendanceDateUtc,
-          requestedStatus: dto.status,
-          requestedPreference: dto.preference ?? null,
-          note: dto.note ?? null,
-          requestId,
-        });
-        return {
-          requiresMemberConsent: true,
-          message:
-            'This change would increase the member’s bill, so it needs their consent. ' +
-            'A confirmation request has been sent to the member; the record updates only after they confirm.',
-          correctionRequest: confirmation,
-        };
-      }
-    }
-
-    const record = await this.attendanceRepo.upsert({
-      organizationId,
-      groupId: meal.groupId,
-      userId: dto.userId,
-      mealId: dto.mealId,
-      attendanceDate: attendanceDateUtc,
-      status: dto.status,
-      preference: dto.preference ?? null,
-      note: dto.note ?? null,
-      markedAt: new Date(),
-      markedBy: adminId, // tracks who performed override
-      price: overridePrice,
-      source: 'admin', // Module 33 consent trail (neutral/decrease change)
-    });
-
-    // 4. Invalidate cache
-    await this.invalidateAttendanceCache(
-      organizationId,
-      dto.userId,
-      meal.groupId,
-      dto.attendanceDate,
-      dto.mealId,
-    );
-
-    // 5. Emit realtime — attendance.updated.v1 (backward compat) PLUS
-    // attendance.overridden.v1 (GAP-WS-1: source-of-truth event name)
-    this.emitAttendanceUpdated(meal.groupId, record, organizationId);
-    this.emitAttendanceOverridden(meal.groupId, record);
-
-    // Module 22 (FR-HG-035/054): override away from Present cascades to the
-    // host's booked guests per policy (audited inside the guests service).
-    this.reconcileGuests({
-      organizationId,
-      groupId: meal.groupId,
-      hostUserId: dto.userId,
-      mealId: dto.mealId,
-      attendanceDate: attendanceDateUtc,
-      newStatus: dto.status,
-      actorId: adminId,
-      requestId,
-    });
-
-    // 6. Audit — LOOP-031: an admin acting on their OWN record is flagged.
-    this.audit.log({
-      organizationId,
-      actorId: adminId,
-      targetId: record.id,
-      targetType: 'Attendance',
-      action: AuditAction.update,
-      metadata: {
-        override: true,
-        targetUserId: dto.userId,
-        status: dto.status,
-        ...(dto.note ? { reason: dto.note } : {}),
-        ...(dto.userId === adminId ? { selfAction: true } : {}),
-      },
-      requestId,
-    });
-
-    // 7. SRS FR-TRUST-011: the member hears about every non-self change to
-    // their record — push with the delta (fire-and-forget, never blocks).
     if (dto.userId !== adminId) {
-      void this.notifications?.notifyAttendanceChanged({
-        organizationId,
-        userId: dto.userId,
-        newStatus: dto.status,
-        dateStr: dto.attendanceDate,
-        reason: dto.note ?? null,
-        changedBy: 'admin',
+      throw new ForbiddenException({
+        message:
+          'Administrators cannot mark or edit member attendance. The member must submit an Attendance Correction Request, which you can approve or reject.',
+        code: 'ADMIN_OVERRIDE_REMOVED',
+        errors: {
+          userId: 'Attendance ownership belongs to the member (ATT-004)',
+        },
       });
     }
-
-    return AttendanceSerializer.toMarkResponse(record);
+    // Self-mark: same rules as any member (window-gated, vacation-guarded).
+    return this.markAttendance(
+      adminId,
+      organizationId,
+      {
+        mealId: dto.mealId,
+        attendanceDate: dto.attendanceDate,
+        status: dto.status,
+        preference: dto.preference ?? undefined,
+        note: dto.note ?? undefined,
+      } as any,
+      requestId,
+    );
   }
 
-  // ── Governed admin bulk override (FR-ATT-033 / LOOP-025) ──────────────────
+  // ── Governed admin bulk override — REMOVED (SRS Module 03 ATT-004) ────────
 
   /**
-   * SRS FR-ATT-033: bulk marking applies the FR-ATT-031 consent rule PER ROW —
-   * neutral/decrease rows apply immediately; liability-increasing rows are
-   * held as pending member confirmations and reported back as
-   * `requiresConsent`. Row-capped (LOOP-032 partial control: no unbounded
-   * mass changes in one action) and every row outcome is audited via the
-   * per-row paths plus one bulk summary entry.
+   * SRS Module 03 ATT-004: bulk admin marking of member attendance has been
+   * removed together with the single-record override. Corrections are the
+   * only post-window path and are decided one request at a time.
    */
   async adminBulkOverride(
-    adminId: string,
-    organizationId: string,
-    dto: AdminBulkOverrideDto,
-    requestId?: string,
-  ) {
-    const maxRows = this.config.get<number>(
-      'attendance.bulkOverrideMaxRows',
-      100,
-    );
-    if (dto.rows.length > maxRows) {
-      throw new UnprocessableEntityException({
-        message: `Bulk override is limited to ${maxRows} rows per request`,
-        code: 'BULK_ROW_LIMIT',
-        errors: { rows: `Received ${dto.rows.length}, max ${maxRows}` },
-      });
-    }
-
-    const results: Array<Record<string, unknown>> = [];
-    let applied = 0;
-    let requiresConsent = 0;
-    let failed = 0;
-
-    // Sequential on purpose: each row reuses the full single-override path
-    // (classifier, period lock, backfill bound, cache, realtime, audit,
-    // member notify). Bulk is a rare admin action — correctness over speed.
-    for (const row of dto.rows) {
-      try {
-        const outcome: any = await this.adminOverride(
-          adminId,
-          organizationId,
-          { ...row, note: row.note ?? dto.reason ?? undefined },
-          requestId,
-        );
-        if (outcome?.requiresMemberConsent) {
-          requiresConsent += 1;
-          results.push({
-            userId: row.userId,
-            mealId: row.mealId,
-            attendanceDate: row.attendanceDate,
-            outcome: 'requiresConsent',
-            correctionRequestId: outcome.correctionRequest?.id ?? null,
-          });
-        } else {
-          applied += 1;
-          results.push({
-            userId: row.userId,
-            mealId: row.mealId,
-            attendanceDate: row.attendanceDate,
-            outcome: 'applied',
-            recordId: outcome?.id ?? null,
-          });
-        }
-      } catch (err) {
-        failed += 1;
-        const resp =
-          err instanceof HttpException ? (err.getResponse() as any) : null;
-        results.push({
-          userId: row.userId,
-          mealId: row.mealId,
-          attendanceDate: row.attendanceDate,
-          outcome: 'error',
-          message:
-            (typeof resp === 'object' ? resp?.message : resp) ??
-            (err as Error).message,
-          ...(typeof resp === 'object' && resp?.code
-            ? { code: resp.code }
-            : {}),
-        });
-      }
-    }
-
-    // One bulk summary audit row (per-row outcomes already audited above).
-    this.audit.log({
-      organizationId,
-      actorId: adminId,
-      targetType: 'Attendance',
-      action: AuditAction.update,
-      metadata: {
-        bulkOverride: true,
-        rows: dto.rows.length,
-        applied,
-        requiresConsent,
-        failed,
-        ...(dto.reason ? { reason: dto.reason } : {}),
-      },
-      requestId,
+    _adminId: string,
+    _organizationId: string,
+    _dto: AdminBulkOverrideDto,
+    _requestId?: string,
+  ): Promise<never> {
+    throw new ForbiddenException({
+      message:
+        'Administrators cannot mark or edit member attendance. Members submit Attendance Correction Requests, which you can approve or reject.',
+      code: 'ADMIN_OVERRIDE_REMOVED',
+      errors: { rows: 'Attendance ownership belongs to the member (ATT-004)' },
     });
-
-    return { total: dto.rows.length, applied, requiresConsent, failed, results };
   }
 
   // ── Record change history (FR-TRUST-010) ──────────────────────────────────
@@ -1081,99 +853,10 @@ export class AttendanceService {
     };
   }
 
-  // ── Module 33: member confirmation + consented-change write path ──────────
-
-  /**
-   * FR-OVR-020: create (or idempotently reuse) a pending member confirmation
-   * when an admin proposes a liability-increasing change. Stored as an
-   * AttendanceCorrectionRequest with sourceChannel='admin_prompt'; the
-   * proposing admin is kept in reviewedBy and the member decides via
-   * confirm/decline (corrections module).
-   */
-  private async createMemberConfirmation(params: {
-    adminId: string;
-    organizationId: string;
-    groupId: string;
-    userId: string;
-    mealId: string;
-    attendanceDate: Date;
-    requestedStatus: string;
-    requestedPreference: string | null;
-    note: string | null;
-    requestId?: string;
-  }): Promise<Record<string, unknown>> {
-    const toPayload = (r: any) => ({
-      id: r.id,
-      status: r.status,
-      requestType: r.requestType,
-      sourceChannel: r.sourceChannel,
-      userId: r.userId,
-      mealId: r.mealId,
-      attendanceDate: r.attendanceDate.toISOString().slice(0, 10),
-      expiresAt: r.expiresAt.toISOString(),
-    });
-
-    // Idempotent: one open confirmation per (member, meal, date).
-    const existing = await this.prisma.attendanceCorrectionRequest.findFirst({
-      where: {
-        organizationId: params.organizationId,
-        userId: params.userId,
-        mealId: params.mealId,
-        attendanceDate: params.attendanceDate,
-        status: 'pending',
-        sourceChannel: 'admin_prompt',
-      },
-    });
-    if (existing) return toPayload(existing);
-
-    const expiryHours =
-      this.config.get<number>('corrections.expiryHours') ?? 48;
-    const created = await this.prisma.attendanceCorrectionRequest.create({
-      data: {
-        organizationId: params.organizationId,
-        groupId: params.groupId,
-        userId: params.userId,
-        mealId: params.mealId,
-        attendanceDate: params.attendanceDate,
-        requestType: 'claim_present',
-        requestedStatus: params.requestedStatus,
-        requestedPreference: params.requestedPreference,
-        reason: params.note,
-        status: 'pending',
-        sourceChannel: 'admin_prompt',
-        reviewedBy: params.adminId, // proposing admin (consent artifact trail)
-        expiresAt: new Date(Date.now() + expiryHours * 60 * 60 * 1000),
-      },
-    });
-
-    this.audit.log({
-      organizationId: params.organizationId,
-      actorId: params.adminId,
-      targetId: created.id,
-      targetType: 'AttendanceCorrectionRequest',
-      action: AuditAction.create,
-      metadata: {
-        sourceChannel: 'admin_prompt',
-        targetUserId: params.userId,
-        mealId: params.mealId,
-      },
-      requestId: params.requestId,
-    });
-
-    // Notify the member (their prompt) + the group (admin queue refresh).
-    this.gateway?.emitToUser(
-      params.userId,
-      'correction.requested.v1',
-      toPayload(created),
-    );
-    this.gateway?.emitToGroup(
-      params.groupId,
-      'correction.requested.v1',
-      toPayload(created),
-    );
-
-    return toPayload(created);
-  }
+  // ── Module 33: consented-change write path ────────────────────────────────
+  // SRS Module 03 ATT-004: createMemberConfirmation (FR-OVR-020 admin-proposed
+  // increases) was REMOVED with the admin override — corrections are
+  // member-initiated only.
 
   /**
    * Module 33: shared write path for member-consented attendance changes
@@ -1191,6 +874,12 @@ export class AttendanceService {
     attendanceDate: string; // YYYY-MM-DD
     status: string;
     preference?: string | null;
+    /**
+     * SRS Module 03 ATT-004/COR-006: member-submitted preference-group
+     * selection set (same shape as marking). Validated and priced exactly
+     * like markAttendance, then snapshotted onto the record.
+     */
+    selections?: Array<Record<string, unknown>> | null;
     note?: string | null;
     markedBy?: string | null;
     source: string; // request | admin | system_default | verified
@@ -1218,6 +907,34 @@ export class AttendanceService {
       meal?.price ?? null,
     );
 
+    // ATT-004/COR-006: apply the member's selection set on approval — the
+    // exact validation + pricing path markAttendance uses (FR-PG-031/040).
+    let finalPrice = price;
+    let derivedPreference = params.preference ?? null;
+    let selectionSnapshot: Array<Record<string, unknown>> | undefined;
+    let selectionRows:
+      | Parameters<AttendanceRepository['upsert']>[0]['selectionRows']
+      | undefined;
+    if (params.status === 'present' && params.selections?.length) {
+      const pgGroups = await this.preferencesService.getEffectiveGroupsForMeal(
+        params.mealId,
+        params.organizationId,
+      );
+      if (pgGroups.length > 0) {
+        const validated = this.preferencesService.validateSelections(
+          pgGroups,
+          params.selections as any,
+        );
+        // Same paise→₹ unit boundary as markAttendance (Issue 1/2).
+        if (price != null) {
+          finalPrice = price + Math.round(validated.totalDelta / 100);
+        }
+        derivedPreference = params.preference ?? validated.primaryKey;
+        selectionSnapshot = validated.snapshot;
+        selectionRows = validated.rows;
+      }
+    }
+
     const record = await this.attendanceRepo.upsert({
       organizationId: params.organizationId,
       groupId: params.groupId,
@@ -1225,13 +942,16 @@ export class AttendanceService {
       mealId: params.mealId,
       attendanceDate: toUtcMidnight(params.attendanceDate),
       status: params.status,
-      preference: params.preference ?? null,
+      preference: derivedPreference,
       note: params.note ?? null,
       markedAt: new Date(),
       markedBy: params.markedBy ?? null,
-      price,
+      price: finalPrice,
       source: params.source,
       sourceRequestId: params.sourceRequestId ?? null,
+      ...(selectionRows !== undefined
+        ? { preferences: selectionSnapshot, selectionRows }
+        : {}),
     });
 
     await this.invalidateAttendanceCache(
@@ -1610,6 +1330,8 @@ export class AttendanceService {
         billNoShowGuests: true,
         guestAttendanceEnabled: true,
         billingCycleStartDay: true,
+        // SRS Module 03 (survey Q17/Q22): Bill-Skip policy.
+        billSkippedMeals: true,
         organization: { select: { timezone: true } },
       },
     });
@@ -1720,9 +1442,25 @@ export class AttendanceService {
       } else if (r.status === 'skipped') {
         u.skipped += 1;
         skippedMeals += 1;
+        // SRS Module 03 (survey Q17/Q22/Q23): Bill Skip = ON bills the
+        // system-generated Skip at its snapshotted scheduled price (base +
+        // day override — no add-ons, none were selected). Kitchen counts
+        // (byMeal/bySlot presentCount) are Present-only and stay untouched.
+        if ((groupPolicy as any).billSkippedMeals === true) {
+          const p = r.price ?? 0;
+          u.totalBill += p;
+          revenue += p;
+        }
       } else if (r.status === 'absent') {
         u.absent += 1;
         absentMeals += 1;
+        // Bill Skip = ON also bills member-chosen Absent — otherwise the
+        // Absent button would recreate the do-nothing billing loophole.
+        if ((groupPolicy as any).billSkippedMeals === true) {
+          const p = r.price ?? 0;
+          u.totalBill += p;
+          revenue += p;
+        }
       } else if (r.status === 'onVacation') {
         u.vacation += 1;
         vacationDays += 1;
@@ -1831,6 +1569,9 @@ export class AttendanceService {
         cycleStartDay: (groupPolicy as any)?.billingCycleStartDay ?? null,
         source: periodSource,
       },
+      // SRS Module 03 (survey Q17/Q22): whether skipped/absent meals were
+      // billed in this summary — additive, lets clients label the policy.
+      billSkippedMeals: (groupPolicy as any)?.billSkippedMeals ?? false,
       summary: {
         revenue,
         memberCount,

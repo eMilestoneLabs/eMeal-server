@@ -27,6 +27,7 @@ export class CorrectionRequestsRepository {
       requestType: raw.requestType,
       requestedStatus: raw.requestedStatus ?? null,
       requestedPreference: raw.requestedPreference ?? null,
+      requestedSelections: raw.requestedSelections ?? null,
       reason: raw.reason ?? null,
       evidenceUrl: raw.evidenceUrl ?? null,
       status: raw.status,
@@ -78,14 +79,16 @@ export class CorrectionRequestsRepository {
     requestType: string;
     requestedStatus: string | null;
     requestedPreference: string | null;
+    // ATT-004/COR-006: member-submitted preference-group selection set.
+    requestedSelections?: unknown;
     reason: string | null;
     evidenceUrl: string | null;
     sourceChannel: string;
-    reviewedBy?: string | null; // proposing admin for admin_prompt confirmations
+    reviewedBy?: string | null;
     expiresAt: Date;
   }): Promise<CorrectionRequestEntity> {
     const raw = await this.prisma.attendanceCorrectionRequest.create({
-      data: { ...data, status: 'pending' },
+      data: { ...data, status: 'pending' } as any,
     });
     const [entity] = await this.decorate([raw]);
     return entity;

@@ -24,6 +24,11 @@ export class NoticeEntity {
    */
   targetUserId?: string | null;
   pinned: boolean;
+  // SRS Module 03 NTC-003/012/013: optional rich content (MinIO URLs).
+  imageUrl: string | null;
+  documentUrl: string | null;
+  documentName: string | null;
+  externalLinks: string[];
   publishedAt: Date;
   expiresAt: Date | null;
   isActive: boolean;

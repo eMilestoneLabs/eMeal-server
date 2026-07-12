@@ -13,6 +13,7 @@ import {
 import { Request } from 'express';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { EmailVerifiedGuard } from '../../common/guards/email-verified.guard';
 import {
   CurrentUser,
   JwtPayload,
@@ -31,8 +32,10 @@ import { ReviewCorrectionRequestDto } from './dto/review-correction-request.dto'
  *   POST /api/v1/attendance/correction-requests/:id/approve  — approve (admin, FR-ACR-010)
  *   POST /api/v1/attendance/correction-requests/:id/reject   — reject  (admin, FR-ACR-010)
  *   POST /api/v1/attendance/correction-requests/:id/cancel   — cancel  (owner, FR-ACR-011)
- *   POST /api/v1/attendance/correction-requests/:id/confirm  — confirm admin prompt (owner, FR-OVR-020)
- *   POST /api/v1/attendance/correction-requests/:id/decline  — decline admin prompt (owner, FR-OVR-020)
+ *
+ * SRS Module 03 ATT-004: the admin-prompt confirm/decline routes (FR-OVR-020)
+ * were REMOVED with the admin override — corrections are member-initiated and
+ * the admin only approves or rejects.
  */
 @UseGuards(JwtAuthGuard)
 @Controller('attendance/correction-requests')
@@ -41,6 +44,8 @@ export class CorrectionsController {
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
+  // SRS Module 03 ACC-005: verification required to participate.
+  @UseGuards(EmailVerifiedGuard)
   async create(
     @CurrentUser() user: JwtPayload,
     @Body() dto: CreateCorrectionRequestDto,
@@ -125,35 +130,4 @@ export class CorrectionsController {
     );
   }
 
-  @Post(':id/confirm')
-  @HttpCode(HttpStatus.OK)
-  async confirm(
-    @CurrentUser() user: JwtPayload,
-    @Param('id') id: string,
-    @Req() req: Request,
-  ) {
-    return this.corrections.confirm(
-      user.sub,
-      user.organizationId!,
-      id,
-      req.requestId,
-    );
-  }
-
-  @Post(':id/decline')
-  @HttpCode(HttpStatus.OK)
-  async decline(
-    @CurrentUser() user: JwtPayload,
-    @Param('id') id: string,
-    @Body() dto: ReviewCorrectionRequestDto,
-    @Req() req: Request,
-  ) {
-    return this.corrections.decline(
-      user.sub,
-      user.organizationId!,
-      id,
-      dto,
-      req.requestId,
-    );
-  }
 }

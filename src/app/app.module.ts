@@ -12,6 +12,8 @@ import correctionsConfig from '../config/corrections.config';
 import preferencesConfig from '../config/preferences.config';
 import attendanceConfig from '../config/attendance.config';
 import groupsConfig from '../config/groups.config';
+import mealsConfig from '../config/meals.config';
+import retentionConfig from '../config/retention.config';
 
 // Infrastructure
 import { PrismaModule } from '../prisma/prisma.module';
@@ -45,6 +47,8 @@ import { DashboardModule } from '../features/dashboard/dashboard.module';
 import { OverviewModule } from '../features/overview/overview.module';
 import { ExportsModule } from '../features/exports/exports.module';
 import { ReportsModule } from '../features/reports/reports.module';
+// SRS Module 03 RET-001..015 — rolling 3-month retention & Data Archives
+import { RetentionModule } from '../features/retention/retention.module';
 // Phase B6
 import { QueueModule } from '../queue/queue.module';
 import { WorkersModule } from '../workers/workers.module';
@@ -68,6 +72,8 @@ import { HealthController } from './health.controller';
         preferencesConfig,
         attendanceConfig,
         groupsConfig,
+        mealsConfig,
+        retentionConfig,
       ],
       envFilePath: ['.env'],
     }),
@@ -114,6 +120,8 @@ import { HealthController } from './health.controller';
     OverviewModule,
     ExportsModule,
     ReportsModule,
+    // SRS Module 03 — retention archives (Reports → Data Archives)
+    RetentionModule,
     // Phase B6 — Queue infrastructure + background workers
     QueueModule,
     WorkersModule,

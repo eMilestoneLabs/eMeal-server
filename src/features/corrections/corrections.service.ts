@@ -21,6 +21,7 @@ import {
 } from '../../common/utils/date.utils';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NoticesService } from '../notices/notices.service';
+import { PreferencesService } from '../preferences/preferences.service';
 import { CorrectionRequestsRepository } from './repositories/correction-requests.repository';
 import { CorrectionRequestSerializer } from './serializers/correction-request.serializer';
 import { CorrectionRequestEntity } from './entities/correction-request.entity';
@@ -28,23 +29,28 @@ import { CreateCorrectionRequestDto } from './dto/create-correction-request.dto'
 import { QueryCorrectionRequestDto } from './dto/query-correction-request.dto';
 import { ReviewCorrectionRequestDto } from './dto/review-correction-request.dto';
 
-/** requestType → the attendance status it targets (null = no status change). */
+/**
+ * requestType → the attendance status it targets (null = no status change).
+ * SRS Module 03 COR-004: Present or Absent only — Skip is never a correction
+ * target (correct_to_skip REMOVED).
+ */
 const TYPE_TO_STATUS: Record<string, string | null> = {
   claim_present: 'present',
   correct_to_absent: 'absent',
-  correct_to_skip: 'skipped',
   fix_preference: null,
   dispute_charge: null,
 };
 
-/** Liability-decreasing types — auto-approvable (FR-ACR-001 business rules). */
-const DECREASE_TYPES = new Set(['correct_to_absent', 'correct_to_skip']);
+/** Liability-decreasing types — auto-approvable only when configured ON. */
+const DECREASE_TYPES = new Set(['correct_to_absent']);
+
+/** Status-changing types — window/same-day guards apply to these. */
+const STATUS_CHANGE_TYPES = new Set(['claim_present', 'correct_to_absent']);
 
 /** requestType → human label for admin push notifications (FR-NOTX-017 safe). */
 const TYPE_LABELS: Record<string, string> = {
   claim_present: 'Mark me Present',
   correct_to_absent: 'Correct to Absent',
-  correct_to_skip: 'Correct to Skipped',
   fix_preference: 'Fix meal preference',
   dispute_charge: 'Dispute a charge',
 };
@@ -87,6 +93,8 @@ export class CorrectionsService {
     private readonly attendanceService: AttendanceService,
     private readonly attendanceRepo: AttendanceRepository,
     private readonly notifications: NotificationsService,
+    // SRS Module 03 ATT-004/COR-006: full preference validation on submission.
+    private readonly preferencesService: PreferencesService,
     // #4: in-app admin bell alert (in addition to push). Optional so tests run
     // without the notices infrastructure wired.
     @Optional() @Inject(NoticesService)
@@ -146,14 +154,16 @@ export class CorrectionsService {
       });
     }
 
-    // Bounded backfill (acrMaxAgeDays).
-    const maxAgeDays = this.cfg('maxAgeDays', 7);
-    const ageMs =
-      toUtcMidnight(todayStr).getTime() - toUtcMidnight(dateStr).getTime();
-    if (ageMs > maxAgeDays * 24 * 60 * 60 * 1000) {
+    // SRS Module 03 COR-005: corrections are SAME CALENDAR DAY ONLY (until
+    // 11:59:59 PM IST). The limit is fixed and deliberately NOT configurable —
+    // historical attendance records cannot be corrected.
+    if (dateStr !== todayStr) {
       throw new BadRequestException({
-        message: `Corrections can only be requested for the last ${maxAgeDays} days`,
-        errors: { attendanceDate: `Older than ${maxAgeDays} days` },
+        message:
+          'Correction period has expired. Attendance corrections are allowed only until 11:59:59 PM IST on the same calendar day.',
+        errors: {
+          attendanceDate: 'Historical attendance records cannot be corrected',
+        },
       });
     }
 
@@ -165,8 +175,10 @@ export class CorrectionsService {
       });
     }
 
-    // While the window is still OPEN today, claims must use normal marking.
-    if (dto.requestType === 'claim_present' && dateStr === todayStr) {
+    // COR-005 eligibility: the attendance window must have already CLOSED —
+    // while it is open, status changes go through normal marking. Applies to
+    // every status-changing type (claim_present AND correct_to_absent).
+    if (STATUS_CHANGE_TYPES.has(dto.requestType) && dateStr === todayStr) {
       const effective = await this.attendanceService.resolveEffectiveWindow(
         meal.id,
         meal.groupId,
@@ -206,6 +218,26 @@ export class CorrectionsService {
           message: 'You are on vacation mode — corrections to Present are unavailable',
           errors: { requestType: 'Disable vacation mode first' },
         });
+      }
+    }
+
+    // SRS Module 03 ATT-004/COR-006: when the correction targets Present on a
+    // meal with preference groups, the member must complete the ENTIRE
+    // preference selection again — validated with exactly the same rules as
+    // normal attendance marking. The validated set is stored on the request
+    // and applied verbatim on approval (the admin never edits it).
+    if (dto.requestType === 'claim_present') {
+      const pgGroups = await this.preferencesService.getEffectiveGroupsForMeal(
+        meal.id,
+        organizationId,
+      );
+      if (pgGroups.length > 0) {
+        // Throws 422 with per-group errors when mandatory selections are
+        // missing/invalid — mirrors markAttendance (FR-PG-031/032).
+        this.preferencesService.validateSelections(
+          pgGroups,
+          dto.selections ?? [],
+        );
       }
     }
 
@@ -257,6 +289,8 @@ export class CorrectionsService {
       requestType: dto.requestType,
       requestedStatus: TYPE_TO_STATUS[dto.requestType] ?? null,
       requestedPreference: dto.requestedPreference ?? null,
+      // ATT-004/COR-006: member-submitted selection set (applied on approval).
+      requestedSelections: dto.selections ?? null,
       reason: dto.reason ?? null,
       evidenceUrl: dto.evidenceUrl ?? null,
       sourceChannel: 'member',
@@ -460,69 +494,9 @@ export class CorrectionsService {
     return CorrectionRequestSerializer.toResponse(updated);
   }
 
-  /**
-   * FR-OVR-020: member CONFIRMS an admin-proposed increase (admin_prompt).
-   * The confirmation itself is the consent artifact — the change applies
-   * immediately with sourceRequestId = this request.
-   */
-  async confirm(
-    userId: string,
-    organizationId: string,
-    id: string,
-    requestId?: string,
-  ) {
-    const existing = await this.loadPending(id, organizationId);
-    if (existing.userId !== userId) {
-      throw new ForbiddenException('Only the member can confirm this request');
-    }
-    if (existing.sourceChannel !== 'admin_prompt') {
-      throw new BadRequestException({
-        message: 'Only admin-proposed confirmations can be confirmed — member requests await admin review',
-        errors: { id: 'Not a member confirmation' },
-      });
-    }
-    return this.applyDecision(existing, {
-      decidedBy: userId,
-      note: 'Confirmed by member',
-      auto: false,
-      // Record is attributed to the proposing admin (kept in reviewedBy).
-      markedBy: existing.reviewedBy,
-      requestId,
-    });
-  }
-
-  /** FR-OVR-020: member DECLINES an admin-proposed increase — no change. */
-  async decline(
-    userId: string,
-    organizationId: string,
-    id: string,
-    dto: ReviewCorrectionRequestDto,
-    requestId?: string,
-  ) {
-    const existing = await this.loadPending(id, organizationId);
-    if (existing.userId !== userId) {
-      throw new ForbiddenException('Only the member can decline this request');
-    }
-    if (existing.sourceChannel !== 'admin_prompt') {
-      throw new BadRequestException({
-        message: 'Only admin-proposed confirmations can be declined — use cancel for your own requests',
-        errors: { id: 'Not a member confirmation' },
-      });
-    }
-    const updated = await this.repo.updateStatus(id, organizationId, {
-      status: 'cancelled',
-      reviewedAt: new Date(),
-      reviewNote: dto.note ?? 'Declined by member',
-    });
-    this.auditDecision(organizationId, userId, id, 'declined', requestId);
-    // The proposing admin's group sees the decline (disagreement recorded).
-    this.gateway?.emitToGroup(
-      updated.groupId,
-      'correction.decided.v1',
-      CorrectionRequestSerializer.toResponse(updated),
-    );
-    return CorrectionRequestSerializer.toResponse(updated);
-  }
+  // SRS Module 03 ATT-004: the FR-OVR-020 confirm/decline flow (admin-proposed
+  // increases awaiting member consent) was REMOVED together with the admin
+  // override — corrections are member-initiated only.
 
   // ── Internals ──────────────────────────────────────────────────────────────
 
@@ -623,6 +597,11 @@ export class CorrectionsService {
         attendanceDate: dateStr,
         status: request.requestedStatus ?? 'present',
         preference: request.requestedPreference,
+        // ATT-004/COR-006: the member's submitted selection set is applied
+        // verbatim — the admin only approved, never edited it.
+        selections:
+          (request.requestedSelections as Array<Record<string, unknown>>) ??
+          null,
         markedBy: opts.markedBy ?? (opts.auto ? null : opts.decidedBy),
         source: 'request',
         sourceRequestId: request.id,

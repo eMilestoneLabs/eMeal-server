@@ -108,6 +108,63 @@ export class UsersRepository {
   }
 
   /**
+   * SRS Module 03 VAC-005/006/012 (BUG-VAC-SELF-SERVE): Return Early.
+   * Turning vacation OFF must PERSIST — but syncVacationExpiry force-flips the
+   * flag back ON while an approved request still covers today. Ending the
+   * covering request(s) is the only durable OFF: the vacation record itself
+   * ends at the return point, so no read-time sync or lifecycle sweep can
+   * re-enable it. Approval mode is deliberately NOT consulted — Return Early
+   * is always self-service (VAC-005), even in approval mode.
+   *
+   *   • Request started before today → shorten: endDate = yesterday (history
+   *     keeps the days actually taken; today's remaining meals reactivate).
+   *   • Request starting today → cancel outright (no day was consumed; a
+   *     zero-length approved range cannot be represented).
+   *
+   * Future-dated approved requests are untouched — they are separate
+   * vacations, not the one being returned from. Returns the ended request ids
+   * so the caller can audit the action (VAC-013).
+   */
+  async endCoveringVacationRequests(userId: string): Promise<string[]> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { organization: { select: { timezone: true } } },
+    });
+    if (!user) return [];
+
+    const tz = user.organization?.timezone ?? 'Asia/Kolkata';
+    const todayUtc = toUtcMidnight(getTodayInTimezone(tz));
+
+    const covering = await this.prisma.vacationRequest.findMany({
+      where: {
+        userId,
+        status: 'approved',
+        deletedAt: null,
+        startDate: { lte: todayUtc },
+        endDate: { gte: todayUtc },
+      },
+      select: { id: true, startDate: true },
+    });
+    if (covering.length === 0) return [];
+
+    const yesterdayUtc = new Date(todayUtc.getTime() - 24 * 60 * 60 * 1000);
+    await this.prisma.$transaction(
+      covering.map((r) =>
+        r.startDate.getTime() < todayUtc.getTime()
+          ? this.prisma.vacationRequest.update({
+              where: { id: r.id },
+              data: { endDate: yesterdayUtc },
+            })
+          : this.prisma.vacationRequest.update({
+              where: { id: r.id },
+              data: { status: 'cancelled', reviewedAt: new Date() },
+            }),
+      ),
+    );
+    return covering.map((r) => r.id);
+  }
+
+  /**
    * Pass 11 (FR-VACX-001): does any of the user's active groups require the
    * dated-request approval flow (instant toggle disabled)?
    */

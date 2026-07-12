@@ -132,6 +132,13 @@ export class UsersService {
       }
     }
 
+    // SRS Module 03 VAC-005/012 (BUG-VAC-SELF-SERVE): OFF via profile update is
+    // the same Return Early as the dedicated toggle — end the approved request
+    // covering today so the flag cannot be force-re-enabled by the sync/sweep.
+    if (dto.isVacationMode === false && user.isVacationMode === true) {
+      await this.usersRepo.endCoveringVacationRequests(userId);
+    }
+
     // Additive: a base64 data-URI avatar is uploaded to MinIO and stored as a
     // URL (single current file per user; previous object deleted). Already-URL
     // or null values pass through unchanged.
@@ -187,7 +194,29 @@ export class UsersService {
       }
     }
 
+    // SRS Module 03 VAC-005/006/012 (BUG-VAC-SELF-SERVE): turning vacation OFF
+    // is Return Early — end the approved request covering today, or the
+    // read-time sync/lifecycle sweep force-enables the flag right back and the
+    // toggle "doesn't persist". Always allowed, even in approval mode (VAC-005).
+    let endedRequestIds: string[] = [];
+    if (!enabled) {
+      endedRequestIds = await this.usersRepo.endCoveringVacationRequests(userId);
+    }
+
     const user = await this.usersRepo.update(userId, { isVacationMode: enabled });
+
+    // VAC-013: every return-early that ended an approved vacation is audited.
+    if (endedRequestIds.length > 0 && actor?.organizationId) {
+      this.audit?.log({
+        organizationId: actor.organizationId,
+        actorId: actor.id,
+        targetId: userId,
+        targetType: 'User',
+        action: 'update',
+        metadata: { returnEarly: true, endedVacationRequestIds: endedRequestIds },
+        requestId,
+      });
+    }
 
     if (!isSelf && actor) {
       if (actor.organizationId) {

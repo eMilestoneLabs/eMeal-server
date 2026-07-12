@@ -47,6 +47,7 @@ const NULLABLE_GUEST_KEYS: ReadonlySet<string> = new Set([
   'guestAdultPrice',
   'guestChildPrice',
   'guestSurcharge',
+  'guestSurchargeType',
   'guestCutoffMinutesBeforeClose',
   'guestAdvanceBookingDays',
 ]);
@@ -81,6 +82,20 @@ export class GroupsService {
   /** Typed access to the `groups.*` configuration namespace (CFG-001). */
   private groupsCfg<T>(key: string, fallback: T): T {
     return this.config.get<T>(`groups.${key}`) ?? fallback;
+  }
+
+  /**
+   * SRS Module 03 PREF-006.1 — group-level standalone preference tags are
+   * capped (default 5, config-driven, same knob as the per-meal cap).
+   */
+  private assertStandaloneTagCap(tags: string[] | undefined): void {
+    const cap = this.config.get<number>('preferences.maxStandaloneTags', 5);
+    if (tags && tags.length > cap) {
+      throw new BadRequestException({
+        message: `At most ${cap} standalone preference tags are supported`,
+        errors: { enabledPreferences: `Tag limit reached (${cap})` },
+      });
+    }
   }
 
   /**
@@ -246,6 +261,9 @@ export class GroupsService {
       qrExpiryDays && qrExpiryDays > 0
         ? new Date(Date.now() + qrExpiryDays * 24 * 60 * 60 * 1000)
         : null;
+
+    // SRS Module 03 PREF-006.1: standalone tag cap (group-level default tags).
+    this.assertStandaloneTagCap(dto.mealConfig?.enabledPreferences);
 
     // Create group with mealConfig defaults
     const group = await this.groupsRepo.create({
@@ -479,7 +497,11 @@ export class GroupsService {
         updateData.dayWiseMealsEnabled = effDayWise;
       }
       if (mc.preferencesEnabled !== undefined) updateData.preferencesEnabled = mc.preferencesEnabled;
-      if (mc.enabledPreferences !== undefined) updateData.enabledPreferences = mc.enabledPreferences;
+      if (mc.enabledPreferences !== undefined) {
+        // SRS Module 03 PREF-006.1: standalone tag cap.
+        this.assertStandaloneTagCap(mc.enabledPreferences);
+        updateData.enabledPreferences = mc.enabledPreferences;
+      }
       if (mc.vacationModeEnabled !== undefined) updateData.vacationModeEnabled = mc.vacationModeEnabled;
       // Pass 11 (FR-VACX-001): approval-gated vacation — audited below.
       if (mc.vacationRequiresApproval !== undefined) {
@@ -491,6 +513,10 @@ export class GroupsService {
         updateData.billingCycleStartDay = mc.billingCycleStartDay;
       }
       if (mc.mealPricingEnabled !== undefined) updateData.mealPricingEnabled = mc.mealPricingEnabled;
+      // SRS Module 03 (survey Q17/Q22): "Bill Skip" policy — audited below.
+      if (mc.billSkippedMeals !== undefined) {
+        updateData.billSkippedMeals = mc.billSkippedMeals;
+      }
       // SRS FR-TIME-005 (LOOP-090): per-group grace period — audited below.
       if (mc.attendanceGraceMinutes !== undefined) {
         updateData.attendanceGraceMinutes = mc.attendanceGraceMinutes;
@@ -502,6 +528,33 @@ export class GroupsService {
       }
       if (mc.minOptOutMinutes !== undefined) {
         updateData.minOptOutMinutes = mc.minOptOutMinutes;
+      }
+
+      // SRS Module 03 ATT-007/008/009 (server-enforced, atomic): admin Opt-Out
+      // auto-attendance (attendanceDefault='present') and Meal Preferences are
+      // structurally mutually exclusive — auto-Present cannot infer required
+      // preference picks. The Flutter client PATCHes the FULL mealConfig on
+      // every toggle, so "field present in patch" cannot signal intent —
+      // the side that actually CHANGED versus the stored row wins and
+      // auto-disables the other. If both (or neither) changed yet both end up
+      // ON, opt-out yields: the fail-safe direction is never "auto-bill"
+      // (same philosophy as the FR-TRUST-003 fair-opportunity floor).
+      {
+        const prevDefault = existing.attendanceDefault ?? 'absent';
+        const prevPrefs = existing.preferencesEnabled === true;
+        const nextDefault =
+          (updateData.attendanceDefault as string | undefined) ?? prevDefault;
+        const nextPrefs =
+          (updateData.preferencesEnabled as boolean | undefined) ?? prevPrefs;
+        if (nextDefault === 'present' && nextPrefs === true) {
+          const optOutJustEnabled = prevDefault !== 'present';
+          const prefsJustEnabled = !prevPrefs;
+          if (optOutJustEnabled && !prefsJustEnabled) {
+            updateData.preferencesEnabled = false;
+          } else {
+            updateData.attendanceDefault = 'absent';
+          }
+        }
       }
 
       // Module 22 (Pass 8, FR-HG-020/021): hosted-guest config. Each field
@@ -517,6 +570,7 @@ export class GroupsService {
           'guestAdultPrice',
           'guestChildPrice',
           'guestSurcharge',
+          'guestSurchargeType',
           'guestRequiresApproval',
           'guestCutoffMinutesBeforeClose',
           'guestAdvanceBookingDays',
@@ -578,6 +632,26 @@ export class GroupsService {
             errors: { guestSurcharge: 'Set the per-guest surcharge' },
           });
         }
+        // SRS Module 03 GST-011: percentage surcharge must be a sane percent
+        // (0–100) of the final effective member price. Validated on the FINAL
+        // effective state so a mode/value patched separately can't slip past.
+        const effSurchargeType =
+          updateData.guestSurchargeType !== undefined
+            ? updateData.guestSurchargeType
+            : ((existing as any).guestSurchargeType ?? null);
+        if (
+          effMode === 'flatSurcharge' &&
+          effSurchargeType === 'percent' &&
+          effSurcharge !== null &&
+          effSurcharge !== undefined &&
+          effSurcharge > 100
+        ) {
+          throw new UnprocessableEntityException({
+            message: 'Percentage surcharge cannot exceed 100%',
+            code: 'GUEST_SURCHARGE_PERCENT_RANGE',
+            errors: { guestSurcharge: 'Use a percentage between 0 and 100' },
+          });
+        }
       }
 
       // SRS FR-MODE-004 (LOOP): pricing requires the meal system. Evaluate the
@@ -628,6 +702,8 @@ export class GroupsService {
       'vacationRequiresApproval',
       'billingCycleStartDay',
       'mealPricingEnabled',
+      // SRS Module 03: Bill-Skip policy flips change every member's bill.
+      'billSkippedMeals',
       // FR-TIME-005: grace changes are auditable (who/when/old→new).
       'attendanceGraceMinutes',
       // FR-TRUST-001/003: trust-model changes are high-impact policy flips.
@@ -639,6 +715,7 @@ export class GroupsService {
       'guestAdultPrice',
       'guestChildPrice',
       'guestSurcharge',
+      'guestSurchargeType',
       'guestRequiresApproval',
       'maxGuestsPerMemberPerMeal',
       'billNoShowGuests',
@@ -743,7 +820,93 @@ export class GroupsService {
     return GroupSerializer.toResponse(restored);
   }
 
-  // ── PERMANENT DELETE (GRP-019) ─────────────────────────────────────────────
+  // ── PERMANENT DELETE (GRP-019 / SRS Module 03 GLC-004) ────────────────────
+
+  /**
+   * SRS Module 03 GLC-004 (survey Q7): IMMEDIATE permanent deletion is
+   * blocked while any unfinished operational workflow exists — pending join
+   * requests, pending corrections, active/pending vacations, pending guest
+   * bookings, or an unsettled billing period. These checks apply ONLY to the
+   * immediate "Delete Now" path; the GLC-003 30-day archive auto-purge runs
+   * with NO validation (two independent workflows by design).
+   */
+  private async assertNoOperationalBlockers(
+    id: string,
+    organizationId: string,
+    mealPricingEnabled: boolean,
+  ): Promise<void> {
+    const today = new Date();
+    const [pendingJoins, pendingCorrections, activeVacations, pendingGuests] =
+      await Promise.all([
+        this.prisma.groupMember.count({
+          where: { groupId: id, status: 'pending' as any },
+        }),
+        this.prisma.attendanceCorrectionRequest.count({
+          where: { groupId: id, organizationId, status: 'pending' },
+        }),
+        (this.prisma as any).vacationRequest.count({
+          where: {
+            groupId: id,
+            organizationId,
+            deletedAt: null,
+            OR: [
+              { status: 'pending' },
+              { status: 'approved', endDate: { gte: today } },
+            ],
+          },
+        }),
+        this.prisma.mealGuest.count({
+          where: { groupId: id, organizationId, pendingApproval: true },
+        }),
+      ]);
+
+    // "Active billing period / pending billing calculations": priced
+    // attendance newer than the last FINALIZED period end is an unsettled
+    // bill — finalize (lock) the period before deleting the group.
+    let unsettledBilling = 0;
+    if (mealPricingEnabled) {
+      const lastFinalized = await (this.prisma as any).billingPeriod.findFirst({
+        where: { groupId: id, organizationId, status: 'finalized' },
+        orderBy: { periodEnd: 'desc' },
+        select: { periodEnd: true },
+      });
+      unsettledBilling = await this.prisma.attendanceRecord.count({
+        where: {
+          groupId: id,
+          organizationId,
+          price: { not: null },
+          ...(lastFinalized
+            ? { attendanceDate: { gt: lastFinalized.periodEnd } }
+            : {}),
+        },
+      });
+    }
+
+    const blockers: Record<string, string> = {};
+    if (unsettledBilling > 0) {
+      blockers.billing = `Finalize the current billing period first (${unsettledBilling} unbilled records)`;
+    }
+    if (pendingCorrections > 0) {
+      blockers.corrections = `${pendingCorrections} pending correction request(s)`;
+    }
+    if (activeVacations > 0) {
+      blockers.vacations = `${activeVacations} pending/active vacation request(s)`;
+    }
+    if (pendingGuests > 0) {
+      blockers.guests = `${pendingGuests} pending guest booking(s)`;
+    }
+    if (pendingJoins > 0) {
+      blockers.joinRequests = `${pendingJoins} pending join request(s)`;
+    }
+    if (Object.keys(blockers).length > 0) {
+      throw new ConflictException({
+        message:
+          'This group has unfinished workflows. Resolve them first, or archive the group — archived groups are automatically deleted after the retention period.',
+        code: 'GROUP_DELETE_BLOCKED',
+        errors: blockers,
+      });
+    }
+  }
 
   /**
    * GRP-019: permanently delete a Group and ALL of its data. Irreversible —
@@ -758,6 +921,13 @@ export class GroupsService {
   ) {
     const existing = await this.groupsRepo.findById(id, organizationId, true);
     if (!existing) throw new NotFoundException('Group not found');
+
+    // SRS Module 03 GLC-004: immediate deletion requires a clean slate.
+    await this.assertNoOperationalBlockers(
+      id,
+      organizationId,
+      existing.mealPricingEnabled === true,
+    );
 
     // Snapshot identity for the audit trail BEFORE the row is gone (ORG-016).
     this.audit.log({
@@ -1690,6 +1860,8 @@ export class GroupsService {
       vacationRequiresApproval: (group as any).vacationRequiresApproval ?? false,
       billingCycleStartDay: (group as any).billingCycleStartDay ?? null,
       mealPricingEnabled: group.mealPricingEnabled,
+      // SRS Module 03 (survey Q17/Q22): Bill-Skip policy (default OFF).
+      billSkippedMeals: (group as any).billSkippedMeals ?? false,
       // SRS FR-TIME-005: per-group late-marking grace (minutes, 0 = none).
       attendanceGraceMinutes: group.attendanceGraceMinutes ?? 0,
       // SRS FR-TRUST-001/003: trust model (opt-in default) + fair floor.

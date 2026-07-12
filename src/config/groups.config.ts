@@ -58,6 +58,17 @@ export default registerAs('groups', () => {
     // Fallback role member limit for any role not explicitly configured above.
     defaultRoleMemberLimit: intOr(process.env.GROUPS_ROLE_LIMIT_DEFAULT, 50),
 
+    // SRS Module 03 GLC-003 (survey Q7): archived groups are restorable for
+    // this many days, then automatically PERMANENTLY deleted with NO
+    // operational validation (the group has already been inactive that long).
+    archiveRetentionDays: intOr(process.env.GROUP_ARCHIVE_RETENTION_DAYS, 30),
+
+    // Sweep cadence for the archived-group purge (minutes; 0 disables).
+    archivePurgeSweepMinutes: intOr(
+      process.env.GROUP_ARCHIVE_PURGE_SWEEP_MINUTES,
+      720,
+    ),
+
     // GRP-004: minimum Maximum-Members an admin must set when capping a group.
     // Used as the floor of the create-time range check (default 2 → "2 to N").
     minMembers: intOr(process.env.GROUPS_MIN_MEMBERS, 2),

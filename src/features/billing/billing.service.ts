@@ -492,9 +492,16 @@ export class BillingService {
   }
 
   /**
-   * Pass 12 (FR-BILLX-020/041): the group's current billing period computed
-   * in the org timezone. billingCycleStartDay=N → [N of this-or-last month,
-   * N-1 of the next]; null → calendar month.
+   * Pass 12 (FR-BILLX-020/041) + SRS Module 03 BILL-012 (survey Q8/Q20):
+   * the group's current billing period computed in the org timezone.
+   * billingCycleStartDay=N (1–31) → [effective N of this-or-last month,
+   * day before the next effective N]; null → calendar month.
+   *
+   * When the configured anchor day does not exist in a month the EFFECTIVE
+   * anchor clamps to that month's last calendar day — the configured value
+   * itself never changes. Anchor-31 example: 31 Jan → 27 Feb, 28 Feb →
+   * 30 Mar, 31 Mar → 29 Apr. Every date belongs to exactly one period —
+   * no gaps, no overlaps, leap years automatic.
    */
   resolveCurrentPeriod(
     todayStr: string,
@@ -509,15 +516,22 @@ export class BillingService {
         toDate: end.toISOString().slice(0, 10),
       };
     }
-    const anchor =
-      d >= cycleStartDay
-        ? new Date(Date.UTC(y, m - 1, cycleStartDay))
-        : new Date(Date.UTC(y, m - 2, cycleStartDay));
-    const end = new Date(anchor.getTime());
-    end.setUTCMonth(end.getUTCMonth() + 1);
+    // months0 is 0-based and may be negative/overflowing — Date.UTC
+    // normalizes it, so previous/next-month math stays trivial.
+    const effectiveAnchor = (year: number, months0: number): Date => {
+      const lastDay = new Date(Date.UTC(year, months0 + 1, 0)).getUTCDate();
+      return new Date(
+        Date.UTC(year, months0, Math.min(cycleStartDay, lastDay)),
+      );
+    };
+    const anchorThisMonth = effectiveAnchor(y, m - 1);
+    const inCurrent = d >= anchorThisMonth.getUTCDate();
+    const start = inCurrent ? anchorThisMonth : effectiveAnchor(y, m - 2);
+    const nextAnchor = inCurrent ? effectiveAnchor(y, m) : anchorThisMonth;
+    const end = new Date(nextAnchor.getTime());
     end.setUTCDate(end.getUTCDate() - 1);
     return {
-      fromDate: anchor.toISOString().slice(0, 10),
+      fromDate: start.toISOString().slice(0, 10),
       toDate: end.toISOString().slice(0, 10),
     };
   }

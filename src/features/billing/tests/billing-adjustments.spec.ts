@@ -152,4 +152,34 @@ describe('BillingService adjustments (Pass 12)', () => {
       toDate: '2026-08-04',
     });
   });
+
+  // SRS Module 03 BILL-012 (survey Q20): anchor days 29–31 clamp to a short
+  // month's last calendar day — the SRS's exact anchor-31 examples.
+  it('anchor 31 clamps to short months with no gaps/overlaps (BILL-012)', () => {
+    // Mid-Feb (non-leap 2027), anchor 31 → period is 31 Jan → 27 Feb.
+    expect(service.resolveCurrentPeriod('2027-02-15', 31)).toEqual({
+      fromDate: '2027-01-31',
+      toDate: '2027-02-27',
+    });
+    // 28 Feb (effective anchor for Feb) starts the next period → 30 Mar.
+    expect(service.resolveCurrentPeriod('2027-02-28', 31)).toEqual({
+      fromDate: '2027-02-28',
+      toDate: '2027-03-30',
+    });
+    // 31 Mar → 29 Apr (April's effective anchor is the 30th).
+    expect(service.resolveCurrentPeriod('2027-03-31', 31)).toEqual({
+      fromDate: '2027-03-31',
+      toDate: '2027-04-29',
+    });
+    // Leap year: Feb 2028's effective anchor is the 29th.
+    expect(service.resolveCurrentPeriod('2028-02-29', 31)).toEqual({
+      fromDate: '2028-02-29',
+      toDate: '2028-03-30',
+    });
+    // 30 Apr (effective anchor) → 30 May (day before 31 May).
+    expect(service.resolveCurrentPeriod('2027-04-30', 31)).toEqual({
+      fromDate: '2027-04-30',
+      toDate: '2027-05-30',
+    });
+  });
 });

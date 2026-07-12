@@ -153,6 +153,37 @@ export class StorageService {
   }
 
   /**
+   * SRS Module 03 NTC-012/013: upload a notice attachment (one image ≤100 KB
+   * or one document ≤50 KB — size/type validation happens in NoticesService)
+   * and return its absolute public URL. Never base64 in the DB.
+   * Key: org/{orgId}/notices/{noticeId}/{timestamp}.{ext}
+   */
+  async uploadNoticeAttachment(
+    organizationId: string,
+    noticeId: string,
+    buffer: Buffer,
+    mimeType: string,
+    ext: string,
+  ): Promise<string> {
+    const key = `org/${organizationId}/notices/${noticeId}/${Date.now()}.${ext}`;
+    await this.getClient().send(
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        Body: buffer,
+        ContentType: mimeType,
+        CacheControl: 'public, max-age=31536000, immutable',
+      }),
+    );
+    const base =
+      this.cdnUrl || `${this.config.get<string>('MINIO_ENDPOINT')}/${this.bucket}`;
+    this.logger.log(
+      `Uploaded notice attachment org=${organizationId} notice=${noticeId} (${mimeType})`,
+    );
+    return `${base}/${key}`;
+  }
+
+  /**
    * Derive the storage object key from a previously-returned public URL, so the
    * old object can be deleted on replace. Returns null for non-storage URLs
    * (e.g. an external URL or a base64 data URI) — those are left untouched.

@@ -61,6 +61,7 @@ const GROUP_SELECT = {
   guestAdultPrice: true,
   guestChildPrice: true,
   guestSurcharge: true,
+  guestSurchargeType: true,
   guestRequiresApproval: true,
   guestCutoffMinutesBeforeClose: true,
   guestAdvanceBookingDays: true,
@@ -1034,6 +1035,7 @@ export class GuestsService {
       guestAdultPrice: number | null;
       guestChildPrice: number | null;
       guestSurcharge: number | null;
+      guestSurchargeType?: string | null;
     },
     effectiveMealPrice: number | null,
     isAdult: boolean,
@@ -1046,7 +1048,13 @@ export class GuestsService {
         : (group.guestChildPrice ?? group.guestAdultPrice ?? effectiveMealPrice);
     }
     if (mode === 'flatSurcharge') {
-      return (effectiveMealPrice ?? 0) + (group.guestSurcharge ?? 0);
+      const base = effectiveMealPrice ?? 0;
+      // SRS Module 03 GST-011: the surcharge is a Fixed ₹ amount (default) OR
+      // a Percentage of the final effective member price — never both.
+      if ((group.guestSurchargeType ?? 'fixed') === 'percent') {
+        return base + Math.round((base * (group.guestSurcharge ?? 0)) / 100);
+      }
+      return base + (group.guestSurcharge ?? 0);
     }
     return effectiveMealPrice; // sameAsMember
   }

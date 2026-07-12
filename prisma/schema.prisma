@@ -243,7 +243,11 @@ model Group {
   vacationRequiresApproval Boolean @default(false)
   // SRS FR-BILLX-020 (Pass 12): day-of-month (1–28) the billing cycle starts.
   // Null = calendar month. All period math uses the org timezone.
+  // BILL-012: 1–31; effective anchor clamps to a short month's last day.
   billingCycleStartDay Int?
+  // SRS Module 03 RET-012/013/015: next rolling retention review instant.
+  // Null = not yet initialized (first sweep sets createdAt + 3 months).
+  retentionReviewAt DateTime?
   // Additive: when ON, meals carry a ₹ price; shown to students + used for billing/exports
   mealPricingEnabled   Boolean  @default(false)
   // SRS FR-TIME-005 (LOOP-090): per-group grace period (minutes) that extends
@@ -268,13 +272,20 @@ model Group {
   guestPricingMode              String? // sameAsMember | flatSurcharge | perGuestPrice
   guestAdultPrice               Int?    // perGuestPrice mode
   guestChildPrice               Int?    // perGuestPrice mode
-  guestSurcharge                Int?    // flatSurcharge mode (added to meal price)
+  guestSurcharge                Int?    // flatSurcharge mode (added to meal price; ₹ when fixed, % when percent)
+  // SRS Module 03 GST-011: surcharge calculation method for flatSurcharge mode.
+  // 'fixed' (default, ₹ amount) | 'percent' (% of final effective member price).
+  guestSurchargeType            String? // fixed | percent (null = fixed)
   guestRequiresApproval         Boolean @default(false)
   guestCutoffMinutesBeforeClose Int?    // null = 0 (bookable until close)
   guestAdvanceBookingDays       Int?    // null = 0 (same-day only)
   guestPreferenceRequired       Boolean @default(false)
   allowGuestWithoutHost         Boolean @default(false)
   billNoShowGuests              Boolean @default(true) // LOOP-013 policy
+  // SRS Module 03 (survey Q17/Q22): "Bill Skip" policy — when ON, member-chosen
+  // Absent AND system-generated Skip are billed at the final scheduled price
+  // (base + day override, no add-ons). Default OFF = today's live behaviour.
+  billSkippedMeals              Boolean @default(false)
 
   maxMembers Int?
 
@@ -822,6 +833,13 @@ model Notice {
   // scope (audience-gated), the legacy behaviour.
   targetUserId   String?
   pinned         Boolean   @default(false)
+  // SRS Module 03 NTC-003/012/013: optional rich content — at most ONE image
+  // (≤100 KB, MinIO URL), ONE document (≤50 KB; pdf/doc/docx/txt, MinIO URL)
+  // and external hyperlinks. Base64 storage is not permitted.
+  imageUrl       String?
+  documentUrl    String?
+  documentName   String?
+  externalLinks  String[]  @default([])
   publishedAt    DateTime  @default(now())
   expiresAt      DateTime?
   isActive       Boolean   @default(true)     // soft delete / archive
@@ -934,6 +952,27 @@ model MealGuest {
 /// A 'finalized' period locks all attendance/billing writes for dates inside
 /// [periodStart, periodEnd] (423 PERIOD_FINALIZED); 'reopened' lifts the lock
 /// (audited, reason mandatory) until an admin re-finalizes.
+// SRS Module 03 RPT-009/010/011 + RET-001..015: pre-purge archive record.
+// The generated Excel + PDF in MinIO become the administrator's PERMANENT
+// copy of everything removed from the live database (RET-010).
+model GroupArchive {
+  id             String   @id @default(cuid())
+  organizationId String
+  groupId        String
+  groupName      String   // snapshot — survives later group deletion
+  periodStart    DateTime // earliest archived business date (UTC midnight)
+  periodEnd      DateTime // latest archived business date (inclusive)
+  excelUrl       String
+  pdfUrl         String?
+  recordCounts   Json?    // per-dataset row counts for the audit trail
+  generatedAt    DateTime @default(now())
+  purgedAt       DateTime? // when the live rows were removed
+
+  @@index([organizationId])
+  @@index([groupId, generatedAt])
+  @@map("group_archives")
+}
+
 model BillingPeriod {
   id             String   @id @default(cuid())
   organizationId String   // tenant isolation (from JWT, never client)
@@ -1006,6 +1045,10 @@ model AttendanceCorrectionRequest {
   requestType         String
   requestedStatus     String? // target AttendanceStatus for claim/correct types
   requestedPreference String? // for fix_preference
+  // SRS Module 03 ATT-004/COR-006: the member's full preference-group
+  // selection set submitted with the correction (same shape as marking).
+  // Applied verbatim on approval — the admin never edits it.
+  requestedSelections Json?
   reason              String?
   evidenceUrl         String? // optional photo proof (MinIO URL)
 

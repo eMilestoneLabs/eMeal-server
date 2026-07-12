@@ -320,10 +320,12 @@ export class SchedulesService {
         entries,
       );
     } else {
-      // FR-MEAL-032 (ISSUE-4/ISSUE-11): validate the existing draft entries
-      // BEFORE the flag-flip publish — a stale entry (meal deleted/disabled
-      // since the draft was saved) fails with an actionable 422 identifying
-      // the day + meal instead of publishing a broken week.
+      // SRS Module 03 MMT-011 (publish-blocked bug): entries referencing a
+      // meal deleted/disabled since the draft was saved previously failed the
+      // whole publish with a 422 — permanently, because nothing ever cleaned
+      // them up. A master meal deletion must be REMOVED from future days on
+      // re-publish, never block it: stale entries are auto-dropped (audited),
+      // then the remaining valid week publishes.
       const existing = await this.schedulesRepo.findById(id, organizationId);
       if (!existing) {
         throw new NotFoundException({
@@ -336,15 +338,31 @@ export class SchedulesService {
           existing.groupId,
           organizationId,
         );
-        for (const e of existing.entries) {
-          if (!knownMealIds.has(e.mealId)) {
-            throw SchedulesService.entryMealInvalid(
-              e.mealId,
-              e.dayOfWeek,
-              e.mealName ?? e.meal?.displayName ?? e.meal?.name ?? null,
-              'meal no longer exists or is disabled',
-            );
-          }
+        const stale = existing.entries.filter(
+          (e) => !knownMealIds.has(e.mealId),
+        );
+        if (stale.length > 0) {
+          await this.schedulesRepo.deleteEntriesByIds(
+            id,
+            organizationId,
+            stale.map((e) => e.id),
+          );
+          this.audit.log({
+            organizationId,
+            actorId: adminId,
+            targetId: id,
+            targetType: 'MealSchedule',
+            action: 'update',
+            metadata: {
+              autoRemovedStaleEntries: stale.map((e) => ({
+                mealId: e.mealId,
+                mealName: e.mealName ?? e.meal?.displayName ?? e.meal?.name ?? null,
+                dayOfWeek: e.dayOfWeek,
+              })),
+              reason: 'meal deleted or disabled after drafting (MMT-011)',
+            },
+            requestId,
+          });
         }
       }
       schedule = await this.schedulesRepo.publish(id, organizationId);
@@ -512,19 +530,24 @@ export class SchedulesService {
     }> = [];
 
     // FR-MEAL-032 (ISSUE-4/ISSUE-11): validate ALL entries against the group's
-    // active meal catalogue in ONE query (previously one ownership query per
-    // entry) and reject with an actionable, machine-readable 422 identifying
-    // the exact day + meal — never an opaque "Meal Invalid".
-    const knownMealIds = await this.activeMealIds(groupId, organizationId);
+    // meal catalogue in ONE query and reject genuine client errors with an
+    // actionable, machine-readable 422 identifying the exact day + meal.
+    //
+    // SRS Module 03 MMT-011 (publish-blocked bug): a meal deleted or disabled
+    // AFTER the week was drafted is NOT a client error — it is auto-dropped
+    // here, so saving/publishing a week can never be permanently blocked by a
+    // master-config change. Only a mealId the group has never known rejects.
+    const { active, known } = await this.mealCatalogue(groupId, organizationId);
 
     for (const entry of entriesDto) {
       const date = parseLocalDate(entry.date);
-      if (!knownMealIds.has(entry.mealId)) {
+      if (!active.has(entry.mealId)) {
+        if (known.has(entry.mealId)) continue; // deleted/disabled — auto-drop
         throw SchedulesService.entryMealInvalid(
           entry.mealId,
           toDayOfWeek(date),
           entry.mealName ?? null,
-          'meal not found in this group (deleted, disabled, or wrong group)',
+          'meal not found in this group',
         );
       }
       validatedEntries.push({
@@ -564,6 +587,29 @@ export class SchedulesService {
       limit: SchedulesService.MAX_GROUP_MEALS,
     });
     return new Set(catalogue.data.map((m) => m.id));
+  }
+
+  /**
+   * SRS Module 03 MMT-011: full meal catalogue split into active vs known —
+   * an entry whose meal is KNOWN but inactive (deleted/disabled after
+   * drafting) is auto-dropped, not an error; an entry whose meal is entirely
+   * unknown to the group is a genuine client error and still rejects.
+   */
+  private async mealCatalogue(
+    groupId: string,
+    organizationId: string,
+  ): Promise<{ active: Set<string>; known: Set<string> }> {
+    const catalogue = await this.mealsRepo.findByGroup(groupId, organizationId, {
+      page: 1,
+      limit: SchedulesService.MAX_GROUP_MEALS,
+      includeDisabled: true,
+    });
+    return {
+      active: new Set(
+        catalogue.data.filter((m) => m.isActive).map((m) => m.id),
+      ),
+      known: new Set(catalogue.data.map((m) => m.id)),
+    };
   }
 
   /**

@@ -19,6 +19,11 @@ export class NoticeSerializer {
       linkType: n.linkType ?? null,
       targetUserId: n.targetUserId ?? null,
       pinned: n.pinned,
+      // SRS Module 03 NTC-003/012/013: rich content (additive keys).
+      imageUrl: n.imageUrl ?? null,
+      documentUrl: n.documentUrl ?? null,
+      documentName: n.documentName ?? null,
+      externalLinks: n.externalLinks ?? [],
       publishedAt: n.publishedAt.toISOString(),
       expiresAt: n.expiresAt ? n.expiresAt.toISOString() : null,
       isActive: n.isActive,

@@ -49,6 +49,9 @@ export class GroupSerializer {
       guestAdultPrice: group.guestAdultPrice ?? null,
       guestChildPrice: group.guestChildPrice ?? null,
       guestSurcharge: group.guestSurcharge ?? null,
+      // SRS Module 03 GST-011: surcharge method ('fixed' default preserves
+      // pre-existing behaviour for groups configured before this field).
+      guestSurchargeType: group.guestSurchargeType ?? 'fixed',
       guestRequiresApproval: group.guestRequiresApproval ?? false,
       guestCutoffMinutesBeforeClose: group.guestCutoffMinutesBeforeClose ?? 0,
       guestAdvanceBookingDays: group.guestAdvanceBookingDays ?? 0,
@@ -121,6 +124,8 @@ export class GroupSerializer {
         vacationRequiresApproval: group.vacationRequiresApproval ?? false,
         billingCycleStartDay: group.billingCycleStartDay ?? null,
         mealPricingEnabled: group.mealPricingEnabled,
+        // SRS Module 03 (survey Q17/Q22): Bill-Skip policy (default OFF).
+        billSkippedMeals: group.billSkippedMeals ?? false,
         // SRS FR-TIME-005: per-group late-marking grace (minutes, 0 = none).
         attendanceGraceMinutes: group.attendanceGraceMinutes ?? 0,
         // SRS FR-TRUST-001/003: trust model ('absent' opt-in default) + floor.

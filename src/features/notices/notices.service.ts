@@ -3,9 +3,11 @@ import {
   Logger,
   Inject,
   Optional,
+  BadRequestException,
   NotFoundException,
   ForbiddenException,
 } from '@nestjs/common';
+import { StorageService } from '../../storage/storage.service';
 import { NoticesRepository } from './repositories/notices.repository';
 import { NoticeSerializer } from './serializers/notice.serializer';
 import { AuditService } from '../../audit/audit.service';
@@ -35,7 +37,96 @@ export class NoticesService {
     @Optional()
     @Inject('REALTIME_GATEWAY')
     private readonly realtime: RealtimeEventsService | null = null,
+    // SRS Module 03 NTC-012/013: MinIO attachment uploads. @Optional so unit
+    // tests construct the service unchanged (attachments then rejected).
+    @Optional()
+    @Inject(StorageService)
+    private readonly storage: StorageService | null = null,
   ) {}
+
+  // ── SRS Module 03 NTC-012/013 — attachment validation ──────────────────────
+
+  /** Decode a base64 data URI → { buffer, mimeType }; null when not one. */
+  private static decodeDataUri(
+    data: string,
+  ): { buffer: Buffer; mimeType: string } | null {
+    const m = /^data:([\w.+/-]+);base64,(.+)$/s.exec(data);
+    if (!m) return null;
+    try {
+      return { buffer: Buffer.from(m[2], 'base64'), mimeType: m[1] };
+    } catch {
+      return null;
+    }
+  }
+
+  private static readonly IMAGE_TYPES: Record<string, string> = {
+    'image/jpeg': 'jpg',
+    'image/jpg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+  };
+
+  private static readonly DOC_TYPES: Record<string, string> = {
+    'application/pdf': 'pdf',
+    'application/msword': 'doc',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+      'docx',
+    'text/plain': 'txt',
+  };
+
+  /**
+   * NTC-012: validate the (client-compressed) image — JPG/JPEG/PNG/WEBP,
+   * decoded ≤100 KB — with the exact SRS rejection message.
+   */
+  private validateImageAttachment(data: string): {
+    buffer: Buffer;
+    mimeType: string;
+    ext: string;
+  } {
+    const decoded = NoticesService.decodeDataUri(data);
+    const ext = decoded && NoticesService.IMAGE_TYPES[decoded.mimeType];
+    if (!decoded || !ext) {
+      throw new BadRequestException({
+        message: 'Unsupported image format. Use JPG, JPEG, PNG or WEBP.',
+        errors: { imageData: 'Unsupported format' },
+      });
+    }
+    const maxBytes =
+      this.config.get<number>('NOTICE_IMAGE_MAX_KB', 100) * 1024;
+    if (decoded.buffer.length > maxBytes) {
+      throw new BadRequestException({
+        message:
+          'Unable to upload image. Please select an image smaller than 100 KB.',
+        errors: { imageData: 'Image exceeds the 100 KB limit' },
+      });
+    }
+    return { ...decoded, ext };
+  }
+
+  /** NTC-013: validate the document — PDF/DOC/DOCX/TXT, decoded ≤50 KB. */
+  private validateDocumentAttachment(data: string): {
+    buffer: Buffer;
+    mimeType: string;
+    ext: string;
+  } {
+    const decoded = NoticesService.decodeDataUri(data);
+    const ext = decoded && NoticesService.DOC_TYPES[decoded.mimeType];
+    if (!decoded || !ext) {
+      throw new BadRequestException({
+        message: 'Unsupported document format. Use PDF, DOC, DOCX or TXT.',
+        errors: { documentData: 'Unsupported format' },
+      });
+    }
+    const maxBytes = this.config.get<number>('NOTICE_DOC_MAX_KB', 50) * 1024;
+    if (decoded.buffer.length > maxBytes) {
+      throw new BadRequestException({
+        message:
+          'Unable to upload document. Please select a document smaller than 50 KB.',
+        errors: { documentData: 'Document exceeds the 50 KB limit' },
+      });
+    }
+    return { ...decoded, ext };
+  }
 
   /** NTF-005: configurable bell retention window in days (default 30). */
   private retentionDays(): number {
@@ -153,7 +244,22 @@ export class NoticesService {
     dto: CreateNoticeDto,
     requestId?: string,
   ) {
-    const notice = await this.repo.create({
+    // SRS Module 03 NTC-012/013: validate attachments BEFORE any write so a
+    // rejected file never leaves a half-created notice behind.
+    const image = dto.imageData
+      ? this.validateImageAttachment(dto.imageData)
+      : null;
+    const doc = dto.documentData
+      ? this.validateDocumentAttachment(dto.documentData)
+      : null;
+    if ((image || doc) && !this.storage) {
+      throw new BadRequestException({
+        message: 'Attachment storage is not available right now — publish without attachments or retry later.',
+        errors: { imageData: 'Storage unavailable' },
+      });
+    }
+
+    let notice = await this.repo.create({
       organizationId,
       groupId: dto.groupId ?? null,
       createdBy: adminId,
@@ -162,7 +268,39 @@ export class NoticesService {
       priority: dto.priority ?? 'normal',
       pinned: dto.pinned ?? false,
       expiresAt: dto.expiresAt ? new Date(dto.expiresAt) : null,
+      externalLinks: dto.externalLinks ?? [],
     });
+
+    // Upload AFTER the row exists — the notice id keys the MinIO objects
+    // (same base64-never-in-DB discipline as meal images).
+    if (image || doc) {
+      const patch: {
+        imageUrl?: string | null;
+        documentUrl?: string | null;
+        documentName?: string | null;
+      } = {};
+      if (image) {
+        patch.imageUrl = await this.storage!.uploadNoticeAttachment(
+          organizationId,
+          notice.id,
+          image.buffer,
+          image.mimeType,
+          image.ext,
+        );
+      }
+      if (doc) {
+        patch.documentUrl = await this.storage!.uploadNoticeAttachment(
+          organizationId,
+          notice.id,
+          doc.buffer,
+          doc.mimeType,
+          doc.ext,
+        );
+        patch.documentName =
+          dto.documentName ?? `attachment.${doc.ext}`;
+      }
+      notice = await this.repo.update(notice.id, organizationId, patch);
+    }
 
     this.audit.log({
       organizationId,

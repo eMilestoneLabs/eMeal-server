@@ -14,6 +14,7 @@ import {
 import { AttendanceService } from './attendance.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { EmailVerifiedGuard } from '../../common/guards/email-verified.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { MarkAttendanceDto } from './dto/mark-attendance.dto';
@@ -60,6 +61,8 @@ export class AttendanceController {
 
   @Post()
   @HttpCode(HttpStatus.OK)
+  // SRS Module 03 ACC-005: verification required to participate.
+  @UseGuards(EmailVerifiedGuard)
   async markAttendance(
     @CurrentUser() user: { sub: string; organizationId: string; role: string },
     @Body() dto: MarkAttendanceDto,
@@ -74,6 +77,7 @@ export class AttendanceController {
 
   @Post('bulk')
   @HttpCode(HttpStatus.OK)
+  @UseGuards(EmailVerifiedGuard) // ACC-005
   async bulkMarkAttendance(
     @CurrentUser() user: { sub: string; organizationId: string; role: string },
     @Body() dto: BulkAttendanceDto,
@@ -285,6 +289,7 @@ export class AttendanceController {
 
   @Patch(':id')
   @HttpCode(HttpStatus.OK)
+  @UseGuards(EmailVerifiedGuard) // ACC-005
   async updateAttendance(
     @CurrentUser() user: { sub: string; organizationId: string; role: string },
     @Param('id') id: string,

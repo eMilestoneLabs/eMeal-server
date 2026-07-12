@@ -59,6 +59,16 @@ export const JOB_TYPES = {
   // B6 but had NO production caller — the reminder pipeline was dormant.
   // This sweep enqueues today's delayed dispatch jobs (jobId-deduped).
   REMINDER_SCHEDULE_SWEEP: 'reminder-schedule-sweep',
+  // SRS Module 03 ATT-010: Personal Auto-Attendance — opted-in members are
+  // marked Present the moment their meal's window OPENS (not at close).
+  // Rides the system-default queue like the sweeps above.
+  AUTO_ATTENDANCE_SWEEP: 'auto-attendance-sweep',
+  // SRS Module 03 GLC-003: archived groups auto-purge after the retention
+  // period (default 30 days) with NO operational validation.
+  GROUP_ARCHIVE_PURGE_SWEEP: 'group-archive-purge-sweep',
+  // SRS Module 03 RET-001..015: rolling 3-month operational-data retention —
+  // reminders → grace → auto-finalize → Excel+PDF archive → purge.
+  RETENTION_SWEEP: 'retention-sweep',
 
   // analytics-queue
   AGGREGATE_DAILY: 'aggregate-daily',

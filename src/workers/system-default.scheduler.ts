@@ -146,6 +146,94 @@ export class SystemDefaultSweepScheduler implements OnApplicationBootstrap {
       }
     }
 
+    // SRS Module 03 ATT-010: Personal Auto-Attendance materialization at
+    // window OPEN. Cheap when nobody opted in (one indexed distinct query).
+    const autoAttendMinutes = this.config.get<number>(
+      'attendance.autoAttendanceSweepMinutes',
+      2,
+    );
+    if (!autoAttendMinutes || autoAttendMinutes <= 0) {
+      this.logger.log('Auto-attendance sweep disabled (interval = 0)');
+    } else {
+      try {
+        await this.queue.add(
+          JOB_TYPES.AUTO_ATTENDANCE_SWEEP,
+          {},
+          {
+            repeat: { every: autoAttendMinutes * 60_000 },
+            removeOnComplete: { count: 20 },
+            removeOnFail: { count: 20 },
+          },
+        );
+        this.logger.log(
+          `Auto-attendance sweep scheduled every ${autoAttendMinutes} minute(s)`,
+        );
+      } catch (err) {
+        this.logger.error(
+          `Failed to schedule auto-attendance sweep: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    // SRS Module 03 GLC-003: archived-group retention purge (default 12h).
+    const archivePurgeMinutes = this.config.get<number>(
+      'groups.archivePurgeSweepMinutes',
+      720,
+    );
+    if (!archivePurgeMinutes || archivePurgeMinutes <= 0) {
+      this.logger.log('Group-archive purge sweep disabled (interval = 0)');
+    } else {
+      try {
+        await this.queue.add(
+          JOB_TYPES.GROUP_ARCHIVE_PURGE_SWEEP,
+          {},
+          {
+            repeat: { every: archivePurgeMinutes * 60_000 },
+            removeOnComplete: { count: 20 },
+            removeOnFail: { count: 20 },
+          },
+        );
+        this.logger.log(
+          `Group-archive purge sweep scheduled every ${archivePurgeMinutes} minute(s)`,
+        );
+      } catch (err) {
+        this.logger.error(
+          `Failed to schedule group-archive purge sweep: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    // SRS Module 03 RET-001..015: rolling 3-month data-retention sweep
+    // (reminders → grace → auto-finalize → archive → purge). Default 6h; the
+    // per-group `retentionReviewAt` pointer makes each pass a cheap indexed
+    // read for groups that are not yet due.
+    const retentionMinutes = this.config.get<number>(
+      'retention.sweepMinutes',
+      360,
+    );
+    if (!retentionMinutes || retentionMinutes <= 0) {
+      this.logger.log('Retention sweep disabled (interval = 0)');
+    } else {
+      try {
+        await this.queue.add(
+          JOB_TYPES.RETENTION_SWEEP,
+          {},
+          {
+            repeat: { every: retentionMinutes * 60_000 },
+            removeOnComplete: { count: 20 },
+            removeOnFail: { count: 20 },
+          },
+        );
+        this.logger.log(
+          `Retention sweep scheduled every ${retentionMinutes} minute(s)`,
+        );
+      } catch (err) {
+        this.logger.error(
+          `Failed to schedule retention sweep: ${(err as Error).message}`,
+        );
+      }
+    }
+
     // Pass 15 (FR-NOTX-010): attendance-reminder scheduling sweep — the
     // 30/10-min pre-close reminder producer had no caller since B6, so the
     // reminder pipeline never fired. Enqueue-side jobId dedup + the dispatch
