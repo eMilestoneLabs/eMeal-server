@@ -100,10 +100,15 @@ export class AdminSignupDto {
   @IsIn(['male', 'female', 'other', 'prefer_not_to_say'])
   gender?: string;
 
-  // Organization info for admin signup
-  @IsOptional()
+  // Organization info for admin signup — MANDATORY and globally unique: an admin
+  // must supply an organization name, and it may not collide with an existing
+  // organization (enforced in the service on the normalized slug). Trim first so
+  // a whitespace-only value is rejected by @IsNotEmpty.
   @IsString()
-  organizationName?: string;
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsNotEmpty({ message: 'Organization name is required' })
+  @MaxLength(30, { message: 'Organization name must be 30 characters or fewer' })
+  organizationName: string;
 
   @IsOptional()
   @IsString()

@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
-import { UserRole } from '@prisma/client';
+import { UserRole, Prisma } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { createHash, randomInt } from 'crypto';
 import { ulid } from 'ulid';
@@ -102,39 +102,73 @@ export class AuthService {
       this.configService.get<number>('app.bcryptRounds') ?? 12,
     );
 
-    // BUGFIX (Admin.md: "Organization created automatically on signup, slug
-    // generated from name"): an organization is auto-created for EVERY admin.
-    // The frozen admin signup form sends no organizationName, so we derive one
-    // from the admin's name; an explicit organizationName is still honored.
-    // Without this, admins had organizationId=null and could not create groups.
-    const orgName =
-      dto.organizationName && dto.organizationName.trim()
-        ? dto.organizationName.trim()
-        : `${dto.name}'s Organization`;
-
-    const baseSlug =
-      (((dto.organizationSlug && dto.organizationSlug.trim()) || orgName)
-        .toLowerCase()
-        .replace(/\s+/g, '-')
-        .replace(/[^a-z0-9-]/g, '')
-        .replace(/-+/g, '-')
-        .replace(/^-+|-+$/g, '')) || 'org';
-
-    // Ensure slug uniqueness. An explicit organizationName collision is rejected
-    // (preserves prior behavior); an auto-derived slug gets a short unique suffix
-    // so signup never fails for two admins with the same name.
-    let slug = baseSlug;
-    if (await this.authRepo.slugExists(slug)) {
-      if (dto.organizationName) {
-        throw new ConflictException({
-          message: 'Validation failed',
-          errors: { organizationSlug: 'Organization with this name already exists' },
-        });
-      }
-      slug = `${baseSlug}-${ulid().slice(-6).toLowerCase()}`;
+    // Admin.md: an organization is auto-created for EVERY admin on signup, with
+    // the slug generated from the name. The organization name is MANDATORY and
+    // GLOBALLY UNIQUE — an admin must provide a name that is not already taken;
+    // otherwise they are asked to choose another. Uniqueness is enforced on the
+    // normalized slug (the DB's unique key), so "Acme Mess" / "acme mess" /
+    // "Acme  Mess!" all count as the same organization.
+    // NOTE: the /auth/register + /auth/signup handlers take a raw body and cast
+    // to the DTO, so class-validator does NOT run on this path — every rule here
+    // is enforced in-service. Presence + length are bounded server-side (2–30,
+    // matching the admin form) so the rule holds even for direct API callers.
+    const orgName = dto.organizationName?.trim();
+    if (!orgName) {
+      throw new BadRequestException({
+        message: 'Validation failed',
+        errors: { organizationName: 'Organization name is required' },
+      });
+    }
+    if (orgName.length < 2 || orgName.length > 30) {
+      throw new BadRequestException({
+        message: 'Validation failed',
+        errors: { organizationName: 'Organization name must be 2–30 characters' },
+      });
     }
 
-    const org = await this.authRepo.createOrganization({ name: orgName, slug });
+    const slug = ((dto.organizationSlug && dto.organizationSlug.trim()) || orgName)
+      .toLowerCase()
+      .replace(/\s+/g, '-')
+      .replace(/[^a-z0-9-]/g, '')
+      .replace(/-+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    if (!slug) {
+      throw new BadRequestException({
+        message: 'Validation failed',
+        errors: { organizationName: 'Enter a valid organization name' },
+      });
+    }
+
+    if (await this.authRepo.slugExists(slug)) {
+      throw new ConflictException({
+        message: 'Validation failed',
+        errors: {
+          organizationName:
+            'This organization name is already taken. Please choose another.',
+        },
+        statusCode: 409,
+      });
+    }
+
+    // Create the org. A concurrent signup with the same name can still slip past
+    // the pre-check above, so translate the slug unique-constraint violation
+    // (P2002) into the same 409 instead of surfacing a 500.
+    let org: { id: string };
+    try {
+      org = await this.authRepo.createOrganization({ name: orgName, slug });
+    } catch (e) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        throw new ConflictException({
+          message: 'Validation failed',
+          errors: {
+            organizationName:
+              'This organization name is already taken. Please choose another.',
+          },
+          statusCode: 409,
+        });
+      }
+      throw e;
+    }
     const organizationId: string = org.id;
 
     const user = await this.usersRepo.create({

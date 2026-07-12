@@ -253,4 +253,66 @@ else
   skip "notice migration DB check" "postgres container not reachable from here" "FR-DB-MIGRATION"
 fi
 
+# ═════════════════════════════════════════════════════════════════════════════
+sec "DELIVERED FIX — signup conflict field-key contract (Live-Test-1 Issue 3)"
+# ═════════════════════════════════════════════════════════════════════════════
+# READ-ONLY (zero writes): the duplicate-identifier check throws BEFORE any user
+# row is created, so these /auth/register attempts create NOTHING (self-cleaning
+# by nature). They pin the backend contract the Flutter signup screens rely on to
+# place a conflict on the RIGHT field — a taken EMAIL → errors.email, a taken
+# MOBILE → errors.mobileNumber (never the wrong field, which was the bug).
+_UNIQ="$(date +%s)$$"
+# Existing EMAIL (+ a throwaway valid phone) → 409 carried on the `email` field.
+req_settle POST /auth/register \
+  "$(jq -nc --arg e "$ADMIN_EMAIL" '{name:"ZZ SRS Conflict",role:"student",email:$e,phone:"+19990000001",password:"ZzSrs!2345"}')" ""
+assert_code "duplicate email → 409" 409 "$R_CODE" "FR-AUTH-LT1-030"
+_EK="$(jbody '.errors.email // empty')"
+[ -n "$_EK" ] \
+  && ok "duplicate email conflict on 'email' field" "$_EK" "FR-AUTH-LT1-030" \
+  || no "email conflict missing errors.email" "$R_BODY" "FR-AUTH-LT1-030"
+
+# Existing MOBILE (+ a fresh unique email so the email check passes first) → 409
+# carried on the `mobileNumber` field (this is exactly the misrouted case).
+ADMIN_PHONE="$(req GET /auth/me "" "$ADMIN_TOKEN"; jbody '.phone // .data.phone // empty')"
+if [ -n "$ADMIN_PHONE" ]; then
+  req_settle POST /auth/register \
+    "$(jq -nc --arg p "$ADMIN_PHONE" --arg e "zz-srs-$_UNIQ@example.com" '{name:"ZZ SRS Conflict",role:"student",email:$e,phone:$p,password:"ZzSrs!2345"}')" ""
+  assert_code "duplicate mobile → 409" 409 "$R_CODE" "FR-AUTH-LT1-031"
+  _MK="$(jbody '.errors.mobileNumber // empty')"
+  [ -n "$_MK" ] \
+    && ok "duplicate mobile conflict on 'mobileNumber' field (NOT email)" "$_MK" "FR-AUTH-LT1-031" \
+    || no "mobile conflict missing errors.mobileNumber" "$R_BODY" "FR-AUTH-LT1-031"
+else
+  skip "duplicate mobile conflict field" "admin account has no phone on record" "FR-AUTH-LT1-031"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+sec "DELIVERED FIX — org name mandatory + globally unique (Live-Test-1)"
+# ═════════════════════════════════════════════════════════════════════════════
+# READ-ONLY: an empty name is rejected by DTO validation, and a duplicate name is
+# rejected BEFORE the organization/user rows are created — zero writes either way.
+# Admin MUST provide an organization name that is not already taken.
+req_settle POST /auth/register \
+  "$(jq -nc --arg e "zz-srs-org-$_UNIQ@example.com" '{name:"ZZ SRS Org",role:"hostelAdmin",email:$e,phone:"+19990000002",password:"ZzSrs!2345",organizationName:""}')" ""
+assert_in "admin empty org name → rejected" "$R_CODE" "FR-AUTH-LT1-032" 400 422
+_ONK="$(jbody '.errors.organizationName // empty')"
+[ -n "$_ONK" ] \
+  && ok "mandatory org name enforced on 'organizationName' field" "$_ONK" "FR-AUTH-LT1-032" \
+  || no "empty org name not reported on organizationName" "$R_BODY" "FR-AUTH-LT1-032"
+
+# Reusing an EXISTING org name (fresh email+phone so identity checks pass first)
+# → 409 on the organizationName field, so the admin must choose another.
+ADMIN_ORG="$(req GET /organizations/me "" "$ADMIN_TOKEN"; jbody '.name // .data.name // empty')"
+if [ -n "$ADMIN_ORG" ]; then
+  req_settle POST /auth/register \
+    "$(jq -nc --arg e "zz-srs-org2-$_UNIQ@example.com" --arg o "$ADMIN_ORG" '{name:"ZZ SRS Org",role:"hostelAdmin",email:$e,phone:"+19990000003",password:"ZzSrs!2345",organizationName:$o}')" ""
+  assert_code "duplicate org name → 409" 409 "$R_CODE" "FR-AUTH-LT1-033"
+  _DUP="$(jbody '.errors.organizationName // empty')"
+  [ -n "$_DUP" ] \
+    && ok "duplicate org name conflict on 'organizationName' field" "$_DUP" "FR-AUTH-LT1-033" \
+    || no "duplicate org name missing errors.organizationName" "$R_BODY" "FR-AUTH-LT1-033"
+else
+  skip "duplicate org name field" "could not resolve admin org name via /organizations/me" "FR-AUTH-LT1-033"
+fi
+
 [ "${SRS_SOURCED:-0}" = "1" ] || summary "DELIVERED-FIXES"
