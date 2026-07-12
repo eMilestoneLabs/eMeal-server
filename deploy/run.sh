@@ -47,6 +47,9 @@ reg() { MOD_NAMES+=("$1"); MOD_IMPACT["$1"]="$2"; MOD_DESC["$1"]="$3"; }
 # failures. So: light login-free/low-login modules first, and a throttle
 # cooldown (COOLDOWN below) is inserted before each login-heavy module. srs runs
 # LAST because its capacity ramp is the heaviest flooder.
+# diagnose runs FIRST: it samples CPU steal / load / top consumers BEFORE the
+# audit adds its own load, so slow numbers later can be attributed correctly.
+reg diagnose    RO    "Box-contention snapshot — CPU steal vs local hogs vs app, /health probe (diagnose-slowdown.sh)"
 reg benchmark   RO    "Endpoint speed battery — admin+student p95 vs SLO budgets (benchmark-full.sh)"
 reg certificate RO    "Graded production certificate — speed+stability+memory+db+redis+security+disk (generate-certificate.sh)"
 reg db          RO    "Database deep parameters — cache-hit, connections, index usage, bloat, autovacuum"
@@ -55,8 +58,17 @@ reg recovery    RO    "Auto-recovery configuration audit (verify-auto-recovery.s
 reg security    RO    "Security / pen-test probes — auth, isolation, injection, headers (srs/security.sh)"
 reg srs         RO    "SRS requirement validation — functional+security+performance vs the 664-req manifest (srs/run.sh; read-only unless --writes)"
 reg e2e         WRITE "Full feature end-to-end with SELF-CLEANING test writes (validate-e2e.sh)"
+reg mealcheck   WRITE "MODULE-03 Meal/Attendance/Billing SRS validation, self-cleaning (validate-meal-attendance-billing.sh)"
 reg production  WRITE "Full production validation incl. tenant-isolation writes (validate-production.sh)"
 reg load        HEAVY "EXTREME load / peak-hours simulation — k6 high-concurrency against localhost (loadtest.js)"
+# checklist stays LAST in the registry: it grades THIS run's module logs, so
+# every module selected above must have finished (and written its log) first.
+reg checklist   RO    "190-parameter enterprise checklist — evidence-graded from this run's logs + live probes (checklist-190.sh)"
+# NOT registered here (deliberately — they are OPERATIONAL, not observational,
+# and the baseline contract above says audits never modify anything):
+#   deploy.sh · backup.sh · backfill-email-verified.sh (runs inside deploy.sh)
+#   rotate-secrets.sh · harden-server.sh · setup-vps.sh · reset-for-launch.sh
+#   dr-drill.sh · minio-reconcile.sh · enable-pg-stat-statements.sh
 
 usage() {
   echo "Usage: bash deploy/run.sh [--all] [--<module> ...] [--writes] [--load] [--yes] [--help]"
@@ -182,6 +194,7 @@ run_module() { # $1 = name
   local m="$1" log="$REPORT_DIR/$1.log" rc=0
   echo; echo "═════ MODULE: $m  [${MOD_IMPACT[$m]}] ═════"
   case "$m" in
+    diagnose)    bash deploy/diagnose-slowdown.sh              2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     benchmark)   bash deploy/benchmark-full.sh                 2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     certificate) bash deploy/generate-certificate.sh "${CERT_ARGS[@]+"${CERT_ARGS[@]}"}" 2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     srs)         ( WRITE_TESTS=$WRITES bash deploy/srs/run.sh )  2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
@@ -190,8 +203,11 @@ run_module() { # $1 = name
     system)      mod_system                                     2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     recovery)    bash deploy/verify-auto-recovery.sh            2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     e2e)         bash deploy/validate-e2e.sh                    2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
+    mealcheck)   bash deploy/validate-meal-attendance-billing.sh 2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     production)  bash deploy/validate-production.sh             2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     load)        docker run --rm -i --network host -v "$ROOT/deploy:/s" grafana/k6 run /s/loadtest.js \
+                                                                2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
+    checklist)   REPORT_DIR="$REPORT_DIR" bash deploy/checklist-190.sh \
                                                                 2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
   esac
   RESULT["$m"]=$rc
@@ -209,7 +225,7 @@ CERT_ARGS=()
 # throttle window before each such module (skip before the very first module,
 # and skip entirely with COOLDOWN=0).
 COOLDOWN="${COOLDOWN:-65}"
-declare -A NEEDS_COLD=( [security]=1 [srs]=1 [e2e]=1 [production]=1 )
+declare -A NEEDS_COLD=( [security]=1 [srs]=1 [e2e]=1 [mealcheck]=1 [production]=1 )
 FIRST=1
 for m in "${SELECTED[@]}"; do
   [ -n "$m" ] || continue
@@ -243,6 +259,9 @@ FAILED=0
       load)        grep -E 'http_req_duration|checks' "$REPORT_DIR/$m.log" | head -2 | tr '\n' ' ';;
       db)          grep -E 'cache_hit_pct' "$REPORT_DIR/$m.log" | tail -1;;
       system)      grep -E 'unstable=' "$REPORT_DIR/$m.log" | head -1;;
+      checklist)   grep -E '^  PASS=' "$REPORT_DIR/$m.log" | tail -1;;
+      diagnose)    grep -E 'VERDICT|avg steal' "$REPORT_DIR/$m.log" | tail -1;;
+      mealcheck)   grep -E '^  PASS=' "$REPORT_DIR/$m.log" | tail -1;;
       *)           tail -1 "$REPORT_DIR/$m.log";;
     esac)
     printf '| %s | %s | %s | %s |\n' "$m" "${MOD_IMPACT[$m]}" "$v" "$(echo "$key" | head -c 160 | sed 's/|/\\|/g')"

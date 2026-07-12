@@ -76,6 +76,13 @@ npm run build || rollback "nest build"
 echo "==> 7/8 Apply migrations (prisma migrate deploy)"
 npx prisma migrate deploy || rollback "prisma migrate deploy"
 
+echo "==> 7b/8 Data backfills (idempotent — 0 rows after first run)"
+# ACC-005 legacy grandfather: accounts created before the EmailVerifiedGuard
+# shipped get emailVerifiedAt stamped so participation writes keep working.
+# Non-fatal: a hiccup here must never roll back a good release.
+bash "$SCRIPT_DIR/backfill-email-verified.sh" \
+  || journal "WARN email-verified backfill failed (non-fatal — run manually: bash deploy/backfill-email-verified.sh)"
+
 echo "==> 8/8 Reload app (PM2 cluster, zero-downtime)"
 # --env production is REQUIRED: without it, pm2 reload falls back to the default
 # `env` block (NODE_ENV=development), which leaks _devOtp in responses + weakens
