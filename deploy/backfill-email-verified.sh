@@ -28,7 +28,20 @@ PG_CONTAINER="${PG_CONTAINER:-emeal_postgres}"
 CUTOFF="${CUTOFF:-2026-07-12 00:00:00+00}"
 
 STAMP="$(date -u +%Y%m%d_%H%M%S)"
-OUT="$(dirname "$0")/backfill-email-verified.${STAMP}.ids"
+# The affected-ids receipt must live OUTSIDE the repo: writing it next to this
+# script (as before) left an untracked file in deploy/, and deploy.sh's
+# clean-tree guard then REFUSED the next deploy ("Working tree not clean:
+# ?? deploy/backfill-email-verified.*.ids" — observed 2026-07-12 15:11).
+OUT_DIR="${BACKFILL_OUT_DIR:-$HOME/backups/backfills}"
+mkdir -p "$OUT_DIR" 2>/dev/null || OUT_DIR="/tmp"
+OUT="$OUT_DIR/backfill-email-verified.${STAMP}.ids"
+
+# Self-heal: relocate any receipt an OLDER version left inside the repo so it
+# stops blocking deploys (harmless if none exist).
+for _stray in "$(dirname "$0")"/backfill-email-verified.*.ids; do
+  [ -e "$_stray" ] && mv -f "$_stray" "$OUT_DIR/" 2>/dev/null \
+    && echo "moved stray receipt out of the repo: $(basename "$_stray") -> $OUT_DIR/"
+done
 
 # Credentials are resolved INSIDE the container from its own environment
 # (docker-compose.prod.yml takes POSTGRES_USER/POSTGRES_DB from the server

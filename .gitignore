@@ -50,3 +50,8 @@ artifacts/
 # Performance heap snapshots (perf-test.js writes these transiently before
 # moving them into artifacts/; never commit raw root-level snapshots)
 *.heapsnapshot
+
+# Backfill receipts (affected-ids audit files). New backfill versions write
+# them to ~/backups/backfills, but any receipt that still lands in the repo
+# must never dirty the tree — a dirty tree blocks deploy.sh step 2/8.
+deploy/*.ids
