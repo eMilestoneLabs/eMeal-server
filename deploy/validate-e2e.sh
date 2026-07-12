@@ -193,6 +193,12 @@ assert_code "Vacation requests list" 200 "$R_CODE"
 # backdated vacation must be rejected (FR-VACX-002)
 YESTERDAY="$(date -d '-1 day' +%F 2>/dev/null || date +%F)"
 req POST /vacation-requests "$(jq -nc --arg g "$GROUP_ID" --arg d "$YESTERDAY" '{groupId:$g,startDate:$d,endDate:$d,reason:"e2e-backdate-should-fail"}')" "${STUDENT_TOKEN:-$ADMIN_TOKEN}"
+if [ "$R_CODE" = "403" ] && [ "$(echo "$R_BODY" | jq -r '.code // empty' 2>/dev/null)" = "EMAIL_VERIFICATION_REQUIRED" ]; then
+  # ACC-005 gate fires BEFORE date validation for unverified accounts — prove
+  # the backdate rejection via the admin and surface the account-level fix.
+  echo "  ·     student unverified (ACC-005) — validating via admin; fix: bash deploy/backfill-email-verified.sh"
+  req POST /vacation-requests "$(jq -nc --arg g "$GROUP_ID" --arg d "$YESTERDAY" '{groupId:$g,startDate:$d,endDate:$d,reason:"e2e-backdate-should-fail"}')" "$ADMIN_TOKEN"
+fi
 { [ "$R_CODE" = "422" ] || [ "$R_CODE" = "400" ]; } && ok "Backdated vacation rejected" "($R_CODE)" || no "Backdated vacation rejected" "got $R_CODE"
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -252,6 +258,11 @@ req GET "/meals/../../etc/passwd" "" "$ADMIN_TOKEN"
 # oversized body (validation guard) — huge name
 BIG=$(head -c 20000 < /dev/zero | tr '\0' 'A')
 req POST /vacation-requests "$(jq -nc --arg r "$BIG" --arg g "$GROUP_ID" '{groupId:$g,startDate:"2099-01-01",endDate:"2099-01-01",reason:$r}')" "${STUDENT_TOKEN:-$ADMIN_TOKEN}"
+if [ "$R_CODE" = "403" ] && [ "$(echo "$R_BODY" | jq -r '.code // empty' 2>/dev/null)" = "EMAIL_VERIFICATION_REQUIRED" ]; then
+  # ACC-005 gate fires BEFORE body validation — prove the size guard via admin.
+  echo "  ·     student unverified (ACC-005) — validating via admin; fix: bash deploy/backfill-email-verified.sh"
+  req POST /vacation-requests "$(jq -nc --arg r "$BIG" --arg g "$GROUP_ID" '{groupId:$g,startDate:"2099-01-01",endDate:"2099-01-01",reason:$r}')" "$ADMIN_TOKEN"
+fi
 { [ "$R_CODE" = "400" ] || [ "$R_CODE" = "422" ] || [ "$R_CODE" = "413" ]; } && ok "Oversized input rejected" "($R_CODE)" || no "Oversized input" "got $R_CODE"
 
 # ═════════════════════════════════════════════════════════════════════════════

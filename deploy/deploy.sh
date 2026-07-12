@@ -80,8 +80,17 @@ echo "==> 7b/8 Data backfills (idempotent — 0 rows after first run)"
 # ACC-005 legacy grandfather: accounts created before the EmailVerifiedGuard
 # shipped get emailVerifiedAt stamped so participation writes keep working.
 # Non-fatal: a hiccup here must never roll back a good release.
-bash "$SCRIPT_DIR/backfill-email-verified.sh" \
-  || journal "WARN email-verified backfill failed (non-fatal — run manually: bash deploy/backfill-email-verified.sh)"
+if ! bash "$SCRIPT_DIR/backfill-email-verified.sh"; then
+  # Loud on the console, not only in the journal: a skipped backfill means
+  # every legacy account keeps failing participation taps with 403
+  # EMAIL_VERIFICATION_REQUIRED (this exact failure shipped silently once).
+  echo "!!==============================================================!!"
+  echo "!!  WARN: email-verified backfill FAILED (release continues).   !!"
+  echo "!!  Legacy users CANNOT mark attendance until you run:          !!"
+  echo "!!      bash deploy/backfill-email-verified.sh                  !!"
+  echo "!!==============================================================!!"
+  journal "WARN email-verified backfill failed (non-fatal — run manually: bash deploy/backfill-email-verified.sh)"
+fi
 
 echo "==> 8/8 Reload app (PM2 cluster, zero-downtime)"
 # --env production is REQUIRED: without it, pm2 reload falls back to the default

@@ -25,6 +25,7 @@ import { MealsService } from './meals.service';
 import { CreateMealDto } from './dto/create-meal.dto';
 import { UpdateMealDto, ReorderMealsDto } from './dto/update-meal.dto';
 import { QueryMealsDto, QuerySchedulesDto } from './dto/query-meals.dto';
+import { CreateScheduleDto } from './dto/create-schedule.dto';
 import { SchedulesService } from './schedules.service';
 import { StorageService } from '../../storage/storage.service';
 
@@ -183,13 +184,19 @@ export class MealsController {
   @Roles(...ADMIN_ROLES)
   async createWeeklySchedule(
     @CurrentUser() user: JwtPayload,
-    @Body() body: any,
+    @Body() dto: CreateScheduleDto,
     @Req() req: Request,
   ) {
+    // BUG FIX (2026-07-12): arguments were passed as (organizationId, sub) but
+    // the service signature is (adminId, organizationId, …) — every create via
+    // this alias resolved the group inside "organization = <user id>" and
+    // always 404'd. Also typed the body: the raw `any` bypassed the global
+    // ValidationPipe, so this alias silently accepted payloads (e.g. legacy
+    // recurrence flags) that the canonical POST /schedules rejects (SCH-012).
     return this.schedulesService.createSchedule(
-      user.organizationId!,
       user.sub,
-      body,
+      user.organizationId!,
+      dto,
       req.requestId,
     );
   }

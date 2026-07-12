@@ -277,9 +277,48 @@ export class QueueService {
   // ── QUEUE METRICS ──────────────────────────────────────────────────────────
 
   /**
+   * /health is the hottest endpoint on the box (uptime-kuma poll, health-alert
+   * cron, load tests) and each uncached metrics call costs 7 queues × 5 counts
+   * = 35 Redis round-trips. A short in-process memo caps that at one refresh
+   * per worker per TTL regardless of request rate; DB/Redis connectivity in
+   * /health stays live (it is probed outside this method).
+   */
+  private static readonly QUEUE_METRICS_TTL_MS = 5_000;
+  private queueMetricsCache: {
+    at: number;
+    data: Record<string, Record<string, number>>;
+  } | null = null;
+  private queueMetricsInFlight: Promise<
+    Record<string, Record<string, number>>
+  > | null = null;
+
+  /**
    * Returns counts for all queues — used by health endpoint and Bull Board.
+   * Counts may be up to QUEUE_METRICS_TTL_MS stale; connectivity checks never
+   * ride this path.
    */
   async getQueueMetrics(): Promise<Record<string, Record<string, number>>> {
+    const cached = this.queueMetricsCache;
+    if (cached && Date.now() - cached.at < QueueService.QUEUE_METRICS_TTL_MS) {
+      return cached.data;
+    }
+    // Concurrent callers share one refresh instead of stampeding Redis.
+    if (this.queueMetricsInFlight) return this.queueMetricsInFlight;
+
+    this.queueMetricsInFlight = this.fetchQueueMetrics()
+      .then((data) => {
+        this.queueMetricsCache = { at: Date.now(), data };
+        return data;
+      })
+      .finally(() => {
+        this.queueMetricsInFlight = null;
+      });
+    return this.queueMetricsInFlight;
+  }
+
+  private async fetchQueueMetrics(): Promise<
+    Record<string, Record<string, number>>
+  > {
     const queues = [
       { name: QUEUE_NAMES.NOTIFICATION, queue: this.notificationQueue },
       { name: QUEUE_NAMES.ATTENDANCE_REMINDER, queue: this.reminderQueue },
@@ -294,17 +333,21 @@ export class QueueService {
 
     const metrics: Record<string, Record<string, number>> = {};
 
-    for (const { name, queue } of queues) {
-      const [waiting, active, completed, failed, delayed] = await Promise.all([
-        queue.getWaitingCount(),
-        queue.getActiveCount(),
-        queue.getCompletedCount(),
-        queue.getFailedCount(),
-        queue.getDelayedCount(),
-      ]);
-
-      metrics[name] = { waiting, active, completed, failed, delayed };
-    }
+    // All queues in parallel (was serial): worst-case latency is one Redis
+    // round-trip batch, not seven in a row.
+    await Promise.all(
+      queues.map(async ({ name, queue }) => {
+        const [waiting, active, completed, failed, delayed] =
+          await Promise.all([
+            queue.getWaitingCount(),
+            queue.getActiveCount(),
+            queue.getCompletedCount(),
+            queue.getFailedCount(),
+            queue.getDelayedCount(),
+          ]);
+        metrics[name] = { waiting, active, completed, failed, delayed };
+      }),
+    );
 
     return metrics;
   }

@@ -23,8 +23,6 @@
 set -euo pipefail
 
 PG_CONTAINER="${PG_CONTAINER:-emeal_postgres}"
-POSTGRES_USER="${POSTGRES_USER:-emeal}"
-POSTGRES_DB="${POSTGRES_DB:-emeal_db}"
 # Guard shipped with commit 4e115b5 on 2026-07-12 — anyone created before
 # this instant never had a verification step available to them.
 CUTOFF="${CUTOFF:-2026-07-12 00:00:00+00}"
@@ -32,10 +30,19 @@ CUTOFF="${CUTOFF:-2026-07-12 00:00:00+00}"
 STAMP="$(date -u +%Y%m%d_%H%M%S)"
 OUT="$(dirname "$0")/backfill-email-verified.${STAMP}.ids"
 
+# Credentials are resolved INSIDE the container from its own environment
+# (docker-compose.prod.yml takes POSTGRES_USER/POSTGRES_DB from the server
+# .env with NO default) — the same proven pattern benchmark-full.sh and
+# checklist-190.sh use. Host-side defaults broke here once: the first
+# deploy's backfill silently failed on a cred mismatch and every legacy
+# account stayed 403-gated. Never pass -U from the host again.
+pgexec() {
+  docker exec -i "$PG_CONTAINER" bash -c 'psql -v ON_ERROR_STOP=1 -tAU "$POSTGRES_USER" -d "$POSTGRES_DB"'
+}
+
 echo "== Legacy email-verification backfill (cutoff: ${CUTOFF}) =="
 
-PENDING="$(docker exec "$PG_CONTAINER" psql -tAU "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
-  "SELECT count(*) FROM users WHERE \"emailVerifiedAt\" IS NULL AND \"createdAt\" < '${CUTOFF}' AND \"deletedAt\" IS NULL;")"
+PENDING="$(printf '%s' "SELECT count(*) FROM users WHERE \"emailVerifiedAt\" IS NULL AND \"createdAt\" < '${CUTOFF}' AND \"deletedAt\" IS NULL;" | pgexec)"
 echo "Accounts to grandfather: ${PENDING}"
 
 if [ "${PENDING}" = "0" ]; then
@@ -44,16 +51,22 @@ if [ "${PENDING}" = "0" ]; then
 fi
 
 if [ "${DRY_RUN:-0}" = "1" ]; then
-  docker exec "$PG_CONTAINER" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
-    "SELECT id, email, \"createdAt\" FROM users WHERE \"emailVerifiedAt\" IS NULL AND \"createdAt\" < '${CUTOFF}' AND \"deletedAt\" IS NULL ORDER BY \"createdAt\";"
+  printf '%s' "SELECT id, email, \"createdAt\" FROM users WHERE \"emailVerifiedAt\" IS NULL AND \"createdAt\" < '${CUTOFF}' AND \"deletedAt\" IS NULL ORDER BY \"createdAt\";" | pgexec
   echo "DRY_RUN=1 — no rows changed."
   exit 0
 fi
 
-docker exec "$PG_CONTAINER" psql -tAU "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
-  "UPDATE users SET \"emailVerifiedAt\" = \"createdAt\"
+printf '%s' "UPDATE users SET \"emailVerifiedAt\" = \"createdAt\"
    WHERE \"emailVerifiedAt\" IS NULL AND \"createdAt\" < '${CUTOFF}' AND \"deletedAt\" IS NULL
-   RETURNING id;" | tee "$OUT"
+   RETURNING id;" | pgexec | tee "$OUT"
+
+# Prove the gate is actually open — a wrong container/db would zero-match
+# silently otherwise. Any remaining NULL legacy row means the fix did NOT land.
+REMAIN="$(printf '%s' "SELECT count(*) FROM users WHERE \"emailVerifiedAt\" IS NULL AND \"createdAt\" < '${CUTOFF}' AND \"deletedAt\" IS NULL;" | pgexec)"
+if [ "${REMAIN}" != "0" ]; then
+  echo "ERROR: ${REMAIN} legacy account(s) still unverified after the update." >&2
+  exit 1
+fi
 
 echo "== Done. Affected user ids saved to ${OUT} =="
 echo "Participation writes (attendance / corrections / guests / vacations)"

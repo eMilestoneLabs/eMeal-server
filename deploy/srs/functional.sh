@@ -78,12 +78,24 @@ else
   skip "Meal summary" "no meal configured on group" "FR-ANL-010,FR-PG-050"
 fi
 req POST /attendance '{"mealId":"nonexistent","status":"present"}' "${STUDENT_TOKEN:-$ADMIN_TOKEN}"
+if [ "$R_CODE" = "403" ] && [ "$(jbody '.code // empty')" = "EMAIL_VERIFICATION_REQUIRED" ]; then
+  # ACC-005 gate fires BEFORE meal validation for unverified legacy accounts.
+  # This probe tests unknown-meal validation, so prove it with the admin and
+  # surface the real fix for the account itself.
+  echo "  ·     student unverified (ACC-005) — validating via admin; fix: bash deploy/backfill-email-verified.sh"
+  req POST /attendance '{"mealId":"nonexistent","status":"present"}' "$ADMIN_TOKEN"
+fi
 assert_in "Mark for unknown meal rejected" "$R_CODE" "FR-ATT-020" 400 404 422
 
 sec "MODULE — VACATION (FR-VAC, FR-VACX)"
 req GET /vacation-requests "" "${STUDENT_TOKEN:-$ADMIN_TOKEN}"; assert_code "Vacation requests list" 200 "$R_CODE" "FR-VAC-001"
 YEST="$(date -d '-1 day' +%F 2>/dev/null || date +%F)"
 req POST /vacation-requests "$(jq -nc --arg g "$GROUP_ID" --arg d "$YEST" '{groupId:$g,startDate:$d,endDate:$d,reason:"e2e-backdate"}')" "${STUDENT_TOKEN:-$ADMIN_TOKEN}"
+if [ "$R_CODE" = "403" ] && [ "$(jbody '.code // empty')" = "EMAIL_VERIFICATION_REQUIRED" ]; then
+  # Same ACC-005 pre-validation gate — prove backdate rejection via admin.
+  echo "  ·     student unverified (ACC-005) — validating via admin; fix: bash deploy/backfill-email-verified.sh"
+  req POST /vacation-requests "$(jq -nc --arg g "$GROUP_ID" --arg d "$YEST" '{groupId:$g,startDate:$d,endDate:$d,reason:"e2e-backdate"}')" "$ADMIN_TOKEN"
+fi
 assert_in "Backdated vacation rejected" "$R_CODE" "FR-VACX-002" 400 422
 req PATCH /users/me '{"isVacationMode":true}' "${STUDENT_TOKEN:-$ADMIN_TOKEN}"
 assert_in "PATCH /users/me vacation honors approval guard" "$R_CODE" "FR-VACX-001" 200 422
@@ -180,16 +192,22 @@ if [ "$WRITE_TESTS" = "1" ]; then
     _VS="$(date -d "+$((320 + RANDOM % 400)) days" +%F 2>/dev/null || echo 2027-06-01)"
     _VE="$(date -d "$_VS +2 days" +%F 2>/dev/null || echo 2027-06-03)"
     req POST /vacation-requests "$(jq -nc --arg s "$_VS" --arg e "$_VE" '{startDate:$s,endDate:$e,reason:"SRS write audit"}')" "$STUDENT_TOKEN"
-    assert_in "#4 live: student vacation request created" "$R_CODE" "FR-VACX-001" 200 201
-    _VID="$(jbody '.id // .data.id // empty')"
-    sleep 2   # the admin bell notice is raised fire-and-forget; let it commit
-    req GET /notices/unread-count "" "$ADMIN_TOKEN"; _U1="$(jbody '.count // 0')"
-    if [ "${_U1:-0}" -gt "${_U0:-0}" ] 2>/dev/null; then ok "#4 live: request raised admin bell notice" "unread ${_U0}->${_U1}" "FR-NOTX-020,FR-NOT-001"
-    else no "#4 live: admin bell did NOT increment" "unread ${_U0}->${_U1}" "FR-NOTX-020"; fi
-    # cleanup: admin rejects the request (empty body → no whitelist violation)
-    if [ -n "$_VID" ]; then
-      req PATCH "/vacation-requests/$_VID/reject" '{}' "$ADMIN_TOKEN"
-      assert_in "#4 cleanup: admin rejected the request" "$R_CODE" "FR-VACX-030" 200 201
+    if [ "$R_CODE" = "403" ] && [ "$(jbody '.code // empty')" = "EMAIL_VERIFICATION_REQUIRED" ]; then
+      # ACC-005 gate: the test account is unverified so it CANNOT create the
+      # request — that is the guard working, not the bell pipeline failing.
+      skip "#4 live vacation→bell" "student unverified (ACC-005) — fix: bash deploy/backfill-email-verified.sh, then re-run" "FR-NOTX-020,FR-VACX-001"
+    else
+      assert_in "#4 live: student vacation request created" "$R_CODE" "FR-VACX-001" 200 201
+      _VID="$(jbody '.id // .data.id // empty')"
+      sleep 2   # the admin bell notice is raised fire-and-forget; let it commit
+      req GET /notices/unread-count "" "$ADMIN_TOKEN"; _U1="$(jbody '.count // 0')"
+      if [ "${_U1:-0}" -gt "${_U0:-0}" ] 2>/dev/null; then ok "#4 live: request raised admin bell notice" "unread ${_U0}->${_U1}" "FR-NOTX-020,FR-NOT-001"
+      else no "#4 live: admin bell did NOT increment" "unread ${_U0}->${_U1}" "FR-NOTX-020"; fi
+      # cleanup: admin rejects the request (empty body → no whitelist violation)
+      if [ -n "$_VID" ]; then
+        req PATCH "/vacation-requests/$_VID/reject" '{}' "$ADMIN_TOKEN"
+        assert_in "#4 cleanup: admin rejected the request" "$R_CODE" "FR-VACX-030" 200 201
+      fi
     fi
   else skip "#4 live vacation→bell" "no student token" "FR-NOTX-020,FR-VACX-001"; fi
 

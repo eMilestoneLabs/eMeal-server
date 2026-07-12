@@ -96,7 +96,7 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "DELIVERED FIX — admin self-attendance (self-mark applied; other still gated)"
+sec "DELIVERED FIX — admin self-attendance (ATT-004: member path; override of others removed)"
 # ═════════════════════════════════════════════════════════════════════════════
 # RBAC (read-only): a student can never reach admin/override — the guard denies
 # BEFORE the body is processed, so this mutates nothing.
@@ -114,42 +114,49 @@ if [ "$WRITE_TESTS" = "1" ] && [ -n "$SELF_MEAL" ]; then
   req GET "/attendance/today?groupId=$MEAL_GID" "" "$ADMIN_TOKEN"
   _PRIOR="$(printf '%s' "$R_BODY" | jq -r --arg m "$SELF_MEAL" '[(.data // .)[]? | select(.mealId==$m)][0].status // empty' 2>/dev/null)"
 
-  # THE FIX: admin marks THEIR OWN attendance present on a (priced) meal.
-  # Must return an applied record with status=present, NOT requiresMemberConsent.
+  # SRS Module 03 ATT-004 (supersedes the FR-OVR-001 consent gate): the admin
+  # override endpoint now only accepts SELF-marks and delegates them to the
+  # normal member marking path — window, vacation and preference rules apply
+  # to the admin exactly like any member. So the valid outcomes are:
+  #   200/201  applied (window currently open)
+  #   423      window closed — member rules correctly govern the self-mark
+  # A 403 ADMIN_OVERRIDE_REMOVED on a SELF-mark would be the actual bug.
   req POST /attendance/admin/override \
     "$(jq -nc --arg u "$ADMIN_ID" --arg m "$SELF_MEAL" --arg d "$TODAY" '{userId:$u,mealId:$m,attendanceDate:$d,status:"present"}')" "$ADMIN_TOKEN"
   _RC="$R_CODE"
-  _CONSENT="$(jbody '.requiresMemberConsent // .data.requiresMemberConsent // false')"
+  _APPLIED=0
   _ST="$(jbody '.status // .data.status // (.record.status) // empty')"
-  if [ "$_RC" = "200" ] && [ "$_CONSENT" != "true" ]; then
-    ok "admin self-mark APPLIED (no consent gate)" "status=$_ST consent=$_CONSENT" "FR-ATT-031,FR-OVR-001"
+  if [ "$_RC" = "200" ] || [ "$_RC" = "201" ]; then
+    _APPLIED=1
+    ok "admin self-mark APPLIED via member path (ATT-004)" "status=$_ST" "FR-ATT-031"
+  elif [ "$_RC" = "423" ]; then
+    ok "admin self-mark window-gated like a member (ATT-004)" "423 — window closed, member rules govern self-marks" "FR-ATT-031"
   else
-    no "admin self-mark blocked/gated" "code=$_RC consent=$_CONSENT" "FR-ATT-031,FR-OVR-001"
+    no "admin self-mark blocked/gated" "code=$_RC (expected 200/201 applied or 423 window-locked)" "FR-ATT-031"
   fi
 
-  # Regression guard: overriding a DIFFERENT member on a priced meal must STILL
-  # raise the member-consent gate (proves the fix is scoped to self only).
-  if [ -n "$STUDENT_ID" ] && [ -n "$PRICED_MEAL" ]; then
+  # ATT-004 regression guard: targeting a DIFFERENT member must be REFUSED —
+  # the consent-gate flow was removed; corrections are the only path now.
+  if [ -n "$STUDENT_ID" ]; then
     req POST /attendance/admin/override \
-      "$(jq -nc --arg u "$STUDENT_ID" --arg m "$PRICED_MEAL" --arg d "$TODAY" '{userId:$u,mealId:$m,attendanceDate:$d,status:"present"}')" "$ADMIN_TOKEN"
-    _OC="$(jbody '.requiresMemberConsent // .data.requiresMemberConsent // false')"
-    if [ "$_OC" = "true" ]; then
-      ok "other-member override STILL gated (regression)" "consent=$_OC" "FR-OVR-001"
-      _CRID="$(jbody '.correctionRequest.id // .data.correctionRequest.id // empty')"
-      [ -n "$_CRID" ] && req PATCH "/corrections/$_CRID/reject" '{}' "$ADMIN_TOKEN"
+      "$(jq -nc --arg u "$STUDENT_ID" --arg m "$SELF_MEAL" --arg d "$TODAY" '{userId:$u,mealId:$m,attendanceDate:$d,status:"present"}')" "$ADMIN_TOKEN"
+    _OCODE="$(jbody '.code // .data.code // empty')"
+    if [ "$R_CODE" = "403" ] && [ "$_OCODE" = "ADMIN_OVERRIDE_REMOVED" ]; then
+      ok "other-member override REFUSED (ATT-004)" "(403 ADMIN_OVERRIDE_REMOVED)" "FR-ATT-030"
     else
-      skip "other-member gate" "not priced/consent-eligible (consent=$_OC)" "FR-OVR-001"
+      no "other-member override gate" "code=$R_CODE body-code=$_OCODE (expected 403 ADMIN_OVERRIDE_REMOVED)" "FR-ATT-030"
     fi
   fi
 
-  # Restore the admin's prior status (self-clean; leave the DB as found).
-  if [ -n "$_PRIOR" ] && [ "$_PRIOR" != "present" ]; then
+  # Restore the admin's prior status (self-clean; only if the mark applied —
+  # the restore rides the same member path, so a closed window skips it).
+  if [ "$_APPLIED" = "1" ] && [ -n "$_PRIOR" ] && [ "$_PRIOR" != "present" ]; then
     req POST /attendance/admin/override \
       "$(jq -nc --arg u "$ADMIN_ID" --arg m "$SELF_MEAL" --arg d "$TODAY" --arg s "$_PRIOR" '{userId:$u,mealId:$m,attendanceDate:$d,status:$s}')" "$ADMIN_TOKEN"
     ok "cleanup: restored admin prior status" "→ $_PRIOR" "FR-ATT-031"
   fi
 else
-  skip "admin self-mark (live write)" "set WRITE_TESTS=1 (self-cleaning) to run" "FR-ATT-031,FR-OVR-001"
+  skip "admin self-mark (live write)" "set WRITE_TESTS=1 (self-cleaning) to run" "FR-ATT-031"
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════

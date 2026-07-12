@@ -84,8 +84,15 @@ login() { req POST /auth/login "$(jq -nc --arg i "$1" --arg p "$2" '{identifier:
   { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; } || { echo ""; return 1; }
   echo "$R_BODY" | jq -r '.accessToken // .data.accessToken // empty'; }
 j() { echo "$R_BODY" | jq -r "$1" 2>/dev/null; }
-# Group serializer nests meal config on some shapes — read with fallbacks.
-gfield() { echo "$R_BODY" | jq -r ".mealConfig.$1 // .$1 // .data.mealConfig.$1 // .data.$1 // empty" 2>/dev/null; }
+# Group serializer nests meal config (and guest config inside it) on some
+# shapes — read with fallbacks. Deliberately NOT jq's `//`: that operator
+# treats `false` as missing, which turned every legitimate boolean-false
+# round-trip (e.g. preferencesEnabled=false after ATT-007) into "".
+gfield() { echo "$R_BODY" | jq -r --arg f "$1" '
+  [ .mealConfig.guestConfig[$f]?, .mealConfig[$f]?, .[$f]?,
+    .data.mealConfig.guestConfig[$f]?, .data.mealConfig[$f]?, .data[$f]? ]
+  | map(select(. != null))
+  | if length == 0 then "" else (.[0] | tostring) end' 2>/dev/null; }
 
 declare -a CLEANUP_GROUPS
 cleanup() {
@@ -129,26 +136,34 @@ if [ "$CAN_CREATE" = "true" ]; then
   G_MMT="$(j '.id // .data.id')"; CLEANUP_GROUPS+=("$G_MMT")
 fi
 if [ -n "$G_MMT" ] && [ "$G_MMT" != "null" ]; then
+  # Meal #1 first, then the MMT-003 duplicate-name probe — it MUST run while
+  # the group is still BELOW the meal cap, otherwise the cap error (400
+  # 'supports at most') fires first and masks the duplicate guard.
+  CREATED=0; CAP_HIT=""; FIRST_MEAL_ID=""
+  req POST /meals "$(jq -nc --arg g "$G_MMT" \
+    '{groupId:$g,slotKey:"zz_m03_slot_1",name:"ZZ M03 Meal 1",attendanceEnabled:true,attendanceWindow:{openTime:"06:00",closeTime:"09:00"}}')" "$ADMIN_TOKEN"
+  if [ "$R_CODE" = "201" ] || [ "$R_CODE" = "200" ]; then
+    CREATED=1; FIRST_MEAL_ID="$(j '.id // .data.id')"
+  fi
+
+  # MMT-003: duplicate meal NAME (case-insensitive, per group) rejected.
+  req POST /meals "$(jq -nc --arg g "$G_MMT" '{groupId:$g,slotKey:"zz_m03_dupslot",name:"zz m03 meal 1",attendanceWindow:{openTime:"06:00",closeTime:"09:00"}}')" "$ADMIN_TOKEN"
+  { [ "$R_CODE" = "400" ] || [ "$R_CODE" = "409" ] || [ "$R_CODE" = "422" ]; } && echo "$R_BODY" | grep -qi "already exists" \
+    && ok "MMT-003 duplicate meal name rejected (case-insensitive)" "($R_CODE)" \
+    || no "MMT-003 duplicate name guard" "$R_CODE"
+
   # MMT-001/014: create meals until the config-driven cap rejects (default 10;
   # the loop ceiling 15 only guards against a runaway, it is not the cap).
-  CREATED=0; CAP_HIT=""; FIRST_MEAL_ID=""
-  for i in $(seq 1 15); do
+  for i in $(seq 2 15); do
     req POST /meals "$(jq -nc --arg g "$G_MMT" --arg s "zz_m03_slot_$i" --arg n "ZZ M03 Meal $i" \
       '{groupId:$g,slotKey:$s,name:$n,attendanceEnabled:true,attendanceWindow:{openTime:"06:00",closeTime:"09:00"}}')" "$ADMIN_TOKEN"
     if [ "$R_CODE" = "201" ] || [ "$R_CODE" = "200" ]; then
       CREATED=$((CREATED+1))
-      [ -z "$FIRST_MEAL_ID" ] && FIRST_MEAL_ID="$(j '.id // .data.id')"
     else CAP_HIT="$R_CODE"; break; fi
   done
   if [ -n "$CAP_HIT" ] && echo "$R_BODY" | grep -qi "at most"; then
     ok "MMT-001/014 meal cap enforced (config-driven)" "created=$CREATED then $CAP_HIT 'supports at most'"
   else no "MMT-001/014 meal cap" "created=$CREATED capCode=${CAP_HIT:-none} (expected 4xx 'at most')"; fi
-
-  # MMT-003: duplicate meal NAME (case-insensitive, per group) rejected.
-  req POST /meals "$(jq -nc --arg g "$G_MMT" '{groupId:$g,slotKey:"zz_m03_dupslot",name:"zz m03 meal 1",attendanceWindow:{openTime:"06:00",closeTime:"09:00"}}')" "$ADMIN_TOKEN"
-  { [ "$R_CODE" = "400" ] || [ "$R_CODE" = "422" ]; } && echo "$R_BODY" | grep -qi "already exists" \
-    && ok "MMT-003 duplicate meal name rejected (case-insensitive)" "($R_CODE)" \
-    || no "MMT-003 duplicate name guard" "$R_CODE"
 
   # MMT-002: slotKey is IMMUTABLE — a patched slotKey is ignored, never applied.
   if [ -n "$FIRST_MEAL_ID" ] && [ "$FIRST_MEAL_ID" != "null" ]; then
@@ -202,14 +217,16 @@ if [ -n "$G_MMT" ] && [ "$G_MMT" != "null" ]; then
   BS="$(gfield billSkippedMeals)"
   [ "$BS" = "true" ] && ok "Bill-Skip policy round-trips (billSkippedMeals)" "billSkippedMeals=$BS" \
     || no "Bill-Skip round-trip" "billSkippedMeals=$BS"
-  # GST-011: percentage surcharge above 100% must be rejected on the FINAL state.
-  req PATCH "/groups/$G_MMT" "$(jq -nc '{mealConfig:{guestsEnabled:true,guestPricingMode:"flatSurcharge",guestSurchargeType:"percent",guestSurcharge:150}}')" "$ADMIN_TOKEN"
+  # GST-011: percentage surcharge above 100% must be rejected on the FINAL
+  # state. Guest fields live under mealConfig.guestConfig (FR-HG-020) — the
+  # flat mealConfig.guest* spelling is rejected by the DTO whitelist.
+  req PATCH "/groups/$G_MMT" "$(jq -nc '{mealConfig:{guestConfig:{guestAttendanceEnabled:true,guestPricingMode:"flatSurcharge",guestSurchargeType:"percent",guestSurcharge:150}}}')" "$ADMIN_TOKEN"
   GCODE="$(j '.code // .data.code // empty')"
   { [ "$R_CODE" = "422" ] && [ "$GCODE" = "GUEST_SURCHARGE_PERCENT_RANGE" ]; } \
     && ok "GST-011 percent surcharge >100 rejected" "($R_CODE $GCODE)" \
     || no "GST-011 percent range guard" "code=$R_CODE body-code=$GCODE (expected 422 GUEST_SURCHARGE_PERCENT_RANGE)"
   # A sane percentage must persist and round-trip with its type.
-  req PATCH "/groups/$G_MMT" "$(jq -nc '{mealConfig:{guestsEnabled:true,guestPricingMode:"flatSurcharge",guestSurchargeType:"percent",guestSurcharge:20}}')" "$ADMIN_TOKEN"
+  req PATCH "/groups/$G_MMT" "$(jq -nc '{mealConfig:{guestConfig:{guestAttendanceEnabled:true,guestPricingMode:"flatSurcharge",guestSurchargeType:"percent",guestSurcharge:20}}}')" "$ADMIN_TOKEN"
   req GET "/groups/$G_MMT" "" "$ADMIN_TOKEN"
   GT="$(gfield guestSurchargeType)"
   [ "$GT" = "percent" ] && ok "GST-011 guestSurchargeType round-trips" "type=$GT" \
@@ -257,8 +274,14 @@ req POST /notices "$(jq -nc '{title:"ZZ_M03_VERIFY_att",body:"x",imageData:"data
 { [ "$R_CODE" = "400" ] || [ "$R_CODE" = "422" ]; } && echo "$R_BODY" | grep -qi "unsupported image" \
   && ok "NTC-012 unsupported image format rejected" "($R_CODE, GIF)" \
   || no "NTC-012 image format guard" "$R_CODE"
-BIGIMG="$(head -c 110000 /dev/zero | base64 | tr -d '\n')"
-req POST /notices "$(jq -nc --arg d "data:image/png;base64,$BIGIMG" '{title:"ZZ_M03_VERIFY_att",body:"x",imageData:$d}')" "$ADMIN_TOKEN"
+# Oversized payloads exceed Linux's ~128 KiB per-argument limit, so they are
+# piped through stdin + a temp file (curl -d @file) — never argv. Passing them
+# as --arg made jq fail 'Argument list too long' and silently sent an EMPTY
+# body, which "passed" for the wrong reason.
+BIGJSON="$(mktemp)"
+head -c 110000 /dev/zero | base64 | tr -d '\n' \
+  | jq -Rs '{title:"ZZ_M03_VERIFY_att",body:"x",imageData:("data:image/png;base64," + .)}' > "$BIGJSON"
+req POST /notices "@$BIGJSON" "$ADMIN_TOKEN"; rm -f "$BIGJSON"
 { [ "$R_CODE" = "400" ] || [ "$R_CODE" = "422" ] || [ "$R_CODE" = "413" ]; } \
   && ok "NTC-012 oversized image (>100 KB) rejected" "($R_CODE)" \
   || no "NTC-012 image size guard" "$R_CODE"
@@ -266,8 +289,10 @@ req POST /notices "$(jq -nc '{title:"ZZ_M03_VERIFY_att",body:"x",documentData:"d
 { [ "$R_CODE" = "400" ] || [ "$R_CODE" = "422" ]; } && echo "$R_BODY" | grep -qi "unsupported document" \
   && ok "NTC-013 unsupported document format rejected" "($R_CODE, CSV)" \
   || no "NTC-013 document format guard" "$R_CODE"
-BIGDOC="$(head -c 60000 /dev/zero | base64 | tr -d '\n')"
-req POST /notices "$(jq -nc --arg d "data:application/pdf;base64,$BIGDOC" '{title:"ZZ_M03_VERIFY_att",body:"x",documentData:$d,documentName:"x.pdf"}')" "$ADMIN_TOKEN"
+BIGJSON="$(mktemp)"
+head -c 60000 /dev/zero | base64 | tr -d '\n' \
+  | jq -Rs '{title:"ZZ_M03_VERIFY_att",body:"x",documentData:("data:application/pdf;base64," + .),documentName:"x.pdf"}' > "$BIGJSON"
+req POST /notices "@$BIGJSON" "$ADMIN_TOKEN"; rm -f "$BIGJSON"
 { [ "$R_CODE" = "400" ] || [ "$R_CODE" = "422" ] || [ "$R_CODE" = "413" ]; } \
   && ok "NTC-013 oversized document (>50 KB) rejected" "($R_CODE)" \
   || no "NTC-013 document size guard" "$R_CODE"
@@ -346,8 +371,9 @@ sec "10. PREF-006.2/006.3 — PREFERENCE GROUP CAPS (5 groups/meal · 5 options/
 if [ -n "${FIRST_MEAL_ID:-}" ] && [ "$FIRST_MEAL_ID" != "null" ]; then
   PG_CREATED=0; PG_CAP=""; PG1_ID=""
   for i in $(seq 1 8); do
+    # PreferenceOptionDto: `key` (lowercase slug) is REQUIRED alongside label.
     req POST "/meals/$FIRST_MEAL_ID/preference-groups" \
-      "$(jq -nc --arg l "ZZ PG $i" '{label:$l,options:[{label:"opt1"}]}')" "$ADMIN_TOKEN"
+      "$(jq -nc --arg l "ZZ PG $i" '{label:$l,options:[{key:"opt1",label:"Opt 1"}]}')" "$ADMIN_TOKEN"
     if [ "$R_CODE" = "201" ] || [ "$R_CODE" = "200" ]; then
       PG_CREATED=$((PG_CREATED+1)); [ -z "$PG1_ID" ] && PG1_ID="$(j '.id // .data.id')"
     else PG_CAP="$R_CODE"; break; fi
@@ -358,7 +384,7 @@ if [ -n "${FIRST_MEAL_ID:-}" ] && [ "$FIRST_MEAL_ID" != "null" ]; then
   if [ -n "$PG1_ID" ] && [ "$PG1_ID" != "null" ]; then
     OPT_ADDED=0; OPT_CAP=""
     for i in $(seq 2 9); do
-      req POST "/preference-groups/$PG1_ID/options" "$(jq -nc --arg l "ZZ Opt $i" '{label:$l}')" "$ADMIN_TOKEN"
+      req POST "/preference-groups/$PG1_ID/options" "$(jq -nc --arg k "opt$i" --arg l "ZZ Opt $i" '{key:$k,label:$l}')" "$ADMIN_TOKEN"
       if [ "$R_CODE" = "201" ] || [ "$R_CODE" = "200" ]; then OPT_ADDED=$((OPT_ADDED+1)); else OPT_CAP="$R_CODE"; break; fi
     done
     if [ -n "$OPT_CAP" ]; then ok "PREF-006.3 options-per-group cap enforced" "added=$OPT_ADDED then $OPT_CAP"
@@ -460,24 +486,25 @@ else skip "SCH-012 recurrence removal" "no throwaway group"; fi
 # ═════════════════════════════════════════════════════════════════════════════
 sec "15. GST-011 — GUEST PRICING MODES 1 & 2 (mode 3 percent tested in §3)"
 if [ -n "${G_Q17:-}" ] && [ "$G_Q17" != "null" ]; then
-  # Mode 2 (Fixed Guest Price) requires the per-guest price to be set.
-  req PATCH "/groups/$G_Q17" "$(jq -nc '{mealConfig:{guestsEnabled:true,guestPricingMode:"perGuestPrice"}}')" "$ADMIN_TOKEN"
+  # Mode 2 (Fixed Guest Price) requires the per-guest price to be set. Guest
+  # fields live under mealConfig.guestConfig (FR-HG-020).
+  req PATCH "/groups/$G_Q17" "$(jq -nc '{mealConfig:{guestConfig:{guestAttendanceEnabled:true,guestPricingMode:"perGuestPrice"}}}')" "$ADMIN_TOKEN"
   { [ "$R_CODE" = "400" ] || [ "$R_CODE" = "422" ]; } \
     && ok "GST-011 mode-2 without adult price rejected" "($R_CODE)" \
     || no "GST-011 mode-2 price requirement" "$R_CODE"
-  req PATCH "/groups/$G_Q17" "$(jq -nc '{mealConfig:{guestsEnabled:true,guestPricingMode:"perGuestPrice",guestAdultPrice:50}}')" "$ADMIN_TOKEN"
+  req PATCH "/groups/$G_Q17" "$(jq -nc '{mealConfig:{guestConfig:{guestAttendanceEnabled:true,guestPricingMode:"perGuestPrice",guestAdultPrice:50}}}')" "$ADMIN_TOKEN"
   req GET "/groups/$G_Q17" "" "$ADMIN_TOKEN"
   GM2="$(gfield guestPricingMode)"
   [ "$GM2" = "perGuestPrice" ] && ok "GST-011 mode-2 (fixed guest price) round-trips" "mode=$GM2" \
     || no "GST-011 mode-2 round-trip" "mode=$GM2"
-  # Mode 1 (Same as Member Price) — tolerant to the exact enum literal.
+  # Mode 1 (Same as Member Price) — canonical literal is 'sameAsMember'.
   M1=""
-  for cand in memberPrice sameAsMember member; do
-    req PATCH "/groups/$G_Q17" "$(jq -nc --arg m "$cand" '{mealConfig:{guestPricingMode:$m}}')" "$ADMIN_TOKEN"
+  for cand in sameAsMember memberPrice member; do
+    req PATCH "/groups/$G_Q17" "$(jq -nc --arg m "$cand" '{mealConfig:{guestConfig:{guestPricingMode:$m}}}')" "$ADMIN_TOKEN"
     { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; } && { M1="$cand"; break; }
   done
   [ -n "$M1" ] && ok "GST-011 mode-1 (same as member price) accepted" "mode=$M1" \
-    || skip "GST-011 mode-1 literal" "none of memberPrice/sameAsMember/member accepted — check enum"
+    || skip "GST-011 mode-1 literal" "none of sameAsMember/memberPrice/member accepted — check enum"
 else skip "GST-011 modes 1/2" "no throwaway group"; fi
 
 # ═════════════════════════════════════════════════════════════════════════════
