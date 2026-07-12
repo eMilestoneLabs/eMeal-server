@@ -234,6 +234,37 @@ export class SystemDefaultSweepScheduler implements OnApplicationBootstrap {
       }
     }
 
+    // Audit-trail retention: the per-org CLEANUP_AUDIT_LOGS job existed since
+    // Phase B but nothing ever enqueued it — audit_logs grew unbounded. This
+    // sweep fans out one day-deduped cleanup job per org (+ purges org-less
+    // rows) so the table stays bounded at production scale.
+    const auditCleanupMinutes = this.config.get<number>(
+      'audit.retentionSweepMinutes',
+      720,
+    );
+    if (!auditCleanupMinutes || auditCleanupMinutes <= 0) {
+      this.logger.log('Audit-cleanup sweep disabled (interval = 0)');
+    } else {
+      try {
+        await this.queue.add(
+          JOB_TYPES.AUDIT_CLEANUP_SWEEP,
+          {},
+          {
+            repeat: { every: auditCleanupMinutes * 60_000 },
+            removeOnComplete: { count: 20 },
+            removeOnFail: { count: 20 },
+          },
+        );
+        this.logger.log(
+          `Audit-cleanup sweep scheduled every ${auditCleanupMinutes} minute(s)`,
+        );
+      } catch (err) {
+        this.logger.error(
+          `Failed to schedule audit-cleanup sweep: ${(err as Error).message}`,
+        );
+      }
+    }
+
     // Pass 15 (FR-NOTX-010): attendance-reminder scheduling sweep — the
     // 30/10-min pre-close reminder producer had no caller since B6, so the
     // reminder pipeline never fired. Enqueue-side jobId dedup + the dispatch

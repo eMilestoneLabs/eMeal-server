@@ -121,6 +121,56 @@ export class SystemDefaultWorker extends WorkerHost {
     if (job.name === JOB_TYPES.RETENTION_SWEEP) {
       return this.retention?.sweep();
     }
+    // Audit-trail retention fan-out (audit_logs bounded at production scale).
+    if (job.name === JOB_TYPES.AUDIT_CLEANUP_SWEEP) {
+      return this.auditCleanupSweep();
+    }
+  }
+
+  // ── Audit-trail retention sweep ────────────────────────────────────────────
+  //
+  // Fans out one day-deduped CLEANUP_AUDIT_LOGS job per organization (the
+  // worker's deleteMany is org-scoped for tenant isolation), then purges
+  // org-less rows (organizationId=null, e.g. pre-signup auth events) directly
+  // — the per-org job path requires an orgId by design.
+
+  private async auditCleanupSweep(): Promise<void> {
+    const olderThanDays = this.config.get<number>('audit.retentionDays', 180);
+    if (!olderThanDays || olderThanDays <= 0) return; // retention disabled
+
+    const orgs = await this.prisma.organization.findMany({
+      select: { id: true },
+    });
+    let enqueued = 0;
+    for (const { id: organizationId } of orgs) {
+      try {
+        await this.queue.enqueueAuditLogCleanup({ organizationId, olderThanDays });
+        enqueued++;
+      } catch (err) {
+        // One org failing must not starve the rest — next sweep retries.
+        this.logger.error(
+          `Audit-cleanup enqueue failed org=${organizationId}: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    let orphanPurged = 0;
+    try {
+      const cutoff = new Date(Date.now() - olderThanDays * 86_400_000);
+      const res = await this.prisma.auditLog.deleteMany({
+        where: { organizationId: null, createdAt: { lt: cutoff } },
+      });
+      orphanPurged = res.count;
+    } catch (err) {
+      this.logger.error(
+        `Audit-cleanup org-less purge failed: ${(err as Error).message}`,
+      );
+    }
+
+    this.logger.log(
+      `Audit-cleanup sweep fanned out to ${enqueued}/${orgs.length} org(s) ` +
+      `retention=${olderThanDays}d orphanRowsPurged=${orphanPurged}`,
+    );
   }
 
   // ── SRS Module 03 GLC-003 — archived-group retention purge ────────────────

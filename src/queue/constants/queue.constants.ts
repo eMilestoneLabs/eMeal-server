@@ -69,6 +69,10 @@ export const JOB_TYPES = {
   // SRS Module 03 RET-001..015: rolling 3-month operational-data retention —
   // reminders → grace → auto-finalize → Excel+PDF archive → purge.
   RETENTION_SWEEP: 'retention-sweep',
+  // Audit-trail retention: fans out one day-deduped CLEANUP_AUDIT_LOGS job
+  // per org (the per-org job existed since Phase B but had no caller, so
+  // audit_logs grew unbounded). Rides the system-default queue.
+  AUDIT_CLEANUP_SWEEP: 'audit-cleanup-sweep',
 
   // analytics-queue
   AGGREGATE_DAILY: 'aggregate-daily',

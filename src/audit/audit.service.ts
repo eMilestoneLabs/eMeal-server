@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { AuditAction } from '@prisma/client';
 import { createHmac, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
@@ -29,9 +29,29 @@ interface CreateAuditLogDto {
  * (additive rollout; older rows are reported as `unsigned`, never `invalid`).
  */
 @Injectable()
-export class AuditService {
+export class AuditService implements OnModuleDestroy {
   private readonly logger = new Logger(AuditService.name);
   private readonly hmacSecret = process.env.AUDIT_HMAC_SECRET || '';
+
+  // ── Micro-batched writes (million-user scale) ──────────────────────────────
+  // One INSERT per audited action does not scale: logins alone produce an
+  // audit row each, so at production traffic the audit trail becomes the
+  // dominant write load. Rows are buffered in-process and flushed with a
+  // single createMany every AUDIT_FLUSH_INTERVAL_MS (or earlier when
+  // AUDIT_BUFFER_MAX rows accumulate). Semantics are unchanged: writes were
+  // already fire-and-forget, each row still carries its own HMAC computed at
+  // enqueue time, and AUDIT_FLUSH_INTERVAL_MS=0 restores the legacy
+  // one-INSERT-per-row path.
+  private readonly flushIntervalMs = parseInt(
+    process.env.AUDIT_FLUSH_INTERVAL_MS ?? '1000',
+    10,
+  );
+  private readonly bufferMax = parseInt(
+    process.env.AUDIT_BUFFER_MAX ?? '200',
+    10,
+  );
+  private buffer: Array<Record<string, unknown>> = [];
+  private flushTimer: NodeJS.Timeout | null = null;
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -101,24 +121,67 @@ export class AuditService {
         })
       : null;
 
-    this.prisma.auditLog
-      .create({
-        data: {
-          organizationId: dto.organizationId,
-          actorId: dto.actorId,
-          targetId: dto.targetId,
-          targetType: dto.targetType,
-          action: dto.action,
-          metadata: dto.metadata as any,
-          requestId: dto.requestId,
-          ipAddress: dto.ipAddress,
-          createdAt,
-          ...(integrityHmac ? { integrityHmac } : {}),
-        } as any,
-      })
-      .catch(() => {
+    const row = {
+      organizationId: dto.organizationId,
+      actorId: dto.actorId,
+      targetId: dto.targetId,
+      targetType: dto.targetType,
+      action: dto.action,
+      metadata: dto.metadata as any,
+      requestId: dto.requestId,
+      ipAddress: dto.ipAddress,
+      createdAt,
+      ...(integrityHmac ? { integrityHmac } : {}),
+    };
+
+    if (this.flushIntervalMs <= 0) {
+      // Legacy path: one INSERT per row, fire-and-forget.
+      this.prisma.auditLog.create({ data: row as any }).catch(() => {
         // Audit failures must never crash the main request
       });
+      return;
+    }
+
+    this.buffer.push(row);
+    if (this.buffer.length >= this.bufferMax) {
+      void this.flush();
+      return;
+    }
+    if (!this.flushTimer) {
+      this.flushTimer = setTimeout(() => void this.flush(), this.flushIntervalMs);
+      // A pending flush must never hold the process open on shutdown.
+      this.flushTimer.unref?.();
+    }
+  }
+
+  /** Drain the buffer with a single batched INSERT. Never throws. */
+  private async flush(): Promise<void> {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    if (this.buffer.length === 0) return;
+    const rows = this.buffer;
+    this.buffer = [];
+    try {
+      await this.prisma.auditLog.createMany({ data: rows as any });
+    } catch {
+      // A batch-level failure (e.g. one malformed row) must not lose the whole
+      // batch — degrade to per-row inserts, each individually best-effort,
+      // matching the legacy path's loss semantics.
+      for (const row of rows) {
+        try {
+          await this.prisma.auditLog.create({ data: row as any });
+        } catch {
+          // Audit failures must never crash the app
+        }
+      }
+    }
+  }
+
+  /** Graceful shutdown (PM2 reload): persist any still-buffered rows. */
+  async onModuleDestroy(): Promise<void> {
+    await this.flush();
   }
 
   /**

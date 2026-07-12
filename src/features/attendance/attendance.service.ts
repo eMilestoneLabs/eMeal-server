@@ -1171,26 +1171,30 @@ export class AttendanceService {
       throw new BadRequestException('date must be YYYY-MM-DD format');
     }
 
-    const group = await this.prisma.group.findFirst({
-      where: { id: groupId, organizationId },
-      select: { id: true },
-    });
-    if (!group) throw new NotFoundException('Group not found');
-
     const dateUtc = toUtcMidnight(date);
     if (Number.isNaN(dateUtc.getTime())) {
       throw new BadRequestException('date is not a valid calendar date');
     }
 
-    const activeMembers = await this.prisma.groupMember.findMany({
-      where: { groupId, status: 'active' },
-      select: {
-        userId: true,
-        // name rides along so the admin dashboard can LIST members under the
-        // "Vacation" filter (not just count them) — no extra query.
-        user: { select: { isVacationMode: true, name: true } },
-      },
-    });
+    // Tenant guard + member fetch in parallel (one round-trip saved). Safe:
+    // nothing from the member query is used or returned unless the guard
+    // resolves this group inside the caller's org.
+    const [group, activeMembers] = await Promise.all([
+      this.prisma.group.findFirst({
+        where: { id: groupId, organizationId },
+        select: { id: true },
+      }),
+      this.prisma.groupMember.findMany({
+        where: { groupId, status: 'active' },
+        select: {
+          userId: true,
+          // name rides along so the admin dashboard can LIST members under the
+          // "Vacation" filter (not just count them) — no extra query.
+          user: { select: { isVacationMode: true, name: true } },
+        },
+      }),
+    ]);
+    if (!group) throw new NotFoundException('Group not found');
 
     const covered = await getVacationCoveredUserIds(this.prisma as any, {
       organizationId,

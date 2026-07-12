@@ -801,6 +801,10 @@ model AuditLog {
   @@index([actorId])
   @@index([targetId])
   @@index([createdAt])
+  // Million-user scale: serves the two hot access paths in one index —
+  // integrity verification (org + ORDER BY createdAt DESC LIMIT n) and the
+  // retention purge (org + createdAt < cutoff) — without a sort step.
+  @@index([organizationId, createdAt])
   @@map("audit_logs")
 }
 

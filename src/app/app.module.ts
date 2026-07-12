@@ -14,6 +14,7 @@ import attendanceConfig from '../config/attendance.config';
 import groupsConfig from '../config/groups.config';
 import mealsConfig from '../config/meals.config';
 import retentionConfig from '../config/retention.config';
+import auditConfig from '../config/audit.config';
 
 // Infrastructure
 import { PrismaModule } from '../prisma/prisma.module';
@@ -57,6 +58,7 @@ import { TelemetryModule } from '../features/telemetry/telemetry.module';
 
 // App-level
 import { HealthController } from './health.controller';
+import { WarmupService } from './warmup.service';
 
 @Module({
   imports: [
@@ -74,6 +76,7 @@ import { HealthController } from './health.controller';
         groupsConfig,
         mealsConfig,
         retentionConfig,
+        auditConfig,
       ],
       envFilePath: ['.env'],
     }),
@@ -138,6 +141,8 @@ import { HealthController } from './health.controller';
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     // Global request logging
     { provide: APP_INTERCEPTOR, useClass: LoggingInterceptor },
+    // Post-reload cold-start eliminator (fire-and-forget on bootstrap)
+    WarmupService,
   ],
 })
 export class AppModule implements NestModule {

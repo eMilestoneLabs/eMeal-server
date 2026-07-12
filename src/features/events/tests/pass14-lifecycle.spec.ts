@@ -105,8 +105,17 @@ describe('Pass 14 — FR-EVTX-004 count reconcile guard', () => {
 
 describe('Pass 14 — FR-DLC-006 tamper-evident audit', () => {
   const OLD = process.env.AUDIT_HMAC_SECRET;
-  beforeAll(() => { process.env.AUDIT_HMAC_SECRET = 'test-secret'; });
-  afterAll(() => { process.env.AUDIT_HMAC_SECRET = OLD; });
+  const OLD_FLUSH = process.env.AUDIT_FLUSH_INTERVAL_MS;
+  beforeAll(() => {
+    process.env.AUDIT_HMAC_SECRET = 'test-secret';
+    // This spec asserts the per-row create path — disable micro-batching.
+    process.env.AUDIT_FLUSH_INTERVAL_MS = '0';
+  });
+  afterAll(() => {
+    process.env.AUDIT_HMAC_SECRET = OLD;
+    if (OLD_FLUSH === undefined) delete process.env.AUDIT_FLUSH_INTERVAL_MS;
+    else process.env.AUDIT_FLUSH_INTERVAL_MS = OLD_FLUSH;
+  });
 
   function makeAudit(rows: any[]) {
     const prisma: any = {
