@@ -105,6 +105,18 @@ if echo "$codes" | grep -q 429; then ok "Login flood throttled (429 seen)" "" "F
 else skip "Login flood throttle" "no 429 in 40 tries (limit may be higher)" "FR-LIM-001"; fi
 
 sec "SEC-G — SECURITY HEADERS / TLS (needs EDGE=https://domain) FR-SECX-070"
+# EDGE auto-discovery: on the VPS the public domain is already declared in the
+# nginx vhost (server_name), so read it instead of skipping this section until
+# someone remembers to export EDGE. An explicit EDGE env still wins; discovery
+# is silently skipped off-box (no nginx) or when the host doesn't answer TLS.
+if [ -z "$EDGE" ]; then
+  _EDGE_HOST="$(grep -rhoE 'server_name[[:space:]]+[^;]+' /etc/nginx/sites-enabled/ /etc/nginx/conf.d/ 2>/dev/null \
+    | awk '{print $2}' | grep -Ev '^(_$|localhost|127\.)' | head -1)"
+  if [ -n "$_EDGE_HOST" ] && curl -fsSI --max-time 5 "https://$_EDGE_HOST/api/v1/health" >/dev/null 2>&1; then
+    EDGE="https://$_EDGE_HOST"
+    echo "  ·     EDGE auto-discovered from nginx server_name: $EDGE"
+  fi
+fi
 if [ -n "$EDGE" ]; then
   H="$(curl -sI "$EDGE/api/v1/health" 2>/dev/null | tr -d '\r')"
   chk(){ echo "$H" | grep -qi "^$1:" && ok "Header $1 present" "" "$2" || no "Header $1 missing" "" "$2"; }

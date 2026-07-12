@@ -107,5 +107,20 @@ for i in $(seq 1 10); do
 done
 [ "$ok" = "1" ] || rollback "health check"
 
+# ==> Warm the WHOLE cluster before declaring done. A freshly reloaded worker
+# JIT-compiles routes/guards/serializers on its first requests; with 4 workers
+# behind round-robin, the first ~dozen real requests each pay that cost — which
+# is exactly what a benchmark run straight after deploy measures (false "SLOW"
+# rows, e.g. exports max=1762ms on 2026-07-12). 16 unauthenticated hits spread
+# over hot route families touch every worker several times; login is NOT
+# called (10/min throttle stays untouched for the user/benchmark).
+echo "==> Warm-up (16 hits across the PM2 cluster)"
+API_BASE="${HEALTH_URL%/health}"
+for i in $(seq 1 4); do
+  for p in /health /dashboard/admin /groups /notices/unread-count; do
+    curl -s -o /dev/null --max-time 5 "$API_BASE$p" || true
+  done
+done
+
 journal "DEPLOY OK  $PREV_COMMIT -> $NEW_COMMIT"
 echo "==> Deploy complete: $NEW_COMMIT (healthy)"

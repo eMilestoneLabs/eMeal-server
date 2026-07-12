@@ -418,8 +418,12 @@ if [ "$CAN_CREATE" = "true" ] && [ -n "$STUDENT_TOKEN" ]; then
   req POST /groups/join "$(jq -nc --arg c "$Q17_CODE" '{joinCode:$c}')" "$STUDENT_TOKEN"
 fi
 if [ -n "$Q17_MEAL" ] && [ "$Q17_MEAL" != "null" ]; then
+  # attendanceDate is REQUIRED by the mark contract (YYYY-MM-DD) and must be
+  # "today" in the ORG timezone (Asia/Kolkata), not the server's UTC date —
+  # between 18:30 and 24:00 UTC those differ and the mark would be rejected.
+  IST_D="$(TZ='Asia/Kolkata' date +%F)"
   # Q21: the member can deliberately mark ABSENT while the window is open.
-  req POST /attendance "$(jq -nc --arg m "$Q17_MEAL" '{mealId:$m,status:"absent"}')" "$STUDENT_TOKEN"
+  req POST /attendance "$(jq -nc --arg m "$Q17_MEAL" --arg d "$IST_D" '{mealId:$m,attendanceDate:$d,status:"absent"}')" "$STUDENT_TOKEN"
   ACODE1="$(j '.code // .data.code // empty')"
   if [ "$R_CODE" = "403" ] && [ "$ACODE1" = "EMAIL_VERIFICATION_REQUIRED" ]; then
     skip "Q21 member Absent mark" "student unverified — run deploy/backfill-email-verified.sh, then re-run"
@@ -428,12 +432,18 @@ if [ -n "$Q17_MEAL" ] && [ "$Q17_MEAL" != "null" ]; then
     { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; } \
       && ok "Q21 member can mark ABSENT (deliberate not-eating)" "($R_CODE)" \
       || no "Q21 Absent mark" "$R_CODE"
-    # Q17: Skip is INTERNAL-ONLY — a member-submitted skip must be rejected.
-    req POST /attendance "$(jq -nc --arg m "$Q17_MEAL" '{mealId:$m,status:"skipped"}')" "$STUDENT_TOKEN"
+    # Q17: Skip is INTERNAL-ONLY. A member-submitted skip must never produce a
+    # member-generated Skip row: the server either rejects it (4xx) or — for
+    # old APKs whose Skip button still posts it — coerces it to ABSENT (the
+    # declared intent), so Bill-Skip can never bill an explicit decliner.
+    req POST /attendance "$(jq -nc --arg m "$Q17_MEAL" --arg d "$IST_D" '{mealId:$m,attendanceDate:$d,status:"skipped"}')" "$STUDENT_TOKEN"
+    Q17_ST="$(j '.status // .data.status // empty')"
     if [ "$R_CODE" = "400" ] || [ "$R_CODE" = "422" ] || [ "$R_CODE" = "403" ]; then
       ok "Q17 member-submitted Skip rejected (internal-only status)" "($R_CODE)"
+    elif { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; } && [ "$Q17_ST" != "skipped" ]; then
+      ok "Q17 member Skip coerced to '$Q17_ST' (no member-generated Skip row; old-APK compat)" "($R_CODE)"
     else
-      no "Q17 GAP: API accepts member Skip" "$R_CODE — SRS: 'Skip is never selectable'; DTO/service still allow it (old-APK compat) — fix after new APK ships"
+      no "Q17 GAP: API stores member Skip" "$R_CODE status=$Q17_ST — SRS: 'Skip is never selectable'"
     fi
   fi
   # ATT-004: admins shall NEVER directly mark/override another member.

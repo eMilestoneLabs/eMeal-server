@@ -324,7 +324,16 @@ export class AttendanceService {
       select: { isVacationMode: true },
     });
 
-    const status = dto.status ?? 'present';
+    // SRS Module 03 (survey Q17/Q21): members choose Present or Absent only —
+    // Skip is SYSTEM-generated at window close (non-response), never a member
+    // input. Old APKs still ship a "Skip meal" button that POSTs
+    // status='skipped'; that intent ("I won't eat this meal") is exactly
+    // Module-3 Absent, so it is coerced rather than rejected — old devices
+    // keep working, no member-generated Skip row is ever stored, and Bill-Skip
+    // (which bills NON-RESPONDERS at the snapshot price) can no longer bill a
+    // member who explicitly declined. New APKs have no Skip button.
+    const status =
+      (dto.status ?? 'present') === 'skipped' ? 'absent' : dto.status ?? 'present';
 
     if (user?.isVacationMode && status !== 'onVacation') {
       // During vacation mode, auto-set status to onVacation instead of blocking

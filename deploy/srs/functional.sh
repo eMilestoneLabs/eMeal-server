@@ -43,6 +43,27 @@ for _g in $_ALL_GIDS; do
   if [ -n "$_mid" ]; then MEAL_GID="$_g"; MEAL_ID="$_mid"; break; fi
 done
 [ -z "$MEAL_GID" ] && MEAL_GID="$GROUP_ID"
+# When NO group has any meal configured, the meal-summary and #1 planner
+# checks can only SKIP. With writes enabled, self-provision ONE throwaway
+# meal-enabled group (1 always-open meal + 1 preference group) so those
+# requirements are actually ASSERTED; it is permanently deleted at the end of
+# this script (meals + preference groups cascade). Real groups are untouched.
+_ZZ_PROBE_GID=""
+if [ -z "$MEAL_ID" ] && [ "${WRITE_TESTS:-0}" = "1" ]; then
+  req POST /groups "$(jq -nc '{name:"ZZ_SRS_MEALPROBE",type:"hostel",maxMembers:5,joinApprovalRequired:false,mealConfig:{mealsEnabled:true}}')" "$ADMIN_TOKEN"
+  _ZZ_PROBE_GID="$(jbody '.id // .data.id // empty')"
+  if [ -n "$_ZZ_PROBE_GID" ] && [ "$_ZZ_PROBE_GID" != "null" ]; then
+    req POST /meals "$(jq -nc --arg g "$_ZZ_PROBE_GID" '{groupId:$g,slotKey:"zz_srs_probe",name:"ZZ SRS Probe",attendanceEnabled:true,attendanceWindow:{openTime:"00:00",closeTime:"23:59"}}')" "$ADMIN_TOKEN"
+    _mid="$(jbody '.id // .data.id // empty')"
+    if [ -n "$_mid" ] && [ "$_mid" != "null" ]; then
+      MEAL_GID="$_ZZ_PROBE_GID"; MEAL_ID="$_mid"
+      # PreferenceOptionDto: `key` (lowercase slug) is REQUIRED alongside label.
+      req POST "/meals/$_mid/preference-groups" "$(jq -nc '{label:"ZZ Probe Pref",options:[{key:"veg",label:"Veg"},{key:"nonveg",label:"Non-Veg"}]}')" "$ADMIN_TOKEN"
+    fi
+  else
+    _ZZ_PROBE_GID=""
+  fi
+fi
 req GET "/groups/$GROUP_ID" "" "$ADMIN_TOKEN"
 HAS_ROLE=$(jbody 'has("functionalRole") or (.data|has("functionalRole"))')
 [ "$HAS_ROLE" = "true" ] && ok "Group exposes functionalRole" "" "FR-GRP-010,FR-ADM-020" || no "Group functionalRole" "$R_CODE" "FR-GRP-010"
@@ -234,6 +255,16 @@ if [ "$WRITE_TESTS" = "1" ]; then
   assert_in "Deleted account cannot re-login" "$R_CODE" "FR-DEL-020" 401 403 422
 else
   skip "Write/modify lifecycle" "set WRITE_TESTS=1 to run" "FR-DEL-001,FR-DEL-010,FR-DEL-020,FR-DLC-001,FR-NOTX-001,FR-VACX-001"
+fi
+
+# Cleanup: permanently delete the self-provisioned meal-probe group (meal +
+# preference group cascade). Only exists when writes were enabled AND no real
+# group had a configured meal.
+if [ -n "$_ZZ_PROBE_GID" ]; then
+  req DELETE "/groups/$_ZZ_PROBE_GID/permanent" "" "$ADMIN_TOKEN"
+  { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "204" ]; } \
+    && ok "cleanup: throwaway meal-probe group deleted" "($R_CODE)" "FR-GRP-019" \
+    || no "cleanup: throwaway meal-probe group NOT deleted" "$R_CODE — delete ZZ_SRS_MEALPROBE manually" "FR-GRP-019"
 fi
 
 [ "${SRS_SOURCED:-0}" = "1" ] || summary "FUNCTIONAL"

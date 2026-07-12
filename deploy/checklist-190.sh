@@ -42,14 +42,25 @@ echo "   evidence: ${REPORT_DIR:-<none — live probes only>}"
 log() { # log <module> — full path to a module log, empty if absent
   [ -n "$REPORT_DIR" ] && [ -f "$REPORT_DIR/$1.log" ] && echo "$REPORT_DIR/$1.log"
 }
-ev() { # ev <module> <grep-ERE> — first matching line, trimmed
+# Logs are tee'd RAW, so colored lines carry ANSI escapes that sit between
+# words (e.g. recovery prints "\033[1mSUMMARY:\033[0m OK=9") and silently
+# break plain-text greps — the checklist then SKIPs items whose evidence is
+# right there in the log. Strip the escapes BEFORE matching.
+_noansi() { sed -e $'s/\x1b\[[0-9;]*m//g'; }
+ev() { # ev <module> <grep-ERE> — first matching line, trimmed, ANSI-stripped
   local f; f="$(log "$1")" || true
-  [ -n "${f:-}" ] && grep -E "$2" "$f" 2>/dev/null | head -1 | sed 's/^ *//;s/ *$//' | head -c 110
+  [ -n "${f:-}" ] && _noansi <"$f" 2>/dev/null | grep -E "$2" | head -1 | sed 's/^ *//;s/ *$//' | head -c 110
 }
 evl() { # evl <module> <grep-ERE> — LAST matching line (final summaries: a log
         # may hold several sub-verifier "PASS=/FAIL=" summaries; the last wins)
   local f; f="$(log "$1")" || true
-  [ -n "${f:-}" ] && grep -E "$2" "$f" 2>/dev/null | tail -1 | sed 's/^ *//;s/ *$//' | head -c 110
+  [ -n "${f:-}" ] && _noansi <"$f" 2>/dev/null | grep -E "$2" | tail -1 | sed 's/^ *//;s/ *$//' | head -c 110
+}
+ev2() { # ev2 <module1> <module2> <grep-ERE> — first module that has evidence.
+        # The delivered-fixes battery ("migrations applied", regression GETs)
+        # runs under the srs module, so e2e-tagged items fall back to srs.
+  local e; e="$(ev "$1" "$3")"; [ -n "$e" ] && { printf '%s' "$e"; return; }
+  ev "$2" "$3"
 }
 
 # ── Counters + item printer ──────────────────────────────────────────────────
@@ -187,7 +198,7 @@ hdr "B. PRESERVATION & FREEZE (20–34)"
 sumv 20 "All existing features preserved"        "$SRS_SUMMARY" "$SRS_FAILN" srs
 sumv 21 "All existing business logic preserved"  "$E2E_SUMMARY" "$E2E_FAILN" e2e
 e="$(ev e2e 'regression GET|API compatibility')"; sumv 22 "All existing APIs preserved" "${e:-$E2E_SUMMARY}" "$E2E_FAILN" e2e
-e="$(ev e2e 'migrations applied')"; [ -n "$e" ] && item 23 PASS "Database compatibility preserved" "$e" || item 23 SKIP "Database compatibility preserved" "run --e2e"
+e="$(ev2 e2e srs 'migrations applied')"; [ -n "$e" ] && item 23 PASS "Database compatibility preserved" "$e" || item 23 SKIP "Database compatibility preserved" "run --e2e or --srs"
 item 24 DEVICE "UI behavior preserved unless improved"           "$DVC"
 [ -n "$BM_SUMMARY" ] && { [ "${BM_NON2XX:-1}" = "0" ] && item 25 PASS "No breaking changes (0 non-2xx across battery)" "$BM_SUMMARY" || item 25 FAIL "No breaking changes" "$BM_SUMMARY"; } || item 25 SKIP "No breaking changes" "run --benchmark"
 item 26 STATIC "No rewrite of stable modules w/o benefit"        "$GOV"
@@ -401,7 +412,7 @@ sumv 182 "Security maintained or improved"        "$SEC_SUMMARY" "$SEC_FAILN" se
 item 183 STATIC "Maintainability improved"                       "jest $ATT_JEST · analyze $ATT_ANALYZE · module layout"
 [ -n "$CAP" ] && item 184 PASS "Scalability maintained" "$CAP" || item 184 SKIP "Scalability maintained" "run --srs"
 sumv 185 "Reliability maintained"                 "$REC_SUMMARY" "${REC_GAPS:-1}" recovery
-e="$(ev e2e 'regression GET /dashboard/admin')"; [ -n "$e" ] && item 186 PASS "Backward compatibility verified" "regression battery green" || item 186 SKIP "Backward compatibility verified" "run --e2e"
+e="$(ev2 e2e srs 'regression GET /dashboard/admin')"; [ -n "$e" ] && item 186 PASS "Backward compatibility verified" "regression battery green" || item 186 SKIP "Backward compatibility verified" "run --e2e or --srs"
 item 187 STATIC "Correctness never sacrificed for speed"         "$GOV"
 [ -n "$BM_SUMMARY" ] && item 188 PASS "Optimizations measurably beneficial" "p95 vs SLO budgets measured every run" || item 188 SKIP "Optimizations measurable" "run --benchmark"
 sumv 189 "Production-ready implementation"        "$PROD_SUMMARY" "$PROD_FAILN" production

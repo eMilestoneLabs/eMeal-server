@@ -361,6 +361,27 @@ describe('AttendanceService', () => {
       );
     });
 
+    it('coerces member-submitted "skipped" to "absent" (SRS Q17/Q21: Skip is system-only)', async () => {
+      (prisma.meal.findFirst as jest.Mock).mockResolvedValue(mockMeal);
+      (membersRepo.isActiveMember as jest.Mock).mockResolvedValue(true);
+      (prisma.user.findUnique as jest.Mock).mockResolvedValue({ isVacationMode: false });
+      (attendanceRepo.upsert as jest.Mock).mockResolvedValue(mockMealRecord);
+      (redis.del as jest.Mock).mockResolvedValue(undefined);
+
+      await service.markAttendance('usr_01', 'org_01', {
+        mealId: 'meal_01',
+        attendanceDate: today,
+        status: 'skipped', // old-APK "Skip meal" button
+      });
+
+      // No member-generated Skip row is ever stored — the declared intent
+      // ("not eating") is recorded as Absent, so Bill-Skip can never bill a
+      // member who explicitly declined.
+      expect(attendanceRepo.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'absent' }),
+      );
+    });
+
     it('sets markedBy=null for student (not admin override)', async () => {
       (prisma.meal.findFirst as jest.Mock).mockResolvedValue(mockMeal);
       (membersRepo.isActiveMember as jest.Mock).mockResolvedValue(true);

@@ -68,6 +68,16 @@ req() {
 perf() { if [ "${R_MS:-99999}" -le "$PERF_BUDGET_MS" ]; then ok "$1 latency" "${R_MS}ms ≤ ${PERF_BUDGET_MS}ms"
   else skip "$1 latency" "${R_MS}ms > ${PERF_BUDGET_MS}ms (bcrypt/network — re-check on VPS)"; fi; }
 
+# Login gets its OWN budget: its latency is dominated by the bcrypt password
+# verify — a deliberate OWASP security parameter, not a performance defect —
+# plus the refresh-token family write. Judging it against the generic 400ms
+# read budget produced a PERMANENT skip (548ms > 400ms) that no code change
+# should ever "fix": weakening bcrypt to win a benchmark would be a security
+# regression. 1200ms still asserts a hard, user-grade ceiling.
+LOGIN_BUDGET_MS="${LOGIN_BUDGET_MS:-1200}"
+perf_login() { if [ "${R_MS:-99999}" -le "$LOGIN_BUDGET_MS" ]; then ok "$1 latency" "${R_MS}ms ≤ ${LOGIN_BUDGET_MS}ms (bcrypt-aware budget)"
+  else no "$1 latency" "${R_MS}ms > ${LOGIN_BUDGET_MS}ms — exceeds even the bcrypt-aware budget"; fi; }
+
 j() { echo "$R_BODY" | jq -r "$1" 2>/dev/null; }
 
 is2xx() { [ "$1" -ge 200 ] && [ "$1" -lt 300 ]; }
@@ -80,7 +90,7 @@ echo "BASE=$BASE  perf_budget=${PERF_BUDGET_MS}ms  out=$OUT"
 sec "0. LOGIN (AUTH-tokens) + session"
 req POST /auth/login "$(jq -nc --arg i "$ADMIN_EMAIL" --arg p "$ADMIN_PASS" '{identifier:$i,password:$p}')"
 { is2xx "$R_CODE"; } && ok "Admin login" "($R_CODE)" || { no "Admin login" "($R_CODE) abort"; exit 1; }
-perf "login"
+perf_login "login"
 ADMIN_TOKEN="$(j '.accessToken // .data.accessToken // .tokens.accessToken')"
 ADMIN_REFRESH="$(j '.refreshToken // .data.refreshToken // .tokens.refreshToken')"
 [ -n "$ADMIN_TOKEN" ] && ok "Login returns accessToken" || no "Login accessToken missing"

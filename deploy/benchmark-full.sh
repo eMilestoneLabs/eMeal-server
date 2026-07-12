@@ -29,7 +29,18 @@ set -uo pipefail
 
 BASE="${BASE:-http://localhost:3000/api/v1}"
 SAMPLES="${SAMPLES:-20}"
-WARMUPS="${WARMUPS:-1}"
+# WARMUPS must cover the WHOLE PM2 cluster: requests round-robin across the
+# workers, so a single warmup hit warms exactly ONE worker and the measured
+# samples then land on stone-cold ones — right after a deploy/reload that
+# poisons p95/max with JIT-compile outliers (observed 2026-07-12: exports
+# max=1762ms in the same-minute post-reload run vs p95=150ms four minutes
+# later in the same audit). Default: 2 hits per online worker (fallback 8
+# when pm2/jq are unavailable). Set WARMUPS=0 to measure cold-start on purpose.
+if [ -z "${WARMUPS:-}" ]; then
+  _NW="$(pm2 jlist 2>/dev/null | jq '[.[] | select(.name=="emeal-server") | select(.pm2_env.status=="online")] | length' 2>/dev/null || true)"
+  case "$_NW" in ''|0|null|*[!0-9]*) _NW=4;; esac
+  WARMUPS=$((_NW * 2))
+fi
 FROM="${FROM:-$(date -d '-7 days' +%F 2>/dev/null || date +%F)}"
 TO="${TO:-$(date +%F)}"
 

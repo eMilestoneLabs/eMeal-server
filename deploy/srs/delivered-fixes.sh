@@ -110,7 +110,29 @@ req POST /attendance/admin/override \
   "$(jq -nc --arg u "$ADMIN_ID" '{userId:$u,mealId:"nonexistent-meal",attendanceDate:"2020-01-01",status:"present"}')" "$ADMIN_TOKEN"
 assert_in "admin/override validates unknown meal" "$R_CODE" "FR-ATT-030" 400 404 422
 
+# When writes are enabled but NO group has a configured meal (mealId=none),
+# self-provision a throwaway always-open meal so the ATT-004 self-mark test
+# actually RUNS instead of skipping. The creator is auto-added as an active
+# member (groups.service auto-membership), the window is 00:00–23:59 so the
+# mark applies deterministically, and the group is permanently deleted below
+# (meals + attendance cascade) — zero impact on real data.
+_ZZ_SELF_GID=""
+if [ "$WRITE_TESTS" = "1" ] && [ -z "$SELF_MEAL" ]; then
+  req POST /groups "$(jq -nc '{name:"ZZ_SRS_SELFMARK",type:"hostel",maxMembers:5,joinApprovalRequired:false,mealConfig:{mealsEnabled:true}}')" "$ADMIN_TOKEN"
+  _ZZ_SELF_GID="$(jbody '.id // .data.id // empty')"
+  if [ -n "$_ZZ_SELF_GID" ] && [ "$_ZZ_SELF_GID" != "null" ]; then
+    req POST /meals "$(jq -nc --arg g "$_ZZ_SELF_GID" '{groupId:$g,slotKey:"zz_selfmark_open",name:"ZZ Selfmark Open",attendanceEnabled:true,attendanceWindow:{openTime:"00:00",closeTime:"23:59"}}')" "$ADMIN_TOKEN"
+    _ZZ_MID="$(jbody '.id // .data.id // empty')"
+    if [ -n "$_ZZ_MID" ] && [ "$_ZZ_MID" != "null" ]; then
+      SELF_MEAL="$_ZZ_MID"; MEAL_GID="$_ZZ_SELF_GID"
+    fi
+  fi
+fi
+
 if [ "$WRITE_TESTS" = "1" ] && [ -n "$SELF_MEAL" ]; then
+  # attendanceDate must be "today" in the ORG timezone (Asia/Kolkata) — the
+  # member path rejects any other date, and the VPS clock runs on UTC.
+  TODAY="$(TZ='Asia/Kolkata' date +%F)"
   req GET "/attendance/today?groupId=$MEAL_GID" "" "$ADMIN_TOKEN"
   _PRIOR="$(printf '%s' "$R_BODY" | jq -r --arg m "$SELF_MEAL" '[(.data // .)[]? | select(.mealId==$m)][0].status // empty' 2>/dev/null)"
 
@@ -156,7 +178,20 @@ if [ "$WRITE_TESTS" = "1" ] && [ -n "$SELF_MEAL" ]; then
     ok "cleanup: restored admin prior status" "→ $_PRIOR" "FR-ATT-031"
   fi
 else
-  skip "admin self-mark (live write)" "set WRITE_TESTS=1 (self-cleaning) to run" "FR-ATT-031"
+  if [ "$WRITE_TESTS" = "1" ]; then
+    skip "admin self-mark (live write)" "could not provision a throwaway meal (create capacity?)" "FR-ATT-031"
+  else
+    skip "admin self-mark (live write)" "set WRITE_TESTS=1 (self-cleaning) to run" "FR-ATT-031"
+  fi
+fi
+
+# Cleanup: permanently delete the self-provisioned throwaway group (cascades
+# its meal + the self-mark attendance row). Real groups are never touched.
+if [ -n "$_ZZ_SELF_GID" ] && [ "$_ZZ_SELF_GID" != "null" ]; then
+  req DELETE "/groups/$_ZZ_SELF_GID/permanent" "" "$ADMIN_TOKEN"
+  { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "204" ]; } \
+    && ok "cleanup: throwaway self-mark group deleted" "($R_CODE)" "FR-ATT-031" \
+    || no "cleanup: throwaway self-mark group NOT deleted" "$R_CODE — delete ZZ_SRS_SELFMARK manually" "FR-ATT-031"
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
