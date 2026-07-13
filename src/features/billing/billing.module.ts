@@ -1,7 +1,8 @@
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { AuditModule } from '../../audit/audit.module';
-import { BillingController } from './billing.controller';
+import { NoticesModule } from '../notices/notices.module';
+import { BillingController, BillingMemberController } from './billing.controller';
 import { BillingService } from './billing.service';
 
 /**
@@ -11,8 +12,11 @@ import { BillingService } from './billing.service';
  * circular-dependency risk.
  */
 @Module({
-  imports: [PrismaModule, AuditModule],
-  controllers: [BillingController],
+  // command_6 (survey 2026-07-13): NoticesModule (leaf module — no billing
+  // dependency, cycle-free) powers the member-consent debit bell alert;
+  // BillingMemberController carries the member-side approval routes.
+  imports: [PrismaModule, AuditModule, NoticesModule],
+  controllers: [BillingController, BillingMemberController],
   providers: [BillingService],
   exports: [BillingService],
 })

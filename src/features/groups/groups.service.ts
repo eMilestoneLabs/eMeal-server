@@ -421,25 +421,26 @@ export class GroupsService {
     const group = await this.groupsRepo.findById(id, organizationId, isAdmin);
     if (!group) throw new NotFoundException('Group not found');
 
-    if (!isAdmin) {
-      const isMember = await this.membersRepo.isActiveMember(id, userId);
-      if (!isMember) {
-        throw new ForbiddenException({
-          message: 'Access denied',
-          errors: { group: 'You are not a member of this group' },
-        });
-      }
+    // command_6 perf: the requester's membership row and the display names are
+    // independent point-lookups — one parallel wave instead of three
+    // sequential round trips. The membership row also answers the member
+    // access check (status === 'active'), replacing the isActiveMember count.
+    const [myMembership, names] = await Promise.all([
+      this.membersRepo.findMembership(id, userId),
+      this.groupsRepo.getDetailNames(group.adminId, organizationId),
+    ]);
+
+    if (!isAdmin && myMembership?.status !== 'active') {
+      throw new ForbiddenException({
+        message: 'Access denied',
+        errors: { group: 'You are not a member of this group' },
+      });
     }
 
     // Additive (#8): requester's per-group functional role for display.
-    const myMembership = await this.membersRepo.findMembership(id, userId);
     group.functionalRole = myMembership?.functionalRole ?? null;
 
     // Additive (ISSUE 2): admin + organization names for the member detail view.
-    const names = await this.groupsRepo.getDetailNames(
-      group.adminId,
-      organizationId,
-    );
     group.adminName = names.adminName;
     group.organizationName = names.organizationName;
 
@@ -1433,30 +1434,34 @@ export class GroupsService {
     userRole: string,
     query: QueryMembersDto,
   ) {
-    // Verify group exists in org
-    const group = await this.groupsRepo.findById(groupId, organizationId);
-    if (!group) throw new NotFoundException('Group not found');
-
-    // Non-admins must be active members to view member list
     const isAdmin = ADMIN_ROLES.includes(userRole as any);
-    if (!isAdmin) {
-      const isMember = await this.membersRepo.isActiveMember(groupId, userId);
-      if (!isMember) {
-        throw new ForbiddenException({
-          message: 'Access denied',
-          errors: { group: 'You must be a group member to view its member list' },
-        });
-      }
-    }
-
     const page = Math.max(1, query.page ?? 1);
     const limit = Math.min(100, Math.max(1, query.limit ?? 20));
 
-    const result = await this.membersRepo.findByGroupId(groupId, organizationId, {
-      page,
-      limit,
-      status: query.status,
-    });
+    // command_6 perf: the roster query is org-scoped itself, so the group 404
+    // probe, the member access gate and the roster fetch all run in ONE
+    // parallel wave (was three sequential round trips — the first of which
+    // pulled the whole member relation just to prove existence). Error
+    // precedence unchanged: 404 before 403 before data.
+    const [groupExists, viewerIsMember, result] = await Promise.all([
+      this.groupsRepo.existsInOrg(groupId, organizationId),
+      isAdmin
+        ? Promise.resolve(true)
+        : this.membersRepo.isActiveMember(groupId, userId),
+      this.membersRepo.findByGroupId(groupId, organizationId, {
+        page,
+        limit,
+        status: query.status,
+      }),
+    ]);
+
+    if (!groupExists) throw new NotFoundException('Group not found');
+    if (!viewerIsMember) {
+      throw new ForbiddenException({
+        message: 'Access denied',
+        errors: { group: 'You must be a group member to view its member list' },
+      });
+    }
 
     return {
       data: result.data.map(GroupMemberSerializer.toResponse),

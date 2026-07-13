@@ -108,6 +108,98 @@ export class UsersRepository {
   }
 
   /**
+   * command_6 perf: GET /users/me bundle — the profile row (memberships + org
+   * timezone) AND the near-today approved vacation rows in ONE parallel wave,
+   * so the common profile load costs a single DB round trip instead of the
+   * three sequential ones (sync user fetch → covering fetch → full findById).
+   *
+   * The vacation rows are fetched with a ±48h margin around "now" and the
+   * exact covering check (org-timezone today) is evaluated in process. Any
+   * approved request covering today's org-local date necessarily intersects
+   * that margin window (org midnight is within ±24h of now for every
+   * timezone), so this is equivalent to the covering findFirst in
+   * {@link syncVacationExpiry}.
+   */
+  async findByIdWithVacationMeta(id: string): Promise<{
+    entity: UserEntity;
+    orgTimezone: string;
+    approvedNearToday: { startDate: Date; endDate: Date }[];
+  } | null> {
+    const marginMs = 48 * 60 * 60 * 1000;
+    const now = Date.now();
+    const [user, approvedNearToday] = await Promise.all([
+      this.prisma.user.findUnique({
+        where: { id },
+        include: {
+          ...this.memberInclude,
+          organization: { select: { timezone: true } },
+        },
+      }),
+      this.prisma.vacationRequest.findMany({
+        where: {
+          userId: id,
+          status: 'approved',
+          deletedAt: null,
+          startDate: { lte: new Date(now + marginMs) },
+          endDate: { gte: new Date(now - marginMs) },
+        },
+        select: { startDate: true, endDate: true },
+      }),
+    ]);
+    if (!user) return null;
+    const { organization, ...rest } = user as any;
+    return {
+      entity: this.buildEntityFromInclude(rest),
+      orgTimezone: organization?.timezone ?? 'Asia/Kolkata',
+      approvedNearToday,
+    };
+  }
+
+  /**
+   * command_6 perf: identical vacation-flag rules to {@link syncVacationExpiry}
+   * (flip ON when an approved request covers today; flip OFF only for
+   * request-driven flags; never touch pure-toggle users) — but fed by the
+   * prefetched bundle, so the no-flip common case costs ZERO extra queries and
+   * a flip never re-reads the user row. Returns the resolved flag.
+   */
+  async resolveVacationFlagPrefetched(
+    userId: string,
+    isVacationMode: boolean,
+    orgTimezone: string,
+    approvedNearToday: { startDate: Date; endDate: Date }[],
+  ): Promise<boolean> {
+    const todayUtc = toUtcMidnight(getTodayInTimezone(orgTimezone));
+    const covering = approvedNearToday.some(
+      (r) => r.startDate <= todayUtc && r.endDate >= todayUtc,
+    );
+
+    if (covering && !isVacationMode) {
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: { isVacationMode: true },
+      });
+      return true;
+    }
+    if (!covering && isVacationMode) {
+      // Only request-driven flags auto-resume; toggle-mode flags stay.
+      const hasAnyApproved =
+        approvedNearToday.length > 0 ||
+        !!(await this.prisma.vacationRequest.findFirst({
+          where: { userId, status: 'approved', deletedAt: null },
+          select: { id: true },
+        }));
+      if (hasAnyApproved) {
+        await this.prisma.user.update({
+          where: { id: userId },
+          data: { isVacationMode: false },
+        });
+        return false;
+      }
+    }
+    return isVacationMode;
+  }
+
+  /**
    * SRS Module 03 VAC-005/006/012 (BUG-VAC-SELF-SERVE): Return Early.
    * Turning vacation OFF must PERSIST — but syncVacationExpiry force-flips the
    * flag back ON while an approved request still covers today. Ending the

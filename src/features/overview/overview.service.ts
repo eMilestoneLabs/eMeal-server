@@ -49,8 +49,11 @@ export class OverviewService {
     date?: string,
   ) {
     // Same date semantics as the legacy client calls: phone-local date when
-    // provided, otherwise the server's UTC date.
-    const day = date ?? new Date().toISOString().slice(0, 10);
+    // provided. command_6 (timezone integrity): the no-date default is now
+    // the ORG's calendar day — the server's UTC day is still yesterday
+    // between local midnight and the tz offset (00:00-05:30 IST).
+    const day =
+      date ?? (await this.attendanceService.getOrgToday(organizationId));
 
     // Wave 1 (server-side): groups — identical to GET /groups?page=1&limit=100.
     const groupsPage = (await this.groupsService.getGroups(

@@ -12,6 +12,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../../audit/audit.service';
 import { RedisService } from '../../redis/redis.service';
 import { QueueService } from '../../queue/queue.service';
+import { NoticesService } from '../notices/notices.service';
 import {
   toUtcMidnight,
   getTodayInTimezone,
@@ -53,6 +54,11 @@ export class BillingService {
     @Optional()
     @Inject(QueueService)
     private readonly queue: QueueService | null = null,
+    // command_6 (survey 2026-07-13): bell alert for the member-consent debit
+    // workflow. Optional so existing TestingModules keep working unchanged.
+    @Optional()
+    @Inject(NoticesService)
+    private readonly notices: NoticesService | null = null,
   ) {}
 
   // ── Pass 12 (FR-BILLX-050) — billing read-cache version ────────────────────
@@ -169,6 +175,10 @@ export class BillingService {
       requestId,
     });
 
+    // CREDIT-001: finalizing changes the carry-forward opening balance of
+    // every later period — invalidate cached summaries.
+    await this.bumpBillingVersion(dto.groupId);
+
     return this.toResponse(period);
   }
 
@@ -220,6 +230,9 @@ export class BillingService {
       requestId,
     });
 
+    // CREDIT-001: the reopened period no longer feeds carry-forward.
+    await this.bumpBillingVersion(period.groupId);
+
     return this.toResponse(updated);
   }
 
@@ -269,6 +282,9 @@ export class BillingService {
       requestId,
     });
 
+    // CREDIT-001: re-locking re-enables carry-forward from this period.
+    await this.bumpBillingVersion(period.groupId);
+
     return this.toResponse(updated);
   }
 
@@ -290,6 +306,11 @@ export class BillingService {
       select: {
         id: true,
         organization: { select: { timezone: true } },
+        // REF-001 (survey 2026-07-13): billing policy for the refund cap —
+        // the member's true net position depends on what the group bills.
+        billSkippedMeals: true,
+        guestAttendanceEnabled: true,
+        billNoShowGuests: true,
       },
     });
     if (!group) throw new NotFoundException('Group not found');
@@ -305,35 +326,35 @@ export class BillingService {
       });
     }
 
-    // FR-FAIR-001 (LOOP-010): debits require member-consent proof.
+    // FR-FAIR-001 (LOOP-010): a debit (liability increase) needs member
+    // consent. Two consent paths (command_6 survey 2026-07-13):
+    //   • refRequestId present → an APPROVED correction request of the same
+    //     member proves consent — the debit posts immediately (legacy path).
+    //   • no refRequestId → the debit is created PENDING and the member is
+    //     asked to approve it from their bell / billing screen. It counts in
+    //     billing only after the member approves — never if rejected.
+    let entryStatus: 'posted' | 'pending' = 'posted';
     if (dto.type === 'debit') {
       if (!dto.refRequestId) {
-        throw new ForbiddenException({
-          message:
-            'A debit must reference an approved correction request from the member',
-          code: 'CONSENT_REQUIRED',
-          errors: {
-            refRequestId:
-              'Liability can only increase through the member-consent path',
+        entryStatus = 'pending';
+      } else {
+        const acr = await (this.prisma as any).attendanceCorrectionRequest.findFirst({
+          where: {
+            id: dto.refRequestId,
+            organizationId,
+            userId: dto.userId,
+            status: 'approved',
           },
+          select: { id: true },
         });
-      }
-      const acr = await (this.prisma as any).attendanceCorrectionRequest.findFirst({
-        where: {
-          id: dto.refRequestId,
-          organizationId,
-          userId: dto.userId,
-          status: 'approved',
-        },
-        select: { id: true },
-      });
-      if (!acr) {
-        throw new ForbiddenException({
-          message:
-            'The referenced correction request is not an approved request of this member',
-          code: 'CONSENT_REQUIRED',
-          errors: { refRequestId: 'Must be an APPROVED request of the same member' },
-        });
+        if (!acr) {
+          throw new ForbiddenException({
+            message:
+              'The referenced correction request is not an approved request of this member',
+            code: 'CONSENT_REQUIRED',
+            errors: { refRequestId: 'Must be an APPROVED request of the same member' },
+          });
+        }
       }
     }
 
@@ -354,21 +375,77 @@ export class BillingService {
       });
     }
 
-    const entry = await (this.prisma as any).billingLedgerEntry.create({
-      data: {
-        organizationId,
-        groupId: dto.groupId,
-        userId: dto.userId,
-        entryDate,
-        type: dto.type,
-        amount: dto.amount,
-        reason: dto.reason,
-        refRecordId: dto.refRecordId ?? null,
-        refGuestId: dto.refGuestId ?? null,
-        refRequestId: dto.refRequestId ?? null,
-        createdBy: adminId,
-      },
-    });
+    const entryData = {
+      organizationId,
+      groupId: dto.groupId,
+      userId: dto.userId,
+      entryDate,
+      type: dto.type,
+      amount: dto.amount,
+      reason: dto.reason,
+      refRecordId: dto.refRecordId ?? null,
+      refGuestId: dto.refGuestId ?? null,
+      refRequestId: dto.refRequestId ?? null,
+      createdBy: adminId,
+      status: entryStatus,
+    };
+
+    // REF-001 hard cap (survey 2026-07-13): a refund returns the member's own
+    // money — it may NEVER exceed the available refundable credit (the
+    // member's all-time net position: billed meals + guest charges + posted
+    // ledger, payable-positive). Checked INSIDE a transaction under a
+    // per-member advisory lock so concurrent refunds cannot combine into an
+    // over-refund. Rejected attempts are audit-logged (admin, requested,
+    // available) per the locked business rules.
+    let entry: any;
+    let remainingCreditRupees: number | null = null;
+    if (dto.type === 'refund') {
+      const requestedRupees = Math.round(dto.amount / 100);
+      entry = await (this.prisma as any).$transaction(async (tx: any) => {
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`bill:${dto.groupId}:${dto.userId}`}))`;
+        const net = await this.computeMemberNetBalance(
+          tx,
+          organizationId,
+          dto.groupId,
+          dto.userId,
+          {
+            billSkippedMeals: (group as any).billSkippedMeals === true,
+            guestAttendanceEnabled: (group as any).guestAttendanceEnabled === true,
+            billNoShowGuests: (group as any).billNoShowGuests !== false,
+          },
+        );
+        const available = Math.max(0, -net);
+        if (requestedRupees > available) {
+          this.audit.log({
+            organizationId,
+            actorId: adminId,
+            targetId: dto.userId,
+            targetType: 'BillingLedgerEntry',
+            action: 'create',
+            metadata: {
+              decision: 'rejected_over_refund',
+              groupId: dto.groupId,
+              userId: dto.userId,
+              requestedPaise: dto.amount,
+              availableCreditRupees: available,
+              reason: dto.reason,
+            },
+            requestId,
+          });
+          throw new UnprocessableEntityException({
+            message: `Refund amount exceeds the member's available refundable credit of ₹${available}`,
+            code: 'REFUND_EXCEEDS_CREDIT',
+            errors: { amount: `Available refundable credit is ₹${available}` },
+          });
+        }
+        remainingCreditRupees = available - requestedRupees;
+        return tx.billingLedgerEntry.create({ data: entryData });
+      });
+    } else {
+      entry = await (this.prisma as any).billingLedgerEntry.create({
+        data: entryData,
+      });
+    }
 
     this.audit.log({
       organizationId,
@@ -382,14 +459,66 @@ export class BillingService {
         type: dto.type,
         amount: dto.amount,
         reason: dto.reason,
+        status: entryStatus,
+        ...(remainingCreditRupees !== null
+          ? { remainingCreditRupees }
+          : {}),
         ...(dto.refRequestId ? { refRequestId: dto.refRequestId } : {}),
       },
       requestId,
     });
 
-    await this.bumpBillingVersion(dto.groupId);
+    // Pending debits don't change any bill yet — no cache invalidation needed.
+    if (entryStatus === 'posted') {
+      await this.bumpBillingVersion(dto.groupId);
+    }
+
+    // command_6 (survey 2026-07-13): a PENDING debit lands in the member's
+    // bell for approval — best-effort, the entry itself is already saved.
+    if (entryStatus === 'pending' && this.notices) {
+      const rupees = (dto.amount / 100).toFixed(2);
+      void this.notices
+        .createMemberAlert({
+          organizationId,
+          groupId: dto.groupId,
+          actorId: adminId,
+          targetUserId: dto.userId,
+          title: 'Charge approval requested',
+          body: `+₹${rupees} — ${dto.reason}. Review and approve or decline from your Billing screen.`,
+          linkType: 'billingAdjustments',
+        })
+        .catch((err) =>
+          this.logger.warn(`debit approval notice failed: ${(err as Error).message}`),
+        );
+    }
 
     // Transparency (LOOP-035): the member always learns about bill changes.
+    const pushCopy = (() => {
+      const rupees = `₹${(dto.amount / 100).toFixed(2)}`;
+      switch (dto.type) {
+        case 'debit':
+          return entryStatus === 'pending'
+            ? {
+                title: 'Approval needed: proposed charge',
+                body: `+${rupees} — ${dto.reason}. Approve or decline in Billing.`,
+              }
+            : {
+                title: 'A charge was added to your bill',
+                body: `+${rupees} — ${dto.reason}`,
+              };
+        case 'refund':
+          // REF-001: a refund consumes credit (returns money to the member).
+          return {
+            title: 'A refund was issued to you',
+            body: `${rupees} returned — ${dto.reason}`,
+          };
+        default:
+          return {
+            title: 'A credit was applied to your bill',
+            body: `−${rupees} — ${dto.reason}`,
+          };
+      }
+    })();
     void this.prisma.user
       .findUnique({ where: { id: dto.userId }, select: { fcmToken: true } })
       .then((u) =>
@@ -397,11 +526,8 @@ export class BillingService {
           ? this.queue.enqueueBatchPush({
               organizationId,
               recipients: [{ userId: dto.userId, fcmToken: u.fcmToken }],
-              title:
-                dto.type === 'debit'
-                  ? 'A charge was added to your bill'
-                  : 'A credit was applied to your bill',
-              body: `${dto.type === 'debit' ? '+' : '−'}₹${(dto.amount / 100).toFixed(2)} — ${dto.reason}`,
+              title: pushCopy.title,
+              body: pushCopy.body,
               // Registered frontend path (Issue 6: '/billing' 404'd in-app).
               route: '/student/billing',
               data: { type: 'billing_adjustment', entryId: entry.id },
@@ -413,6 +539,186 @@ export class BillingService {
       );
 
     return this.adjustmentToResponse(entry);
+  }
+
+  /**
+   * command_6 (survey 2026-07-13): the billed member approves or rejects a
+   * PENDING debit. Approve → the entry becomes 'posted' and starts counting
+   * in billing; reject → 'rejected', never counted. Only the member the entry
+   * bills may decide (self-consent — FR-FAIR-001 in workflow form).
+   */
+  async decideAdjustment(
+    memberId: string,
+    organizationId: string,
+    entryId: string,
+    decision: 'approved' | 'rejected',
+    requestId?: string,
+  ) {
+    const entry = await (this.prisma as any).billingLedgerEntry.findFirst({
+      where: { id: entryId, organizationId },
+    });
+    if (!entry) {
+      throw new NotFoundException({
+        message: 'Adjustment not found',
+        errors: { id: 'Does not exist in your organization' },
+      });
+    }
+    if (entry.userId !== memberId) {
+      throw new ForbiddenException({
+        message: 'Only the billed member can decide this charge',
+        errors: { id: 'Not your pending charge' },
+      });
+    }
+    if (entry.status !== 'pending') {
+      throw new UnprocessableEntityException({
+        message: `This charge was already ${entry.status}`,
+        code: 'ALREADY_DECIDED',
+        errors: { id: `Status is ${entry.status}` },
+      });
+    }
+
+    // FR-BILLX-051 still holds at decision time: if the original business
+    // date has been finalized while the debit sat pending, the approved
+    // charge posts to TODAY (org time) instead of mutating a locked period.
+    let entryDate: Date = entry.entryDate;
+    let movedToOpenDate = false;
+    if (decision === 'approved') {
+      const lock = await this.isDateFinalized(
+        organizationId,
+        entry.groupId,
+        entry.entryDate,
+      );
+      if (lock.locked) {
+        const grp = await this.prisma.group.findFirst({
+          where: { id: entry.groupId, organizationId },
+          select: { organization: { select: { timezone: true } } },
+        });
+        const tz = grp?.organization?.timezone ?? 'Asia/Kolkata';
+        entryDate = toUtcMidnight(getTodayInTimezone(tz));
+        const todayLock = await this.isDateFinalized(
+          organizationId,
+          entry.groupId,
+          entryDate,
+        );
+        if (todayLock.locked) {
+          throw new UnprocessableEntityException({
+            message:
+              'This date lies in a finalized billing period — ask the admin to reopen it first',
+            code: 'PERIOD_FINALIZED',
+            errors: { id: `Period finalized through ${todayLock.periodEnd}` },
+          });
+        }
+        movedToOpenDate = true;
+      }
+    }
+
+    const updated = await (this.prisma as any).billingLedgerEntry.update({
+      where: { id: entryId },
+      data: {
+        status: decision === 'approved' ? 'posted' : 'rejected',
+        decidedBy: memberId,
+        decidedAt: new Date(),
+        ...(movedToOpenDate ? { entryDate } : {}),
+      },
+    });
+
+    this.audit.log({
+      organizationId,
+      actorId: memberId,
+      targetId: entryId,
+      targetType: 'BillingLedgerEntry',
+      action: 'update',
+      metadata: {
+        decision,
+        groupId: entry.groupId,
+        amount: entry.amount,
+        ...(movedToOpenDate
+          ? { movedToOpenDate: entryDate.toISOString().slice(0, 10) }
+          : {}),
+      },
+      requestId,
+    });
+
+    if (decision === 'approved') {
+      await this.bumpBillingVersion(entry.groupId);
+    }
+
+    return this.adjustmentToResponse(updated);
+  }
+
+  /**
+   * command_6 (survey 2026-07-13): the caller's own PENDING debits — powers
+   * the student "charge approval" card. Self-scoped; no other member's rows.
+   */
+  async listMyPendingAdjustments(organizationId: string, userId: string) {
+    const rows = await (this.prisma as any).billingLedgerEntry.findMany({
+      where: { organizationId, userId, status: 'pending' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: 50,
+    });
+    return { data: rows.map((r: any) => this.adjustmentToResponse(r)) };
+  }
+
+  /**
+   * REF-001: the member's all-time net position (whole ₹, payable-positive)
+   * inside one group — billed meals (per group policy) + guest charges +
+   * POSTED signed ledger. Available refundable credit = max(0, −net).
+   * Runs on the [tx] client so the refund cap check and the insert commit
+   * atomically under the advisory lock.
+   */
+  private async computeMemberNetBalance(
+    tx: any,
+    organizationId: string,
+    groupId: string,
+    userId: string,
+    policy: {
+      billSkippedMeals: boolean;
+      guestAttendanceEnabled: boolean;
+      billNoShowGuests: boolean;
+    },
+  ): Promise<number> {
+    const billedStatuses = policy.billSkippedMeals
+      ? ['present', 'skipped', 'absent']
+      : ['present'];
+    const [meal, guest, ledger] = await Promise.all([
+      tx.attendanceRecord.aggregate({
+        where: {
+          organizationId,
+          groupId,
+          userId,
+          status: { in: billedStatuses },
+        },
+        _sum: { price: true },
+      }),
+      policy.guestAttendanceEnabled
+        ? tx.mealGuest.aggregate({
+            where: {
+              organizationId,
+              groupId,
+              hostUserId: userId,
+              status: {
+                in: policy.billNoShowGuests ? ['booked', 'no_show'] : ['booked'],
+              },
+              pendingApproval: false,
+            },
+            _sum: { priceSnapshot: true },
+          })
+        : Promise.resolve({ _sum: { priceSnapshot: 0 } }),
+      tx.billingLedgerEntry.groupBy({
+        by: ['type'],
+        where: { organizationId, groupId, userId, status: 'posted' },
+        _sum: { amount: true },
+      }),
+    ]);
+    let adjPaise = 0;
+    for (const r of ledger as Array<{ type: string; _sum: { amount: number | null } }>) {
+      adjPaise += (r._sum.amount ?? 0) * (r.type === 'credit' ? -1 : 1);
+    }
+    return (
+      (meal._sum.price ?? 0) +
+      (guest._sum?.priceSnapshot ?? 0) +
+      Math.round(adjPaise / 100)
+    );
   }
 
   async listAdjustments(organizationId: string, query: QueryAdjustmentsDto) {
@@ -450,8 +756,11 @@ export class BillingService {
 
   /**
    * Signed adjustment sums per member for a group+range — one groupBy (grouped
-   * by type). Sign convention: debit positive (increases the bill),
-   * credit/refund negative.
+   * by type). Sign convention (REF-001, survey 2026-07-13, payable-positive):
+   * debit AND refund positive (a refund returns money to the member and so
+   * CONSUMES their credit — it is never a discount), credit negative.
+   * Only POSTED entries count — pending debits await member approval and
+   * rejected ones never bill (member-consent workflow).
    *
    * UNIT BOUNDARY (Issue 1/2): ledger rows are stored in paise (minor units),
    * but the billing engine — meal/guest price snapshots, revenue, member bills
@@ -474,6 +783,7 @@ export class BillingService {
           organizationId,
           groupId,
           entryDate: { gte: fromDate, lte: toDate },
+          status: 'posted',
         },
         _sum: { amount: true },
       });
@@ -481,7 +791,7 @@ export class BillingService {
     // sums round on the total, never per entry.
     const paiseByUser = new Map<string, number>();
     for (const r of rows) {
-      const signed = (r._sum.amount ?? 0) * (r.type === 'debit' ? 1 : -1);
+      const signed = (r._sum.amount ?? 0) * (r.type === 'credit' ? -1 : 1);
       paiseByUser.set(r.userId, (paiseByUser.get(r.userId) ?? 0) + signed);
     }
     const byUser = new Map<string, number>();
@@ -549,6 +859,9 @@ export class BillingService {
     refRequestId: string | null;
     createdBy: string;
     createdAt: Date;
+    status?: string | null;
+    decidedAt?: Date | null;
+    decidedBy?: string | null;
   }) {
     return {
       id: r.id,
@@ -557,14 +870,128 @@ export class BillingService {
       entryDate: r.entryDate.toISOString().slice(0, 10),
       type: r.type,
       amount: r.amount,
-      // Convenience for clients: signed effect on the bill.
-      signedAmount: r.type === 'debit' ? r.amount : -r.amount,
+      // Convenience for clients: signed effect on the bill (REF-001:
+      // refund consumes credit → positive, like debit; credit negative).
+      signedAmount: r.type === 'credit' ? -r.amount : r.amount,
       reason: r.reason,
       refRecordId: r.refRecordId,
       refGuestId: r.refGuestId,
       refRequestId: r.refRequestId,
       createdBy: r.createdBy,
       createdAt: r.createdAt.toISOString(),
+      // command_6 (survey 2026-07-13): member-consent debit workflow fields.
+      status: r.status ?? 'posted',
+      decidedAt: r.decidedAt ? r.decidedAt.toISOString() : null,
+      decidedBy: r.decidedBy ?? null,
+    };
+  }
+
+  /**
+   * CREDIT-001 (survey 2026-07-13): per-member OPENING BALANCES (whole ₹,
+   * payable-positive) for a period starting at [fromDate] — the closing
+   * position of everything up to and including the latest FINALIZED billing
+   * period that ended before [fromDate]. No finalized period → no
+   * carry-forward (empty map), exactly as specified: carry-forward happens
+   * only once the previous period is finalized and locked. Zero balances are
+   * dropped (they carry nothing). Three parallel indexed aggregates.
+   */
+  async computeOpeningBalances(
+    organizationId: string,
+    groupId: string,
+    fromDate: Date,
+    policy: {
+      billSkippedMeals?: boolean;
+      guestAttendanceEnabled?: boolean;
+      billNoShowGuests?: boolean;
+    },
+  ): Promise<{ byUser: Map<string, number>; carriedThrough: string | null }> {
+    const lastFinal = await this.prisma.billingPeriod.findFirst({
+      where: {
+        organizationId,
+        groupId,
+        status: 'finalized',
+        periodEnd: { lt: fromDate },
+      },
+      orderBy: { periodEnd: 'desc' },
+      select: { periodEnd: true },
+    });
+    if (!lastFinal) return { byUser: new Map(), carriedThrough: null };
+    const cutoff = lastFinal.periodEnd;
+
+    const billedStatuses =
+      policy.billSkippedMeals === true
+        ? ['present', 'skipped', 'absent']
+        : ['present'];
+    const [meals, guests, ledger] = await Promise.all([
+      this.prisma.attendanceRecord.groupBy({
+        by: ['userId'],
+        where: {
+          organizationId,
+          groupId,
+          attendanceDate: { lte: cutoff },
+          status: { in: billedStatuses as any },
+        },
+        _sum: { price: true },
+      }),
+      policy.guestAttendanceEnabled === true
+        ? this.prisma.mealGuest.groupBy({
+            by: ['hostUserId'],
+            where: {
+              organizationId,
+              groupId,
+              attendanceDate: { lte: cutoff },
+              status: {
+                in:
+                  policy.billNoShowGuests !== false
+                    ? ['booked', 'no_show']
+                    : ['booked'],
+              },
+              pendingApproval: false,
+            },
+            _sum: { priceSnapshot: true },
+          })
+        : Promise.resolve([] as any[]),
+      (this.prisma as any).billingLedgerEntry.groupBy({
+        by: ['userId', 'type'],
+        where: {
+          organizationId,
+          groupId,
+          entryDate: { lte: cutoff },
+          status: 'posted',
+        },
+        _sum: { amount: true },
+      }),
+    ]);
+
+    const byUser = new Map<string, number>();
+    for (const m of meals as Array<{ userId: string; _sum: { price: number | null } }>) {
+      byUser.set(m.userId, (byUser.get(m.userId) ?? 0) + (m._sum.price ?? 0));
+    }
+    for (const g of guests as Array<{ hostUserId: string; _sum: { priceSnapshot: number | null } }>) {
+      byUser.set(
+        g.hostUserId,
+        (byUser.get(g.hostUserId) ?? 0) + (g._sum.priceSnapshot ?? 0),
+      );
+    }
+    // Ledger is paise — accumulate then convert once per member (REF-001
+    // signs: credit −, debit/refund +).
+    const paise = new Map<string, number>();
+    for (const l of ledger as Array<{ userId: string; type: string; _sum: { amount: number | null } }>) {
+      paise.set(
+        l.userId,
+        (paise.get(l.userId) ?? 0) +
+          (l._sum.amount ?? 0) * (l.type === 'credit' ? -1 : 1),
+      );
+    }
+    for (const [uid, p] of paise) {
+      byUser.set(uid, (byUser.get(uid) ?? 0) + Math.round(p / 100));
+    }
+    for (const [uid, v] of byUser) {
+      if (v === 0) byUser.delete(uid);
+    }
+    return {
+      byUser,
+      carriedThrough: cutoff.toISOString().slice(0, 10),
     };
   }
 
@@ -609,31 +1036,124 @@ export class BillingService {
     return period;
   }
 
-  /** Immutable reprint snapshot: per-member present count + billed total. */
+  /**
+   * Immutable reprint snapshot: per-member present count + billed total.
+   * CREDIT-001 (survey 2026-07-13, additive JSON fields): the snapshot now
+   * also captures each member's openingBalance (carried from the previous
+   * finalized period), in-period billedAmount/guestAmount/adjustments and the
+   * resulting closingBalance — so every carry-forward chain is auditable from
+   * the locked snapshots alone. Legacy fields keep their exact meaning.
+   */
   private async buildTotalsSnapshot(
     organizationId: string,
     groupId: string,
     start: Date,
     end: Date,
   ) {
-    const perMember = await this.prisma.attendanceRecord.groupBy({
-      by: ['userId'],
-      where: {
-        organizationId,
-        groupId,
-        attendanceDate: { gte: start, lte: end },
-        status: 'present',
+    const policyRow = await this.prisma.group.findFirst({
+      where: { id: groupId, organizationId },
+      select: {
+        billSkippedMeals: true,
+        guestAttendanceEnabled: true,
+        billNoShowGuests: true,
       },
-      _count: { _all: true },
-      _sum: { price: true },
     });
+    const policy = {
+      billSkippedMeals: (policyRow as any)?.billSkippedMeals === true,
+      guestAttendanceEnabled: policyRow?.guestAttendanceEnabled === true,
+      billNoShowGuests: policyRow?.billNoShowGuests !== false,
+    };
+    const billedStatuses = policy.billSkippedMeals
+      ? ['present', 'skipped', 'absent']
+      : ['present'];
+
+    const [perMember, billedPerMember, guests, adjustments, opening] =
+      await Promise.all([
+        this.prisma.attendanceRecord.groupBy({
+          by: ['userId'],
+          where: {
+            organizationId,
+            groupId,
+            attendanceDate: { gte: start, lte: end },
+            status: 'present',
+          },
+          _count: { _all: true },
+          _sum: { price: true },
+        }),
+        this.prisma.attendanceRecord.groupBy({
+          by: ['userId'],
+          where: {
+            organizationId,
+            groupId,
+            attendanceDate: { gte: start, lte: end },
+            status: { in: billedStatuses as any },
+          },
+          _sum: { price: true },
+        }),
+        policy.guestAttendanceEnabled
+          ? this.prisma.mealGuest.groupBy({
+              by: ['hostUserId'],
+              where: {
+                organizationId,
+                groupId,
+                attendanceDate: { gte: start, lte: end },
+                status: {
+                  in: policy.billNoShowGuests
+                    ? ['booked', 'no_show']
+                    : ['booked'],
+                },
+                pendingApproval: false,
+              },
+              _sum: { priceSnapshot: true },
+            })
+          : Promise.resolve([] as any[]),
+        this.sumAdjustmentsByUser(organizationId, groupId, start, end),
+        this.computeOpeningBalances(organizationId, groupId, start, policy),
+      ]);
+
+    const presentByUser = new Map(
+      perMember.map((m) => [m.userId, m] as const),
+    );
+    const billedByUser = new Map(
+      (billedPerMember as Array<{ userId: string; _sum: { price: number | null } }>).map(
+        (m) => [m.userId, m._sum.price ?? 0] as const,
+      ),
+    );
+    const guestByUser = new Map(
+      (guests as Array<{ hostUserId: string; _sum: { priceSnapshot: number | null } }>).map(
+        (g) => [g.hostUserId, g._sum.priceSnapshot ?? 0] as const,
+      ),
+    );
+    const allIds = new Set<string>([
+      ...presentByUser.keys(),
+      ...billedByUser.keys(),
+      ...guestByUser.keys(),
+      ...adjustments.keys(),
+      ...opening.byUser.keys(),
+    ]);
+
     return {
       capturedAt: new Date().toISOString(),
-      members: perMember.map((m) => ({
-        userId: m.userId,
-        presentCount: m._count._all,
-        totalAmount: m._sum.price ?? 0,
-      })),
+      // CREDIT-001: which finalized period this snapshot's opening balances
+      // were carried from (null = first finalized period of the group).
+      openingCarriedThrough: opening.carriedThrough,
+      members: [...allIds].map((uid) => {
+        const present = presentByUser.get(uid);
+        const billedAmount = billedByUser.get(uid) ?? 0;
+        const guestAmount = guestByUser.get(uid) ?? 0;
+        const adj = adjustments.get(uid) ?? 0;
+        const openingBalance = opening.byUser.get(uid) ?? 0;
+        return {
+          userId: uid,
+          presentCount: present?._count._all ?? 0,
+          totalAmount: present?._sum.price ?? 0,
+          billedAmount,
+          guestAmount,
+          adjustments: adj,
+          openingBalance,
+          closingBalance: openingBalance + billedAmount + guestAmount + adj,
+        };
+      }),
     };
   }
 

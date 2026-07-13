@@ -96,6 +96,11 @@ function getTodayInTimezone(tz: string): string {
 export class AttendanceService {
   private readonly logger = new Logger(AttendanceService.name);
 
+  // command_6 (timezone integrity): in-process org-timezone TTL cache — same
+  // pattern as GroupsRepository.getOrganizationTimezone, so "org today"
+  // lookups never pay a per-request PK query on hot read paths.
+  private readonly orgTzCache = new Map<string, { tz: string; exp: number }>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly attendanceRepo: AttendanceRepository,
@@ -124,6 +129,31 @@ export class AttendanceService {
     @Optional() @Inject(GuestsService)
     private readonly guests: GuestsService | null,
   ) {}
+
+  /**
+   * command_6 (timezone integrity): the organization's CURRENT calendar date
+   * (YYYY-MM-DD). "Today" defaults must anchor on the ORG's day — the
+   * server's UTC date is still YESTERDAY between local midnight and the tz
+   * offset (00:00–05:30 for IST), which served the wrong day to
+   * early-morning users. Timezone comes from the org row (5-min in-process
+   * cache), so any international org gets its own correct day.
+   */
+  async getOrgToday(organizationId: string): Promise<string> {
+    const ttlMs = parseInt(process.env.ORG_TZ_CACHE_TTL_MS ?? '300000', 10);
+    const hit = this.orgTzCache.get(organizationId);
+    let tz: string;
+    if (hit && hit.exp > Date.now()) {
+      tz = hit.tz;
+    } else {
+      const org = await this.prisma.organization.findUnique({
+        where: { id: organizationId },
+        select: { timezone: true },
+      });
+      tz = org?.timezone ?? 'Asia/Kolkata';
+      this.orgTzCache.set(organizationId, { tz, exp: Date.now() + ttlMs });
+    }
+    return getTodayInTimezone(tz);
+  }
 
   /**
    * Module 22 (FR-HG-035): when a host's status flips away from Present,
@@ -1513,12 +1543,32 @@ export class AttendanceService {
     let adjustmentsTotal = 0;
     for (const v of adjustmentsByUser.values()) adjustmentsTotal += v;
 
+    // CREDIT-001 (survey 2026-07-13): carried-forward OPENING BALANCES — the
+    // closing position of everything through the last FINALIZED period before
+    // this range (payable-positive; credit negative). Included in every
+    // netBill automatically and itemised via the additive openingBalance
+    // field, so all screens/exports reconcile on the same number.
+    const opening = (await this.billing?.computeOpeningBalances?.(
+      organizationId,
+      query.groupId,
+      fromDate,
+      {
+        billSkippedMeals: (groupPolicy as any)?.billSkippedMeals === true,
+        guestAttendanceEnabled: groupPolicy?.guestAttendanceEnabled === true,
+        billNoShowGuests: groupPolicy?.billNoShowGuests !== false,
+      },
+    )) ?? { byUser: new Map<string, number>(), carriedThrough: null };
+    const openingByUser = opening.byUser;
+    let openingBalanceTotal = 0;
+    for (const v of openingByUser.values()) openingBalanceTotal += v;
+
     const memberMeta = new Map(members.map((m) => [m.userId, m]));
     const allUserIds = new Set<string>([
       ...members.map((m) => m.userId),
       ...byUser.keys(),
       ...guestByHost.keys(),
       ...adjustmentsByUser.keys(),
+      ...openingByUser.keys(),
     ]);
 
     const memberList = [...allUserIds]
@@ -1546,7 +1596,14 @@ export class AttendanceService {
           guestAmount: guest.guestAmount,
           // FR-BILLX-030/031: signed ledger total + the resulting net bill.
           adjustmentsTotal: adjustments,
-          netBill: agg.totalBill + guest.guestAmount + adjustments,
+          // CREDIT-001: carried-forward opening balance — display item that
+          // is ALREADY included in netBill (transparency line).
+          openingBalance: openingByUser.get(uid) ?? 0,
+          netBill:
+            (openingByUser.get(uid) ?? 0) +
+            agg.totalBill +
+            guest.guestAmount +
+            adjustments,
           lastActivity: agg.lastActivity ? agg.lastActivity.toISOString() : null,
         };
       })
@@ -1581,6 +1638,9 @@ export class AttendanceService {
         toDate: formatUtcDate(toDate),
         cycleStartDay: (groupPolicy as any)?.billingCycleStartDay ?? null,
         source: periodSource,
+        // CREDIT-001: the finalized-period end date the opening balances were
+        // carried through (null = nothing finalized before this range).
+        openingCarriedThrough: opening.carriedThrough,
       },
       // SRS Module 03 (survey Q17/Q22): whether skipped/absent meals were
       // billed in this summary — additive, lets clients label the policy.
@@ -1596,6 +1656,9 @@ export class AttendanceService {
         guestRevenue,
         // Pass 12: ledger + vacation transparency (FR-BILLX-030/012).
         adjustmentsTotal,
+        // CREDIT-001: group-wide carried-forward total (display item — every
+        // member netBill already includes their share).
+        openingBalanceTotal,
         netRevenue: revenue + adjustmentsTotal,
         vacationDays,
       },
@@ -1670,11 +1733,13 @@ export class AttendanceService {
       absentCount: mine?.absentCount ?? 0,
       vacationDays: mine?.vacationDays ?? 0,
       // Itemised so the student bill is explainable at a glance and reconciles
-      // exactly with the admin: net = mealCharges + guestAmount + adjustments.
+      // exactly with the admin: net = opening + mealCharges + guestAmount +
+      // adjustments (CREDIT-001: opening balance included automatically).
       mealCharges: totalBill - guestAmount,
       guestCount: mine?.guestCount ?? 0,
       guestAmount,
       adjustmentsTotal,
+      openingBalance: mine?.openingBalance ?? 0,
       totalBill,
       netBill: mine?.netBill ?? totalBill,
       generatedAt: summary.generatedAt,

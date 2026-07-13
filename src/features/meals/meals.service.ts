@@ -334,16 +334,22 @@ export class MealsService {
       });
     }
 
-    // Verify the group belongs to this org (tenant isolation)
-    const group = await this.groupsRepo.findById(query.groupId, organizationId);
-    if (!group) {
+    // Verify the group belongs to this org (tenant isolation).
+    // command_6 perf: the meal list query is itself org-scoped, so the 404
+    // probe (select id — no member-array payload) runs CONCURRENTLY with it;
+    // the gate is still checked before anything is returned.
+    const [groupExists, result] = await Promise.all([
+      this.groupsRepo.existsInOrg(query.groupId, organizationId),
+      this.listGroupMeals(organizationId, query, page, limit, isAdmin),
+    ]);
+    if (!groupExists) {
       throw new NotFoundException({
         message: 'Group not found',
         errors: { groupId: 'Group does not exist in your organization' },
       });
     }
 
-    return this.listGroupMeals(organizationId, query, page, limit, isAdmin);
+    return result;
   }
 
   /**

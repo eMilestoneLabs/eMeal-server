@@ -69,10 +69,19 @@ export class UsersService {
   async getMe(userId: string) {
     // Additive: auto-deactivate vacation mode if the approved vacation has
     // ended (expiry) — so the flag flips OFF on next load, no restart/cron.
-    await this.usersRepo.syncVacationExpiry(userId);
-    const user = await this.usersRepo.findById(userId);
-    if (!user) throw new NotFoundException('User not found');
-    return UserSerializer.toResponse(user);
+    // command_6 perf: profile + vacation context now load in ONE parallel
+    // wave (was 3 sequential round trips); flag rules are byte-identical —
+    // see UsersRepository.resolveVacationFlagPrefetched.
+    const bundle = await this.usersRepo.findByIdWithVacationMeta(userId);
+    if (!bundle) throw new NotFoundException('User not found');
+    const { entity, orgTimezone, approvedNearToday } = bundle;
+    entity.isVacationMode = await this.usersRepo.resolveVacationFlagPrefetched(
+      userId,
+      entity.isVacationMode,
+      orgTimezone,
+      approvedNearToday,
+    );
+    return UserSerializer.toResponse(entity);
   }
 
   async updateMe(userId: string, dto: UpdateUserDto) {

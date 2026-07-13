@@ -128,7 +128,10 @@ export class AttendanceController {
     @CurrentUser() user: { sub: string; organizationId: string; role: string },
     @Query('groupId') groupId?: string,
   ) {
-    const today = new Date().toISOString().slice(0, 10);
+    // command_6 (timezone integrity): "today" is the ORG's calendar day, not
+    // the server's UTC day — UTC is still yesterday between local midnight
+    // and the tz offset (00:00–05:30 IST), which served the wrong day.
+    const today = await this.attendanceService.getOrgToday(user.organizationId!);
     return this.attendanceService.getAttendance(
       user.sub,
       user.role,
@@ -159,7 +162,10 @@ export class AttendanceController {
     @Query('groupId') groupId?: string,
     @Query('userId') userId?: string,
   ) {
-    const to = new Date();
+    // command_6 (timezone integrity): anchor the 7-day window on the ORG's
+    // calendar day (same arithmetic as before, org-day anchor instead of UTC).
+    const today = await this.attendanceService.getOrgToday(user.organizationId!);
+    const to = new Date(`${today}T00:00:00.000Z`);
     const from = new Date(to.getTime() - 7 * 24 * 60 * 60 * 1000);
     return this.attendanceService.getUserSummary(
       user.sub,
@@ -169,7 +175,7 @@ export class AttendanceController {
         groupId,
         userId: userId || user.sub,
         fromDate: from.toISOString().slice(0, 10),
-        toDate: to.toISOString().slice(0, 10),
+        toDate: today,
       } as any,
     );
   }
@@ -212,7 +218,9 @@ export class AttendanceController {
     @Query('groupId') groupId: string,
     @Query('date') date?: string,
   ) {
-    const day = date || new Date().toISOString().slice(0, 10);
+    // command_6 (timezone integrity): default to the ORG's calendar day.
+    const day =
+      date || (await this.attendanceService.getOrgToday(user.organizationId!));
     return this.attendanceService.getGroupVacationMembers(
       user.organizationId!, groupId, day,
     );

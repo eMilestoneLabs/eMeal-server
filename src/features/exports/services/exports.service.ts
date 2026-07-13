@@ -1,5 +1,7 @@
 import {
   Injectable,
+  Inject,
+  Optional,
   ForbiddenException,
   NotFoundException,
   BadRequestException,
@@ -8,6 +10,7 @@ import {
 import { Response } from 'express';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AuditService } from '../../../audit/audit.service';
+import { BillingService } from '../../billing/billing.service';
 import { AttendanceExportQueryDto, EventExportQueryDto } from '../dto/export-query.dto';
 
 const ADMIN_ROLES = ['messManager', 'hostelManager', 'hostelAdmin', 'organizationManager'];
@@ -41,6 +44,11 @@ export class ExportsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    // CREDIT-001 (command_6): opening-balance engine — optional so existing
+    // TestingModules keep working unchanged.
+    @Optional()
+    @Inject(BillingService)
+    private readonly billing: BillingService | null = null,
   ) {}
 
   // ── ATTENDANCE EXPORT ─────────────────────────────────────────────────────
@@ -213,7 +221,15 @@ export class ExportsService {
 
     const group = await this.prisma.group.findFirst({
       where: { id: dto.groupId, organizationId },
-      select: { id: true, name: true, billNoShowGuests: true },
+      select: {
+        id: true,
+        name: true,
+        billNoShowGuests: true,
+        // FR-BILLX-043 parity (command_6): the summary bills skipped/absent
+        // meals when Bill-Skip is ON — the export must reconcile exactly.
+        billSkippedMeals: true,
+        guestAttendanceEnabled: true,
+      },
     });
     if (!group) {
       throw new NotFoundException({
@@ -267,10 +283,25 @@ export class ExportsService {
           organizationId,
           groupId: dto.groupId,
           entryDate: { gte: fromDate, lte: toDate },
+          // command_6: pending/rejected debits never bill (member consent).
+          status: 'posted',
         },
         _sum: { amount: true },
       }),
     ]);
+
+    // CREDIT-001 (survey 2026-07-13): carried-forward opening balances — the
+    // same engine as /attendance/billing-summary so the export reconciles.
+    const opening = (await this.billing?.computeOpeningBalances?.(
+      organizationId,
+      dto.groupId,
+      fromDate,
+      {
+        billSkippedMeals: (group as any).billSkippedMeals === true,
+        guestAttendanceEnabled: (group as any).guestAttendanceEnabled === true,
+        billNoShowGuests: group.billNoShowGuests !== false,
+      },
+    )) ?? { byUser: new Map<string, number>(), carriedThrough: null };
 
     type Agg = {
       present: number;
@@ -290,23 +321,32 @@ export class ExportsService {
       byUser.set(uid, v);
       return v;
     };
+    const billSkipped = (group as any).billSkippedMeals === true;
     for (const s of statusAgg) {
       const v = agg(s.userId);
       if (s.status === 'present') {
         v.present = s._count._all;
-        v.mealAmount = s._sum.price ?? 0;
-      } else if (s.status === 'skipped') v.skipped = s._count._all;
-      else if (s.status === 'absent') v.absent = s._count._all;
-      else if (s.status === 'onVacation') v.vacation = s._count._all;
+        v.mealAmount += s._sum.price ?? 0;
+      } else if (s.status === 'skipped') {
+        v.skipped = s._count._all;
+        // FR-BILLX-043 parity: Bill-Skip groups charge skipped/absent meals in
+        // the summary — the export must show the identical meal amount.
+        if (billSkipped) v.mealAmount += s._sum.price ?? 0;
+      } else if (s.status === 'absent') {
+        v.absent = s._count._all;
+        if (billSkipped) v.mealAmount += s._sum.price ?? 0;
+      } else if (s.status === 'onVacation') v.vacation = s._count._all;
     }
     for (const g of guestAgg) {
       const v = agg(g.hostUserId);
       v.guestCount = g._count._all;
       v.guestAmount = g._sum.priceSnapshot ?? 0;
     }
+    // REF-001 (survey 2026-07-13): refund consumes credit → positive like
+    // debit; only credit is negative.
     for (const l of ledgerAgg as Array<{ userId: string; type: string; _sum: { amount: number | null } }>) {
       const v = agg(l.userId);
-      v.adjustments += (l._sum.amount ?? 0) * (l.type === 'debit' ? 1 : -1);
+      v.adjustments += (l._sum.amount ?? 0) * (l.type === 'credit' ? -1 : 1);
     }
 
     const meta = new Map(
@@ -319,7 +359,11 @@ export class ExportsService {
         },
       ]),
     );
-    const allIds = new Set<string>([...meta.keys(), ...byUser.keys()]);
+    const allIds = new Set<string>([
+      ...meta.keys(),
+      ...byUser.keys(),
+      ...opening.byUser.keys(),
+    ]);
     // Meal/guest price snapshots are stored in whole ₹; only the append-only
     // ledger is in paise. Convert the ledger to ₹ so the export reconciles
     // EXACTLY with /attendance/billing-summary (FR-BILLX-043). Previously every
@@ -331,7 +375,10 @@ export class ExportsService {
         const v = byUser.get(uid) ?? agg(uid);
         const m = meta.get(uid);
         const adjustments = Math.round(v.adjustments / 100);
-        const net = v.mealAmount + v.guestAmount + adjustments;
+        // CREDIT-001: net includes the carried-forward opening balance —
+        // identical formula to the billing-summary API (FR-BILLX-043).
+        const openingBalance = opening.byUser.get(uid) ?? 0;
+        const net = openingBalance + v.mealAmount + v.guestAmount + adjustments;
         return {
           memberName: m?.name ?? uid,
           memberEmail: m?.email ?? '',
@@ -343,6 +390,7 @@ export class ExportsService {
           mealAmount: rupees(v.mealAmount),
           guestCount: String(v.guestCount),
           guestAmount: rupees(v.guestAmount),
+          openingBalance: rupees(openingBalance),
           adjustments: rupees(adjustments),
           netTotal: rupees(net),
           _net: net,
@@ -648,6 +696,7 @@ interface BillingExportRow {
   mealAmount: string;
   guestCount: string;
   guestAmount: string;
+  openingBalance: string;
   adjustments: string;
   netTotal: string;
 }
@@ -666,6 +715,9 @@ const BILLING_HEADERS: ExportHeader[] = [
   { key: 'mealAmount', label: 'Meal Amount', width: 14 },
   { key: 'guestCount', label: 'Guests', width: 10 },
   { key: 'guestAmount', label: 'Guest Amount', width: 14 },
+  // CREDIT-001: carried-forward balance from the previous finalized period —
+  // already included in Net Total (transparency column).
+  { key: 'openingBalance', label: 'Opening Balance', width: 16 },
   { key: 'adjustments', label: 'Adjustments', width: 14 },
   { key: 'netTotal', label: 'Net Total', width: 14 },
 ];

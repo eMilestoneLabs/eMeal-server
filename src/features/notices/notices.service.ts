@@ -352,26 +352,30 @@ export class NoticesService {
 
     // Members may only request notices for a group they actively belong to —
     // prevents cross-group leakage inside the same organization.
-    if (!admin && query.groupId) {
-      const member = await this.repo.isActiveMember(query.groupId, userId);
-      if (!member) {
-        throw new ForbiddenException({
-          message: 'You are not a member of this group',
-          errors: { groupId: 'Not an active member' },
-        });
-      }
+    // command_6 perf: the list query is org+audience-scoped itself, so the
+    // membership gate runs CONCURRENTLY with it; the 403 is still thrown
+    // before anything is returned.
+    const [member, { data, total }] = await Promise.all([
+      !admin && query.groupId
+        ? this.repo.isActiveMember(query.groupId, userId)
+        : Promise.resolve(true),
+      this.repo.list(organizationId, userId, {
+        groupId: query.groupId,
+        includeInactive: admin ? !!query.includeInactive : false,
+        page,
+        limit,
+        withReadCount: admin,
+        audiences: this.audiencesFor(role),
+        // NTF-005: bell feed retention (ignored for the admin includeInactive view).
+        retentionDays: this.retentionDays(),
+      }),
+    ]);
+    if (!member) {
+      throw new ForbiddenException({
+        message: 'You are not a member of this group',
+        errors: { groupId: 'Not an active member' },
+      });
     }
-
-    const { data, total } = await this.repo.list(organizationId, userId, {
-      groupId: query.groupId,
-      includeInactive: admin ? !!query.includeInactive : false,
-      page,
-      limit,
-      withReadCount: admin,
-      audiences: this.audiencesFor(role),
-      // NTF-005: bell feed retention (ignored for the admin includeInactive view).
-      retentionDays: this.retentionDays(),
-    });
 
     return {
       data: NoticeSerializer.toList(data),
@@ -389,17 +393,22 @@ export class NoticesService {
     organizationId: string,
     groupId?: string,
   ) {
-    if (!this.isAdmin(role) && groupId) {
-      const member = await this.repo.isActiveMember(groupId, userId);
-      if (!member) return { count: 0 };
-    }
-    const count = await this.repo.unreadCount(
-      organizationId,
-      userId,
-      groupId,
-      this.audiencesFor(role),
-      this.retentionDays(),
-    );
+    // command_6 perf: membership gate + unread count in ONE parallel wave
+    // (was two sequential round trips for members); non-member response is
+    // still { count: 0 }.
+    const [member, count] = await Promise.all([
+      !this.isAdmin(role) && groupId
+        ? this.repo.isActiveMember(groupId, userId)
+        : Promise.resolve(true),
+      this.repo.unreadCount(
+        organizationId,
+        userId,
+        groupId,
+        this.audiencesFor(role),
+        this.retentionDays(),
+      ),
+    ]);
+    if (!member) return { count: 0 };
     return { count };
   }
 

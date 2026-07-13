@@ -161,22 +161,26 @@ export class SchedulesService {
       });
     }
 
-    const group = await this.groupsRepo.findById(query.groupId, organizationId);
-    if (!group) {
+    // Students see published schedules only
+    const publishedOnly = !isAdmin || !!query.publishedOnly;
+
+    // command_6 perf: the schedule query is org-scoped itself, so the group
+    // 404 probe (select id — no member-array payload) runs CONCURRENTLY with
+    // it; the gate is still checked before anything is returned.
+    const [groupExists, result] = await Promise.all([
+      this.groupsRepo.existsInOrg(query.groupId, organizationId),
+      this.schedulesRepo.findByGroup(query.groupId, organizationId, {
+        page,
+        limit,
+        publishedOnly,
+      }),
+    ]);
+    if (!groupExists) {
       throw new NotFoundException({
         message: 'Group not found',
         errors: { groupId: 'Group does not exist in your organization' },
       });
     }
-
-    // Students see published schedules only
-    const publishedOnly = !isAdmin || !!query.publishedOnly;
-
-    const result = await this.schedulesRepo.findByGroup(query.groupId, organizationId, {
-      page,
-      limit,
-      publishedOnly,
-    });
 
     return PaginatedResponseDto.of(
       ScheduleSerializer.toList(result.data),

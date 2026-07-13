@@ -1024,9 +1024,18 @@ model BillingLedgerEntry {
   createdBy      String   // admin userId
   createdAt      DateTime @default(now())
 
+  // command_6 (survey 2026-07-13) — member-consent debit workflow:
+  // posted (default; counts in billing) | pending (debit awaiting the billed
+  // member's approval — NOT counted) | rejected (member declined — never
+  // counted). Additive; existing rows backfill to 'posted'.
+  status         String    @default("posted")
+  decidedAt      DateTime?
+  decidedBy      String?   // the billed member who approved/rejected (self)
+
   @@index([organizationId])
   @@index([groupId, entryDate])
   @@index([groupId, userId, entryDate])
+  @@index([userId, status])
   @@map("billing_ledger_entries")
 }
 

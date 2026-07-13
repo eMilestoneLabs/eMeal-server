@@ -120,6 +120,9 @@ describe('MealsService', () => {
           provide: GroupsRepository,
           useValue: {
             findById: jest.fn(),
+            // command_6 perf: getMeals now tenant-gates via the light
+            // existence probe (run concurrently with the list query).
+            existsInOrg: jest.fn().mockResolvedValue(true),
           },
         },
         {

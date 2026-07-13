@@ -114,3 +114,52 @@ export class BillingController {
     );
   }
 }
+
+/**
+ * BillingMemberController — command_6 (survey 2026-07-13): the member side of
+ * the debit-approval workflow. JWT only, deliberately NO role gate: the
+ * service verifies the caller IS the billed member (self-consent), and the
+ * pending list is self-scoped. Admin routes stay in BillingController above.
+ *
+ *   GET  /billing/adjustments/my-pending    — my debits awaiting my approval
+ *   POST /billing/adjustments/:id/approve   — approve (posts to my bill)
+ *   POST /billing/adjustments/:id/reject    — decline (never billed)
+ */
+@UseGuards(JwtAuthGuard)
+@Controller('billing')
+export class BillingMemberController {
+  constructor(private readonly billingService: BillingService) {}
+
+  @Get('adjustments/my-pending')
+  async myPendingAdjustments(
+    @CurrentUser() user: { sub: string; organizationId: string },
+  ) {
+    return this.billingService.listMyPendingAdjustments(
+      user.organizationId!, user.sub,
+    );
+  }
+
+  @Post('adjustments/:id/approve')
+  @HttpCode(HttpStatus.OK)
+  async approveAdjustment(
+    @CurrentUser() user: { sub: string; organizationId: string },
+    @Param('id') id: string,
+    @Req() req: any,
+  ) {
+    return this.billingService.decideAdjustment(
+      user.sub, user.organizationId!, id, 'approved', req.requestId,
+    );
+  }
+
+  @Post('adjustments/:id/reject')
+  @HttpCode(HttpStatus.OK)
+  async rejectAdjustment(
+    @CurrentUser() user: { sub: string; organizationId: string },
+    @Param('id') id: string,
+    @Req() req: any,
+  ) {
+    return this.billingService.decideAdjustment(
+      user.sub, user.organizationId!, id, 'rejected', req.requestId,
+    );
+  }
+}

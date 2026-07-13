@@ -78,6 +78,29 @@ export class GroupsRepository {
   }
 
   /**
+   * command_6 perf: existence-only tenant probe (select id — one indexed PK
+   * row) for verification call sites that discard the group payload.
+   * findById includes the ENTIRE member relation to compute counts, so using
+   * it purely as a 404 gate makes every list endpoint pay a member-array
+   * fetch that scales with group size. Same WHERE semantics as findById.
+   */
+  async existsInOrg(
+    id: string,
+    organizationId: string,
+    includeInactive = false,
+  ): Promise<boolean> {
+    const found = await this.prisma.group.findFirst({
+      where: {
+        id,
+        organizationId, // CRITICAL: tenant isolation
+        ...(includeInactive ? {} : { isActive: true }),
+      },
+      select: { id: true },
+    });
+    return !!found;
+  }
+
+  /**
    * ISSUE 2 (additive): resolve the group admin's display name + the org name
    * for the read-only member detail view. Two indexed point-lookups, called
    * only when a single group's details are opened — never in list paths.
