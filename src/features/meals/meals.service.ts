@@ -371,6 +371,8 @@ export class MealsService {
       slotKey: query.slotKey,
       // Students only see enabled meals; admin can request disabled via query param
       includeDisabled: isAdmin && !!query.includeDisabled,
+      // command_6 ultra pass: preference bindings ride the same query.
+      withPreferenceBindings: true,
     });
 
     // #9/#10: never surface the implicit general-attendance slot as a normal
@@ -390,7 +392,19 @@ export class MealsService {
     // unchanged for the today path (the attach moved here from below); the admin
     // list gains one batched, N+1-free lookup.
     const serialized = MealSerializer.toList(visible);
-    await this.attachPreferenceGroups(serialized, organizationId);
+    // command_6 ultra pass: effective preference groups are built in-process
+    // from the bindings that rode the meal query itself (was a second DB
+    // wave via attachPreferenceGroups). Optional-call keeps existing test
+    // doubles working; an absent builder degrades to empty groups exactly
+    // like a group with no bindings.
+    const prefMap =
+      this.preferencesService.buildEffectiveGroupsFromBindings?.(
+        (result as any).bindings ?? [],
+        organizationId,
+      ) ?? new Map();
+    for (const m of serialized as any[]) {
+      m.preferenceGroups = prefMap.get(m.id) ?? [];
+    }
 
     return PaginatedResponseDto.of(
       serialized,
@@ -420,10 +434,25 @@ export class MealsService {
     organizationId: string,
     groupId: string,
   ) {
-    // Pass 6: single group fetch reused by the planner branch, the
-    // attendance-only fallback AND window-state decoration (grace) below —
-    // collapses what used to be up to three identical lookups.
-    const planGroup = await this.groupsRepo.findById(groupId, organizationId);
+    // command_6 ultra pass: the group row, the meal list (preference
+    // bindings riding the same query) and the planner overlay are ALL
+    // independent org-scoped reads — ONE parallel wave (was 3 dependent
+    // waves). The overlay is an indexed point lookup fetched unconditionally
+    // and simply unused when the planner is off; the 404 gate still runs
+    // before anything is returned, and tenant isolation holds because every
+    // query is org-scoped on its own.
+    const isAdmin = ADMIN_ROLES.includes(role as any);
+    const [planGroup, result, plannerOverlay] = await Promise.all([
+      this.groupsRepo.findById(groupId, organizationId),
+      this.listGroupMeals(
+        organizationId,
+        { groupId, page: 1, limit: 50 } as QueryMealsDto,
+        1,
+        50,
+        isAdmin,
+      ),
+      this.schedulesRepo.findTodayOverlay(groupId, organizationId),
+    ]);
     if (!planGroup) {
       // Same 404 shape getMeals raised on the legacy path (its duplicate
       // group lookup used to produce this error).
@@ -432,28 +461,8 @@ export class MealsService {
         errors: { groupId: 'Group does not exist in your organization' },
       });
     }
-
-    // Perf (authorized hot path, ~47–176ms warm): the meal list and the
-    // planner overlay are independent reads — run them CONCURRENTLY, and skip
-    // getMeals' duplicate group verification (planGroup above already proves
-    // tenant ownership). 5 sequential query waves → 3.
     const plannerOn =
       planGroup.weeklyMenuEnabled || planGroup.dayWiseMealsEnabled;
-    const isAdmin = ADMIN_ROLES.includes(role as any);
-    const [result, plannerOverlay] = await Promise.all([
-      this.listGroupMeals(
-        organizationId,
-        { groupId, page: 1, limit: 50 } as QueryMealsDto,
-        1,
-        50,
-        isAdmin,
-      ),
-      plannerOn
-        ? this.schedulesRepo.findTodayOverlay(groupId, organizationId)
-        : Promise.resolve(new Map() as Awaited<
-            ReturnType<SchedulesRepository['findTodayOverlay']>
-          >),
-    ]);
 
     if (result.data.length > 0) {
       // Additive: overlay the active planner schedule (Weekly / Day-Wise Meal

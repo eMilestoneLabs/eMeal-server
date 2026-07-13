@@ -140,6 +140,23 @@ export class GroupsRepository {
   }
 
   /**
+   * command_6 ultra pass: the member's PENDING-join groups hydrated in ONE
+   * query — the pending membership rows and each group's member relation ride
+   * the same round trip (was one pending lookup + one findById per group).
+   * Ordering preserved: newest request first. Self-scoped by userId; each
+   * group comes FROM the caller's own membership row, so the visible set is
+   * identical to the legacy two-step path.
+   */
+  async findPendingJoinGroupsForUser(userId: string): Promise<GroupEntity[]> {
+    const rows = await this.prisma.groupMember.findMany({
+      where: { userId, status: 'pending', group: { isActive: true } },
+      orderBy: { joinedAt: 'desc' },
+      select: { group: { include: { members: this.memberSelect } } },
+    });
+    return rows.map((r: any) => this.buildEntity(r.group));
+  }
+
+  /**
    * ORG-012 / GRP-005 / CFG-012: count the organization's ACTIVE (non-archived)
    * groups — drives the max-groups-per-org limit and the Create-disabled state.
    */

@@ -745,6 +745,9 @@ export class AttendanceService {
       });
     }
     // Self-mark: same rules as any member (window-gated, vacation-guarded).
+    // FR-PG parity: preference-group selections travel through to the member
+    // path unchanged, so the admin's Present follows the exact same
+    // validation/billing rules as every member's.
     return this.markAttendance(
       adminId,
       organizationId,
@@ -754,6 +757,7 @@ export class AttendanceService {
         status: dto.status,
         preference: dto.preference ?? undefined,
         note: dto.note ?? undefined,
+        selections: dto.selections ?? undefined,
       } as any,
       requestId,
     );
@@ -1128,13 +1132,26 @@ export class AttendanceService {
       }
     }
 
-    const counts = await this.attendanceRepo.getUserSummary(
-      userId,
-      query.groupId,
-      organizationId,
-      fromDate,
-      toDate,
-    );
+    // command_6 ultra pass: the status counts and the approved-vacation rows
+    // are independent reads — ONE parallel wave (was two sequential).
+    const [counts, approvedVacations] = await Promise.all([
+      this.attendanceRepo.getUserSummary(
+        userId,
+        query.groupId,
+        organizationId,
+        fromDate,
+        toDate,
+      ),
+      this.prisma.vacationRequest.findMany({
+        where: {
+          userId,
+          status: 'approved',
+          startDate: { lte: toDate },
+          endDate: { gte: fromDate },
+        },
+        select: { startDate: true, endDate: true },
+      }),
+    ]);
 
     const summary = new AttendanceSummaryEntity({
       userId,
@@ -1148,18 +1165,8 @@ export class AttendanceService {
     const response = AttendanceSummarySerializer.toResponse(summary);
 
     // Additive: excused vacation days in [from,to] from approved vacation
-    // requests, counted SEPARATELY (never in the present/absent/skipped
-    // denominator). Lets the dashboard show a "Vacation: N" stat without
-    // recording per-day onVacation rows. New field — additive, contract-safe.
-    const approvedVacations = await this.prisma.vacationRequest.findMany({
-      where: {
-        userId,
-        status: 'approved',
-        startDate: { lte: toDate },
-        endDate: { gte: fromDate },
-      },
-      select: { startDate: true, endDate: true },
-    });
+    // requests (fetched in the parallel wave above), counted SEPARATELY
+    // (never in the present/absent/skipped denominator) — additive field.
     let vacationDays = 0;
     for (const v of approvedVacations) {
       const s = v.startDate.getTime() > fromDate.getTime() ? v.startDate : fromDate;
@@ -1427,12 +1434,51 @@ export class AttendanceService {
       }
     }
 
-    const { members, records } = await this.attendanceRepo.getBillingData(
-      query.groupId,
-      organizationId,
-      fromDate,
-      toDate,
-    );
+    // command_6 ultra pass: the four independent aggregate reads (attendance
+    // billing rows, guest charges, ledger adjustments, opening balances) run
+    // in ONE parallel wave — they only depend on the policy/dates resolved
+    // above, never on each other. Values and policy gating are unchanged.
+    const [{ members, records }, guestByHost, adjustmentsByUser, opening] =
+      await Promise.all([
+        this.attendanceRepo.getBillingData(
+          query.groupId,
+          organizationId,
+          fromDate,
+          toDate,
+        ),
+        this.guests && groupPolicy?.guestAttendanceEnabled
+          ? this.guests.getGuestBillingByHost(
+              organizationId,
+              query.groupId,
+              fromDate,
+              toDate,
+              groupPolicy.billNoShowGuests ?? true,
+            )
+          : Promise.resolve(
+              new Map<string, { guestCount: number; guestAmount: number }>(),
+            ),
+        this.billing?.sumAdjustmentsByUser?.(
+          organizationId,
+          query.groupId,
+          fromDate,
+          toDate,
+        ) ?? Promise.resolve(new Map<string, number>()),
+        this.billing?.computeOpeningBalances?.(
+          organizationId,
+          query.groupId,
+          fromDate,
+          {
+            billSkippedMeals: (groupPolicy as any)?.billSkippedMeals === true,
+            guestAttendanceEnabled:
+              groupPolicy?.guestAttendanceEnabled === true,
+            billNoShowGuests: groupPolicy?.billNoShowGuests !== false,
+          },
+        ) ??
+          Promise.resolve({
+            byUser: new Map<string, number>(),
+            carriedThrough: null as string | null,
+          }),
+      ]);
 
     const byUser = new Map<
       string,
@@ -1516,30 +1562,13 @@ export class AttendanceService {
     }
 
     // Module 22 (FR-HG-050/053): each host's bill = own meals + Σ guest
-    // priceSnapshot (booked/approved; no-shows per billNoShowGuests). One
-    // groupBy query — separated from member charges, never conflated.
-    let guestByHost = new Map<string, { guestCount: number; guestAmount: number }>();
+    // priceSnapshot (booked/approved; no-shows per billNoShowGuests) —
+    // fetched in the parallel wave above, summed here.
     let guestRevenue = 0;
-    if (this.guests && groupPolicy?.guestAttendanceEnabled) {
-      guestByHost = await this.guests.getGuestBillingByHost(
-        organizationId,
-        query.groupId,
-        fromDate,
-        toDate,
-        groupPolicy.billNoShowGuests ?? true,
-      );
-      for (const g of guestByHost.values()) guestRevenue += g.guestAmount;
-    }
+    for (const g of guestByHost.values()) guestRevenue += g.guestAmount;
 
     // Pass 12 (FR-BILLX-030/043): signed append-only ledger adjustments —
     // balance = Σ(price snapshots) + Σ(guest snapshots) + Σ(adjustments).
-    const adjustmentsByUser =
-      (await this.billing?.sumAdjustmentsByUser?.(
-        organizationId,
-        query.groupId,
-        fromDate,
-        toDate,
-      )) ?? new Map<string, number>();
     let adjustmentsTotal = 0;
     for (const v of adjustmentsByUser.values()) adjustmentsTotal += v;
 
@@ -1548,16 +1577,6 @@ export class AttendanceService {
     // this range (payable-positive; credit negative). Included in every
     // netBill automatically and itemised via the additive openingBalance
     // field, so all screens/exports reconcile on the same number.
-    const opening = (await this.billing?.computeOpeningBalances?.(
-      organizationId,
-      query.groupId,
-      fromDate,
-      {
-        billSkippedMeals: (groupPolicy as any)?.billSkippedMeals === true,
-        guestAttendanceEnabled: groupPolicy?.guestAttendanceEnabled === true,
-        billNoShowGuests: groupPolicy?.billNoShowGuests !== false,
-      },
-    )) ?? { byUser: new Map<string, number>(), carriedThrough: null };
     const openingByUser = opening.byUser;
     let openingBalanceTotal = 0;
     for (const v of openingByUser.values()) openingBalanceTotal += v;
@@ -1707,19 +1726,23 @@ export class AttendanceService {
       });
     }
 
-    const membership = await this.prisma.groupMember.findFirst({
-      where: { groupId: query.groupId, userId, status: 'active' },
-      select: { userId: true },
-    });
+    // command_6 ultra pass: the self-membership gate and the (cached, org
+    // scoped) group summary are independent — ONE parallel wave. The 403
+    // still fires before anything is returned; only the caller's own row
+    // ever leaves the server.
+    const [membership, summary] = (await Promise.all([
+      this.prisma.groupMember.findFirst({
+        where: { groupId: query.groupId, userId, status: 'active' },
+        select: { userId: true },
+      }),
+      this.getBillingSummary(organizationId, query),
+    ])) as [unknown, any];
     if (!membership) {
       throw new ForbiddenException({
         message: 'You are not an active member of this group',
         errors: { groupId: 'No active membership' },
       });
     }
-
-    // Authoritative group computation (cached); extract only my row.
-    const summary: any = await this.getBillingSummary(organizationId, query);
     const mine = (summary.members as any[]).find((m) => m.userId === userId);
 
     const totalBill = mine?.totalBill ?? 0; // meal + guest (pre-adjustment)

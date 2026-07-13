@@ -116,9 +116,15 @@ assert_in "admin/override validates unknown meal" "$R_CODE" "FR-ATT-030" 400 404
 # member (groups.service auto-membership), the window is 00:00–23:59 so the
 # mark applies deterministically, and the group is permanently deleted below
 # (meals + attendance cascade) — zero impact on real data.
+# ATTENDANCE-ONLY mode (mealsEnabled:false) is deliberate: a meals-ON group
+# defaults to Weekly Meal Mode, where an UNSCHEDULED meal is a no-meal day
+# (SRS FR-MODE-032 → 422 NO_MEAL_TODAY) — the master 00:00–23:59 window only
+# governs marking outside planner modes. Name carries a per-run suffix so a
+# previously failed cleanup can never 409 the create (names are org-unique).
 _ZZ_SELF_GID=""
 if [ "$WRITE_TESTS" = "1" ] && [ -z "$SELF_MEAL" ]; then
-  req POST /groups "$(jq -nc '{name:"ZZ_SRS_SELFMARK",type:"hostel",maxMembers:5,joinApprovalRequired:false,mealConfig:{mealsEnabled:true}}')" "$ADMIN_TOKEN"
+  _ZZ_SUFFIX="$(date +%s)"
+  req POST /groups "$(jq -nc --arg n "ZZ_SRS_SELFMARK_$_ZZ_SUFFIX" '{name:$n,type:"hostel",maxMembers:5,joinApprovalRequired:false,mealConfig:{mealsEnabled:false}}')" "$ADMIN_TOKEN"
   _ZZ_SELF_GID="$(jbody '.id // .data.id // empty')"
   if [ -n "$_ZZ_SELF_GID" ] && [ "$_ZZ_SELF_GID" != "null" ]; then
     req POST /meals "$(jq -nc --arg g "$_ZZ_SELF_GID" '{groupId:$g,slotKey:"zz_selfmark_open",name:"ZZ Selfmark Open",attendanceEnabled:true,attendanceWindow:{openTime:"00:00",closeTime:"23:59"}}')" "$ADMIN_TOKEN"
@@ -148,13 +154,20 @@ if [ "$WRITE_TESTS" = "1" ] && [ -n "$SELF_MEAL" ]; then
   _RC="$R_CODE"
   _APPLIED=0
   _ST="$(jbody '.status // .data.status // (.record.status) // empty')"
+  _BC="$(jbody '.code // .data.code // empty')"
   if [ "$_RC" = "200" ] || [ "$_RC" = "201" ]; then
     _APPLIED=1
     ok "admin self-mark APPLIED via member path (ATT-004)" "status=$_ST" "FR-ATT-031"
   elif [ "$_RC" = "423" ]; then
     ok "admin self-mark window-gated like a member (ATT-004)" "423 — window closed, member rules govern self-marks" "FR-ATT-031"
+  elif [ "$_RC" = "422" ] && [ "$_BC" = "NO_MEAL_TODAY" ]; then
+    # Planner holiday rule (FR-MODE-032) applied to the ADMIN exactly like any
+    # member — an unscheduled meal is unmarkable for EVERYONE. This IS the
+    # member path governing the self-mark; the actual ATT-004 bug would be a
+    # 403 ADMIN_OVERRIDE_REMOVED on a SELF-mark.
+    ok "admin self-mark planner-gated like a member (ATT-004)" "422 NO_MEAL_TODAY — unscheduled meal, member rules govern self-marks" "FR-ATT-031"
   else
-    no "admin self-mark blocked/gated" "code=$_RC (expected 200/201 applied or 423 window-locked)" "FR-ATT-031"
+    no "admin self-mark blocked/gated" "code=$_RC body-code=$_BC (expected 200/201 applied, 423 window-locked, or 422 NO_MEAL_TODAY)" "FR-ATT-031"
   fi
 
   # ATT-004 regression guard: targeting a DIFFERENT member must be REFUSED —
@@ -303,7 +316,14 @@ _ONK="$(jbody '.errors.organizationName // empty')"
 # Reusing an EXISTING org name (fresh email+phone so identity checks pass first)
 # → 409 on the organizationName field, so the admin must choose another.
 ADMIN_ORG="$(req GET /organizations/me "" "$ADMIN_TOKEN"; jbody '.name // .data.name // empty')"
-if [ -n "$ADMIN_ORG" ]; then
+# Validation ORDER is format → uniqueness: a legacy org name outside the 2–30
+# char signup rule is rejected 400 by the length gate BEFORE the duplicate
+# check can 409. Only a format-valid seed name can prove the uniqueness rule
+# (which is separately guaranteed by the slug @unique + P2002 race guard).
+_ORG_LEN="${#ADMIN_ORG}"
+if [ -n "$ADMIN_ORG" ] && { [ "$_ORG_LEN" -lt 2 ] || [ "$_ORG_LEN" -gt 30 ]; }; then
+  skip "duplicate org name → 409" "seed org name is $_ORG_LEN chars (legacy, outside the 2–30 signup rule) — format gate fires before uniqueness" "FR-AUTH-LT1-033"
+elif [ -n "$ADMIN_ORG" ]; then
   req_settle POST /auth/register \
     "$(jq -nc --arg e "zz-srs-org2-$_UNIQ@example.com" --arg o "$ADMIN_ORG" '{name:"ZZ SRS Org",role:"hostelAdmin",email:$e,phone:"+19990000003",password:"ZzSrs!2345",organizationName:$o}')" ""
   assert_code "duplicate org name → 409" 409 "$R_CODE" "FR-AUTH-LT1-033"

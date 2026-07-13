@@ -75,8 +75,17 @@ export class MealsRepository {
       limit: number;
       slotKey?: string;
       includeDisabled?: boolean;
+      // command_6 ultra pass: preference-group bindings (with their groups +
+      // options) ride the SAME query, so list callers skip the second wave.
+      withPreferenceBindings?: boolean;
     },
-  ): Promise<{ data: MealEntity[]; total: number; page: number; limit: number }> {
+  ): Promise<{
+    data: MealEntity[];
+    total: number;
+    page: number;
+    limit: number;
+    bindings?: any[];
+  }> {
     const where = {
       groupId,
       organizationId, // CRITICAL: tenant isolation
@@ -97,15 +106,42 @@ export class MealsRepository {
           { order: 'asc' },
           { createdAt: 'asc' },
         ],
+        ...(opts.withPreferenceBindings
+          ? {
+              include: {
+                preferenceGroupBindings: {
+                  include: {
+                    preferenceGroup: {
+                      include: {
+                        options: {
+                          orderBy: [{ order: 'asc' }, { createdAt: 'asc' }],
+                        },
+                      },
+                    },
+                  },
+                  orderBy: { order: 'asc' },
+                },
+              },
+            }
+          : {}),
       }),
       this.prisma.meal.count({ where }),
     ]);
 
+    // Bindings are stripped from the rows before entity build so the entity /
+    // serializer payload stays byte-identical to the legacy shape.
+    const bindings = opts.withPreferenceBindings
+      ? (meals as any[]).flatMap((m) => m.preferenceGroupBindings ?? [])
+      : undefined;
     return {
-      data: meals.map((m) => this.buildEntity(m)),
+      data: (meals as any[]).map((m) => {
+        const { preferenceGroupBindings: _b, ...rest } = m;
+        return this.buildEntity(rest);
+      }),
       total,
       page: opts.page,
       limit: opts.limit,
+      ...(bindings ? { bindings } : {}),
     };
   }
 

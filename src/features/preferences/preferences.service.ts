@@ -114,6 +114,19 @@ export class PreferencesService {
     organizationId: string,
   ): Promise<Map<string, EffectivePreferenceGroup[]>> {
     const bindings = await this.repo.listBindingsForMeals(mealIds);
+    return this.buildEffectiveGroupsFromBindings(bindings, organizationId);
+  }
+
+  /**
+   * command_6 ultra pass: pure in-process builder shared by
+   * getEffectiveGroupsForMeals AND the meal-list include path, where the
+   * bindings already rode the meal query itself — zero extra round trips.
+   * Identical mapping/filtering/sorting to the legacy path.
+   */
+  buildEffectiveGroupsFromBindings(
+    bindings: any[],
+    organizationId: string,
+  ): Map<string, EffectivePreferenceGroup[]> {
     const result = new Map<string, EffectivePreferenceGroup[]>();
     for (const b of bindings) {
       const g = b.preferenceGroup;

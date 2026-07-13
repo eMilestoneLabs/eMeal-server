@@ -218,17 +218,17 @@ export class NoticesRepository {
       excludeDismissedFor: forUserId,
       retentionDays,
     });
-    const rows = await this.prisma.notice.findMany({
-      where,
-      select: { id: true },
+    // command_6 perf: ONE indexed anti-join count — unread = a visible notice
+    // with NO NoticeRead row for this user (identical semantics to the former
+    // two sequential findMany waves, which shipped every visible notice id +
+    // its read rows to Node just to diff set sizes). The (noticeId, userId)
+    // unique index drives the NONE filter, so the DB returns just the number.
+    return this.prisma.notice.count({
+      where: {
+        ...where,
+        reads: { none: { userId: forUserId } },
+      },
     });
-    const ids = rows.map((r: any) => r.id);
-    if (ids.length === 0) return 0;
-    const reads = await this.prisma.noticeRead.findMany({
-      where: { noticeId: { in: ids }, userId: forUserId },
-      select: { noticeId: true },
-    });
-    return ids.length - new Set(reads.map((r: any) => r.noticeId)).size;
   }
 
   async update(

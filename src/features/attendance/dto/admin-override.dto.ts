@@ -11,6 +11,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { PreferenceSelectionDto } from '../../preferences/dto/preference-group.dto';
 
 /**
  * DTO for POST /attendance/admin/override — admin marks attendance for any user.
@@ -51,6 +52,19 @@ export class AdminOverrideDto {
   @IsString()
   @MaxLength(500)
   note?: string;
+
+  /**
+   * Module 36 (FR-PG-013/031) parity for the ATT-004 SELF-mark delegate: an
+   * admin marking their OWN attendance on a meal with explicit preference
+   * groups sends the same selection set a member would — the delegated
+   * member path validates and persists them under identical FR-PG rules.
+   * Optional and ignored for legacy flat-preference meals.
+   */
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => PreferenceSelectionDto)
+  selections?: PreferenceSelectionDto[];
 }
 
 /**
