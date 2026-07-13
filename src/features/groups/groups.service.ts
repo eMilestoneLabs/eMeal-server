@@ -393,14 +393,11 @@ export class GroupsService {
 
     // Additive (#8): attach the requester's per-group functional role so the
     // client can show "Hostel Admin" / "Mess Manager" per group (null = global).
-    // Perf: one batched membership query instead of one findMembership() per
-    // group (was an N+1 on the list endpoint).
-    const memberships = await this.membersRepo.findMembershipsForUserInGroups(
-      userId,
-      result.data.map((g) => g.id),
-    );
+    // command_6 perf: the role now rides the member include the list query
+    // already fetched — the second query wave (batched membership lookup) is
+    // gone entirely, so GET /groups is a single DB wave for both roles.
     const data = result.data.map((g) => {
-      g.functionalRole = memberships.get(g.id)?.functionalRole ?? null;
+      g.functionalRole = g.functionalRoleOf(userId);
       return GroupSerializer.toResponse(g);
     });
 
@@ -421,16 +418,10 @@ export class GroupsService {
     const group = await this.groupsRepo.findById(id, organizationId, isAdmin);
     if (!group) throw new NotFoundException('Group not found');
 
-    // command_6 perf: the requester's membership row and the display names are
-    // independent point-lookups — one parallel wave instead of three
-    // sequential round trips. The membership row also answers the member
-    // access check (status === 'active'), replacing the isActiveMember count.
-    const [myMembership, names] = await Promise.all([
-      this.membersRepo.findMembership(id, userId),
-      this.groupsRepo.getDetailNames(group.adminId, organizationId),
-    ]);
-
-    if (!isAdmin && myMembership?.status !== 'active') {
+    // command_6 perf: the member access check (active membership) and the
+    // requester's functional role both ride the member include findById
+    // already fetched — only the display names need a second lookup.
+    if (!isAdmin && !group.memberIds.includes(userId)) {
       throw new ForbiddenException({
         message: 'Access denied',
         errors: { group: 'You are not a member of this group' },
@@ -438,7 +429,12 @@ export class GroupsService {
     }
 
     // Additive (#8): requester's per-group functional role for display.
-    group.functionalRole = myMembership?.functionalRole ?? null;
+    group.functionalRole = group.functionalRoleOf(userId);
+
+    const names = await this.groupsRepo.getDetailNames(
+      group.adminId,
+      organizationId,
+    );
 
     // Additive (ISSUE 2): admin + organization names for the member detail view.
     group.adminName = names.adminName;
@@ -463,6 +459,31 @@ export class GroupsService {
     if (dto.name !== undefined) updateData.name = dto.name;
     // BUG-002: normalize factory_ → factory for DB on type update
     if (dto.type !== undefined) updateData.type = GroupSerializer.normalizeTypeForDb(dto.type);
+
+    // command_6 uniqueness audit: the org-level "one ACTIVE group per
+    // name+type" rule must survive RENAMES too — the guard previously ran
+    // only at create, so renaming group B to group A's name slipped through.
+    // Evaluated against the FINAL EFFECTIVE name+type (patch value ?? current)
+    // and excluding self, so no-op renames stay allowed.
+    if (dto.name !== undefined || dto.type !== undefined) {
+      const effName = updateData.name ?? existing.name;
+      const effType = updateData.type ?? existing.type;
+      if (
+        await this.groupsRepo.existsActiveByNameType(
+          organizationId,
+          effName,
+          effType,
+          id,
+        )
+      ) {
+        throw new ConflictException({
+          message: `A ${effType} group named "${effName}" already exists.`,
+          code: 'GROUP_NAME_DUPLICATE',
+          errors: { name: 'A group with this name and type already exists' },
+        });
+      }
+    }
+
     if (dto.description !== undefined) updateData.description = dto.description;
     if (dto.maxMembers !== undefined) updateData.maxMembers = dto.maxMembers;
     if (dto.isActive !== undefined) updateData.isActive = dto.isActive;
@@ -802,6 +823,24 @@ export class GroupsService {
         message: 'Group is not archived',
         code: 'GROUP_NOT_ARCHIVED',
         errors: { id: 'Only archived groups can be restored' },
+      });
+    }
+
+    // command_6 uniqueness audit: archived groups don't reserve their name, so
+    // it may have been reused while this one sat archived — restoring must not
+    // resurrect a duplicate. Same org-level name+type rule as create/rename.
+    if (
+      await this.groupsRepo.existsActiveByNameType(
+        organizationId,
+        existing.name,
+        existing.type,
+        id,
+      )
+    ) {
+      throw new ConflictException({
+        message: `A ${existing.type} group named "${existing.name}" already exists — rename that group first, then restore this one.`,
+        code: 'GROUP_NAME_DUPLICATE',
+        errors: { name: 'An active group with this name and type already exists' },
       });
     }
 

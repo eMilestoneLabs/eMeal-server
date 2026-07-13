@@ -38,13 +38,17 @@ export class GroupsRepository {
   // ── Entity builder — computes membership fields from included relation ─────
 
   private buildEntity(raw: any): GroupEntity {
-    const members: Array<{ userId: string; status: string }> = raw.members ?? [];
+    const members: Array<{
+      userId: string;
+      status: string;
+      functionalRole?: string | null;
+    }> = raw.members ?? [];
     const activeMembers = members.filter((m) => m.status === 'active');
     const blockedMembers = members.filter((m) => m.status === 'blocked');
     // MEM-008/010 / CFG-009: pending join requests count toward capacity.
     const pendingMembers = members.filter((m) => m.status === 'pending');
 
-    return new GroupEntity({
+    const entity = new GroupEntity({
       ...raw,
       memberCount: activeMembers.length,
       memberIds: activeMembers.map((m) => m.userId),
@@ -52,11 +56,19 @@ export class GroupsRepository {
       pendingCount: pendingMembers.length,
       pendingMemberIds: pendingMembers.map((m) => m.userId),
     });
+    // command_6 perf: per-user functional roles ride the include we already
+    // fetch (any status — same semantics as the former per-list membership
+    // batch query), so list endpoints resolve the requester's role with ZERO
+    // extra round trips. Internal only — the serializer never emits it.
+    entity.memberFunctionalRoles = new Map(
+      members.map((m) => [m.userId, m.functionalRole ?? null]),
+    );
+    return entity;
   }
 
   // Members select clause — reused across queries for consistency
   private get memberSelect() {
-    return { select: { userId: true, status: true } };
+    return { select: { userId: true, status: true, functionalRole: true } };
   }
 
   // ── Queries ───────────────────────────────────────────────────────────────
@@ -147,6 +159,9 @@ export class GroupsRepository {
     organizationId: string,
     name: string,
     type: string,
+    // command_6 uniqueness audit: rename path passes its own id so a group
+    // never collides with itself.
+    excludeId?: string,
   ): Promise<boolean> {
     const found = await this.prisma.group.findFirst({
       where: {
@@ -154,6 +169,7 @@ export class GroupsRepository {
         isActive: true,
         type: type as any,
         name: { equals: name, mode: 'insensitive' },
+        ...(excludeId ? { id: { not: excludeId } } : {}),
       },
       select: { id: true },
     });

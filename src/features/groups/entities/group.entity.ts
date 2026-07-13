@@ -90,6 +90,16 @@ export class GroupEntity {
   // back to the user's global role. Not a DB column on Group.
   functionalRole: string | null;
 
+  // command_6 perf: userId → functionalRole for every member row the query
+  // already included (any status). Lets list paths resolve the requester's
+  // role without a second query wave. INTERNAL — never serialized.
+  memberFunctionalRoles?: Map<string, string | null>;
+
+  /** The given user's per-group functional role (null = none / not a member). */
+  functionalRoleOf(userId: string): string | null {
+    return this.memberFunctionalRoles?.get(userId) ?? null;
+  }
+
   // Additive (ISSUE 2): populated only on the detail read path so members can
   // see who runs the group and which organization it belongs to. Not stored on
   // Group; resolved per-request. null when unavailable.
