@@ -7,19 +7,19 @@
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$HERE/lib.sh"
 
 : "${ADMIN_EMAIL:?}"; : "${ADMIN_PASS:?}"
-# Throttle-tolerant login: this suite may run right after a login-flood module,
-# leaving the per-IP login window (10/min) hot. Retry through the window so a
-# transient 429 never yields an empty token (which would 401 every authed probe
-# and mask the real RBAC/isolation/injection verdicts).
-login_hard(){
-  local tok t=0; tok="$(login "$1" "$2")"
-  while [ -z "$tok" ] && [ "$t" -lt 6 ]; do sleep 12; t=$((t+1)); tok="$(login "$1" "$2")"; done
-  printf '%s' "$tok"
-}
-ADMIN_TOKEN="$(login_hard "$ADMIN_EMAIL" "$ADMIN_PASS")"
-STUDENT_TOKEN=""; [ -n "${STUDENT_EMAIL:-}" ] && STUDENT_TOKEN="$(login_hard "$STUDENT_EMAIL" "${STUDENT_PASS:-}")"
-ADMIN2_TOKEN=""; [ -n "${ADMIN2_EMAIL:-}" ] && ADMIN2_TOKEN="$(login_hard "$ADMIN2_EMAIL" "${ADMIN2_PASS:-}")"
-req GET /groups "" "$ADMIN_TOKEN"; GROUP_ID="${GROUP_ID:-$(jbody '(.data // .)[0].id // empty')}"
+# DEDUP + throttle-tolerant: reuse the tokens already in scope from the earlier
+# modules. reuse_or_login validates them with GET /auth/me (API budget, immune
+# to the login 10/min window this suite's own SEC-F flood makes hot) and only
+# falls back to a 429-retrying login when standalone/expired — this fully
+# supersedes the old login_hard retry wrapper AND avoids 3 redundant logins.
+reuse_or_login ADMIN_TOKEN   "$ADMIN_EMAIL"       "$ADMIN_PASS"
+reuse_or_login STUDENT_TOKEN "${STUDENT_EMAIL:-}" "${STUDENT_PASS:-}"
+reuse_or_login ADMIN2_TOKEN  "${ADMIN2_EMAIL:-}"  "${ADMIN2_PASS:-}"
+# DEDUP: reuse GROUP_ID already resolved by functional.sh (same shell); this GET
+# carries no assertion, so skipping it when the id is known drops one redundant
+# round-trip without losing a check (mirrors the MEAL_ID guard below). Standalone
+# (unset) still resolves it.
+[ -z "${GROUP_ID:-}" ] && { req GET /groups "" "$ADMIN_TOKEN"; GROUP_ID="$(jbody '(.data // .)[0].id // empty')"; }
 
 sec "SEC-A — AUTHENTICATION ENFORCEMENT (no/blank/malformed token) FR-SECX-001"
 PROTECTED=( "/auth/me" "/groups" "/organizations/me" "/attendance/today"

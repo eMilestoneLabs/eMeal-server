@@ -92,4 +92,41 @@ describe('GlobalExceptionFilter', () => {
       statusCode: 422,
     });
   });
+
+  // Uniqueness audit: a DB unique-constraint race (P2002) that escapes a
+  // service pre-check must surface as a clean 409 in the flat contract.
+  it('maps Prisma P2002 unique violations to 409 with field errors', () => {
+    class PrismaClientKnownRequestError extends Error {
+      code = 'P2002';
+      meta = { target: ['groupId', 'weekStart'] };
+    }
+    filter.catch(new PrismaClientKnownRequestError('unique'), mockHost(json, status));
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      message: 'Validation failed',
+      errors: { groupId: 'Already exists', weekStart: 'Already exists' },
+      statusCode: 409,
+    });
+  });
+
+  it('P2002 without column metadata still returns a generic 409', () => {
+    class PrismaClientKnownRequestError extends Error {
+      code = 'P2002';
+    }
+    filter.catch(new PrismaClientKnownRequestError('unique'), mockHost(json, status));
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      message: 'Validation failed',
+      errors: { general: 'Already exists' },
+      statusCode: 409,
+    });
+  });
+
+  it('other Prisma error codes still fall through to 500', () => {
+    class PrismaClientKnownRequestError extends Error {
+      code = 'P2025';
+    }
+    filter.catch(new PrismaClientKnownRequestError('not found'), mockHost(json, status));
+    expect(status).toHaveBeenCalledWith(500);
+  });
 });

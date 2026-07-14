@@ -3,6 +3,7 @@ import {
   NotFoundException,
   ForbiddenException,
   BadRequestException,
+  ConflictException,
   Logger,
   Inject,
   Optional,
@@ -126,6 +127,21 @@ export class MealsService {
         errors: { enabledPreferences: `Tag limit reached (${this.maxStandaloneTags})` },
       });
     }
+    // UNI-021 (uniqueness audit): tag names are unique within the meal —
+    // normalized trim + lowercase so "Veg" / "veg " count as the same tag.
+    if (tags) {
+      const seen = new Set<string>();
+      for (const tag of tags) {
+        const norm = tag.trim().toLowerCase();
+        if (seen.has(norm)) {
+          throw new ConflictException({
+            message: 'Validation failed',
+            errors: { enabledPreferences: `Duplicate preference tag "${tag.trim()}"` },
+          });
+        }
+        seen.add(norm);
+      }
+    }
   }
 
   /**
@@ -243,7 +259,9 @@ export class MealsService {
         dto.name,
       )
     ) {
-      throw new BadRequestException({
+      // UNI-016 (uniqueness audit): duplicate names are a CONFLICT — 409 per
+      // the enterprise uniqueness contract (same body shape as before).
+      throw new ConflictException({
         message: 'Validation failed',
         errors: { name: 'A meal with this name already exists in this group' },
       });
@@ -751,7 +769,8 @@ export class MealsService {
           id,
         )
       ) {
-        throw new BadRequestException({
+        // UNI-016 (uniqueness audit): duplicate names are a CONFLICT — 409.
+        throw new ConflictException({
           message: 'Validation failed',
           errors: { name: 'A meal with this name already exists in this group' },
         });
@@ -791,6 +810,24 @@ export class MealsService {
           errors: {
             isEnabled: `Limit reached (${cap}) — disable or delete an existing one first`,
           },
+        });
+      }
+
+      // UNI-016 restore rule (uniqueness audit): archived meals don't reserve
+      // their name, so it may have been reused while this one sat disabled —
+      // re-enabling validates against ACTIVE meals exactly like create/rename.
+      const effectiveName = dto.name ?? existing.name;
+      if (
+        await this.mealsRepo.existsByNameInGroup(
+          existing.groupId,
+          organizationId,
+          effectiveName,
+          id,
+        )
+      ) {
+        throw new ConflictException({
+          message: `An active meal named "${effectiveName}" already exists — rename it first, then re-enable this one.`,
+          errors: { name: 'A meal with this name already exists in this group' },
         });
       }
     }

@@ -286,6 +286,26 @@ export class UsersRepository {
   }
 
   /**
+   * UNI-035 (uniqueness audit): an FCM device token belongs to exactly ONE
+   * active account. Registering it for `userId` releases it from every other
+   * user in the same transaction, so a device that switches accounts never
+   * receives another account's pushes (and group broadcasts never hit the
+   * same physical device twice).
+   */
+  async claimFcmToken(userId: string, token: string): Promise<void> {
+    await this.prisma.$transaction([
+      this.prisma.user.updateMany({
+        where: { fcmToken: token, id: { not: userId } },
+        data: { fcmToken: null },
+      }),
+      this.prisma.user.update({
+        where: { id: userId },
+        data: { fcmToken: token },
+      }),
+    ]);
+  }
+
+  /**
    * Emails are matched CASE-INSENSITIVELY everywhere (login, signup dup-check,
    * password reset). Rows created before 2026-07-04 may store mixed case
    * (e.g. "Manas.B…@gmail.com"), so exact matching locked users out when they

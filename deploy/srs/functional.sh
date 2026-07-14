@@ -7,9 +7,14 @@
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$HERE/lib.sh"
 
 : "${ADMIN_EMAIL:?set ADMIN_EMAIL}"; : "${ADMIN_PASS:?set ADMIN_PASS}"
-ADMIN_TOKEN="$(login "$ADMIN_EMAIL" "$ADMIN_PASS")"
-STUDENT_TOKEN=""; [ -n "${STUDENT_EMAIL:-}" ] && STUDENT_TOKEN="$(login "$STUDENT_EMAIL" "${STUDENT_PASS:-}")"
-ADMIN2_TOKEN=""; [ -n "${ADMIN2_EMAIL:-}" ] && ADMIN2_TOKEN="$(login "$ADMIN2_EMAIL" "${ADMIN2_PASS:-}")"
+# Token acquisition via the shared reuse_or_login helper (lib.sh): in a full
+# run.sh pass functional.sh runs FIRST, so tokens are empty → real logins here;
+# every later module inherits these same tokens and validates-and-reuses them
+# (one cheap GET /auth/me) instead of re-authenticating — one login per account
+# for the whole suite. Empty STUDENT/ADMIN2 email → helper leaves the token "".
+reuse_or_login ADMIN_TOKEN   "$ADMIN_EMAIL"       "$ADMIN_PASS"
+reuse_or_login STUDENT_TOKEN "${STUDENT_EMAIL:-}" "${STUDENT_PASS:-}"
+reuse_or_login ADMIN2_TOKEN  "${ADMIN2_EMAIL:-}"  "${ADMIN2_PASS:-}"
 [ -z "$ADMIN_TOKEN" ] && { echo "FATAL: admin login failed"; exit 1; }
 
 sec "MODULE 01 — AUTH & ONBOARDING (FR-AUTH)"

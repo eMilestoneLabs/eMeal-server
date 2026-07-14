@@ -11,11 +11,17 @@
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$HERE/lib.sh"
 
 : "${ADMIN_EMAIL:?}"; : "${ADMIN_PASS:?}"
-ADMIN_TOKEN="$(login "$ADMIN_EMAIL" "$ADMIN_PASS")"
+# DEDUP: reuse the admin token functional.sh already put in scope (this module
+# previously re-logged in unconditionally). reuse_or_login validates+reuses it,
+# or logs in when standalone/expired.
+reuse_or_login ADMIN_TOKEN "$ADMIN_EMAIL" "$ADMIN_PASS"
 # /attendance/today is student-scoped (returns 400 to an admin), so measure it
 # with a student token for a true 200 hot-path reading. Falls back to admin.
-STUDENT_TOKEN=""; [ -n "${STUDENT_EMAIL:-}" ] && STUDENT_TOKEN="$(login "$STUDENT_EMAIL" "${STUDENT_PASS:-}")"
-req GET /groups "" "$ADMIN_TOKEN"; GROUP_ID="${GROUP_ID:-$(jbody '(.data // .)[0].id // empty')}"
+reuse_or_login STUDENT_TOKEN "${STUDENT_EMAIL:-}" "${STUDENT_PASS:-}"
+# DEDUP: reuse GROUP_ID already resolved by functional.sh (same shell); this GET
+# carries no assertion, so skipping it when the id is known drops one redundant
+# round-trip without losing a check. Standalone (unset) still resolves it.
+[ -z "${GROUP_ID:-}" ] && { req GET /groups "" "$ADMIN_TOKEN"; GROUP_ID="$(jbody '(.data // .)[0].id // empty')"; }
 
 sec "PERF-A — LATENCY PERCENTILES (backend compute, localhost) FR-TIME / NFR-perf"
 echo "  (samples=$PERF_SAMPLES each; SLO gate on p95)" >&2

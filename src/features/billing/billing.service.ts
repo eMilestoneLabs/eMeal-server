@@ -4,6 +4,7 @@ import {
   Logger,
   NotFoundException,
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   UnprocessableEntityException,
   Optional,
@@ -300,6 +301,55 @@ export class BillingService {
     organizationId: string,
     dto: CreateAdjustmentDto,
     requestId?: string,
+    idempotencyKey?: string,
+  ) {
+    // UNI-036 (uniqueness audit): optional Idempotency-Key support so a
+    // client/network retry can never double-post a financial ledger entry.
+    // Fully additive — requests without the header behave exactly as before.
+    // Redis-backed two-phase guard: reserve the key, replay the stored
+    // response on a duplicate, 409 while the first attempt is in flight.
+    const idemRedisKey =
+      idempotencyKey && this.redis
+        ? `idem:billadj:${organizationId}:${adminId}:${idempotencyKey}`
+        : null;
+    if (idemRedisKey) {
+      const ttl = Number(process.env.IDEMPOTENCY_TTL_SECONDS ?? 86400);
+      const reserved = await this.redis!.setNx(idemRedisKey, '__pending__', ttl);
+      if (!reserved) {
+        const stored = await this.redis!.get(idemRedisKey);
+        if (stored && stored !== '__pending__') {
+          return JSON.parse(stored); // replay — the entry already exists
+        }
+        throw new ConflictException({
+          message: 'A request with this Idempotency-Key is already in progress',
+          code: 'IDEMPOTENT_REPLAY_IN_FLIGHT',
+          errors: { idempotencyKey: 'Duplicate request' },
+        });
+      }
+    }
+    try {
+      return await this.createAdjustmentInner(
+        adminId,
+        organizationId,
+        dto,
+        requestId,
+        idemRedisKey,
+      );
+    } catch (err) {
+      // A failed attempt must not poison the key — allow a clean retry.
+      if (idemRedisKey) {
+        await this.redis!.del(idemRedisKey).catch(() => undefined);
+      }
+      throw err;
+    }
+  }
+
+  private async createAdjustmentInner(
+    adminId: string,
+    organizationId: string,
+    dto: CreateAdjustmentDto,
+    requestId?: string,
+    idemRedisKey?: string | null,
   ) {
     const group = await this.prisma.group.findFirst({
       where: { id: dto.groupId, organizationId },
@@ -538,7 +588,18 @@ export class BillingService {
         this.logger.warn(`adjustment push failed: ${(err as Error).message}`),
       );
 
-    return this.adjustmentToResponse(entry);
+    const response = this.adjustmentToResponse(entry);
+
+    // UNI-036: persist the response under the Idempotency-Key so a retry of
+    // the same request replays this result instead of double-posting.
+    if (idemRedisKey && this.redis) {
+      const ttl = Number(process.env.IDEMPOTENCY_TTL_SECONDS ?? 86400);
+      await this.redis
+        .set(idemRedisKey, JSON.stringify(response), ttl)
+        .catch(() => undefined);
+    }
+
+    return response;
   }
 
   /**

@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   HttpException,
   Injectable,
@@ -321,13 +322,36 @@ export class PreferencesService {
     const meal = await this.assertMeal(mealId, organizationId);
 
     const maxGroups = this.cfg('maxGroupsPerMeal', 5);
-    const bound = await this.repo.countBindingsForMeal(mealId);
+    // One query serves both rules: the cap (count) and UNI-022 label
+    // uniqueness (labels of the already-bound groups).
+    const existingBindings = await this.repo.listBindingsForMeal(mealId);
+    const bound = existingBindings.length;
     if (bound >= maxGroups) {
       throw new BadRequestException({
         message: `A meal supports at most ${maxGroups} preference groups`,
         errors: { mealId: 'Group limit reached' },
       });
     }
+
+    // UNI-022 (uniqueness audit): preference-group names are unique within the
+    // meal (trim + lowercase). Applies to both paths — creating a meal-scoped
+    // group AND binding an existing template.
+    const assertLabelUnique = (label: string, selfGroupId?: string) => {
+      const norm = label.trim().toLowerCase();
+      const clash = existingBindings.find(
+        (b: any) =>
+          b.preferenceGroupId !== selfGroupId &&
+          (b.preferenceGroup?.label ?? '').trim().toLowerCase() === norm,
+      );
+      if (clash) {
+        throw new ConflictException({
+          message: 'Validation failed',
+          errors: {
+            label: `A preference group named "${label.trim()}" already exists for this meal`,
+          },
+        });
+      }
+    };
 
     let groupId: string;
     if (dto.preferenceGroupId) {
@@ -336,8 +360,10 @@ export class PreferencesService {
       if (!template || !template.isActive) {
         throw new NotFoundException('Preference group template not found');
       }
+      assertLabelUnique(template.label, template.id);
       groupId = template.id;
     } else {
+      assertLabelUnique(dto.label);
       this.validateGroupRules(dto);
       this.validateOptionList(dto.options ?? []);
       const created = await this.repo.createGroup({

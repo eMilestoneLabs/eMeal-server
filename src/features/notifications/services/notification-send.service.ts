@@ -118,6 +118,17 @@ export class NotificationSendService implements OnModuleInit {
     const failed: string[] = [];
     const staleTokens: Array<{ userId: string; fcmToken: string }> = [];
 
+    // UNI-035 (uniqueness audit): a physical device must receive ONE push per
+    // event. Tokens are single-owner at registration (claimFcmToken), but rows
+    // written before that fix may still share a token — dedupe defensively so
+    // the same device is never notified twice in one batch.
+    const seenTokens = new Set<string>();
+    recipients = recipients.filter((r) => {
+      if (!r.fcmToken || seenTokens.has(r.fcmToken)) return false;
+      seenTokens.add(r.fcmToken);
+      return true;
+    });
+
     for (let i = 0; i < recipients.length; i += BATCH_CHUNK_SIZE) {
       const chunk = recipients.slice(i, i + BATCH_CHUNK_SIZE);
       const results = await Promise.allSettled(

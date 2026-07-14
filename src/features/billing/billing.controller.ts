@@ -6,6 +6,7 @@ import {
   Query,
   Param,
   Req,
+  Headers,
   HttpCode,
   HttpStatus,
   UseGuards,
@@ -75,9 +76,11 @@ export class BillingController {
     @CurrentUser() user: { sub: string; organizationId: string },
     @Body() dto: CreateAdjustmentDto,
     @Req() req: any,
+    // UNI-036: optional Idempotency-Key header — retry-safe financial posts.
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     return this.billingService.createAdjustment(
-      user.sub, user.organizationId!, dto, req.requestId,
+      user.sub, user.organizationId!, dto, req.requestId, idempotencyKey,
     );
   }
 

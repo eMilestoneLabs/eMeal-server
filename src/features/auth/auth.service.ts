@@ -860,10 +860,10 @@ export class AuthService {
    * POST /auth/fcm-token — authenticated endpoint.
    */
   async updateFcmToken(userId: string, token: string, requestId?: string): Promise<{ message: string }> {
-    await this.prisma.user.update({
-      where: { id: userId },
-      data: { fcmToken: token },
-    });
+    // UNI-035 (uniqueness audit): a device token belongs to exactly ONE active
+    // account — claiming it releases every previous mapping in the same
+    // transaction, preventing notification leakage/duplication on shared devices.
+    await this.usersRepo.claimFcmToken(userId, token);
 
     this.logger.debug(`FCM token updated for userId=${userId} requestId=${requestId}`);
     return { message: 'FCM token registered successfully' };

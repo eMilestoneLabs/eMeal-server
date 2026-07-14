@@ -108,6 +108,34 @@ login(){
   jbody '.accessToken // .data.accessToken // empty'
 }
 
+# reuse_or_login VAR EMAIL PASS — sets global $VAR to a working access token.
+# DEDUP: run.sh sources every module into ONE shell, so a token functional.sh
+# already obtained is still in scope here — re-logging the same account burned
+# the 10/60s per-IP login budget (and forced sleep-retry loops downstream).
+# Reuse path: validate the inherited token with ONE cheap GET /auth/me (API
+# budget, not login budget); a post-load transient 429 is drained by
+# req_settle, and a lingering 429 counts as reuse (it says nothing about token
+# validity, and a fresh login would be throttled too). Login path (standalone
+# runs / expired token): retries ONLY on 429 — a real credential failure never
+# wastes the sleep loop. Empty EMAIL keeps the original "" semantics.
+reuse_or_login(){
+  local __var="$1" __email="${2:-}" __pass="${3:-}" __tok _t=0
+  eval "__tok=\"\${$__var:-}\""
+  if [ -n "$__tok" ]; then
+    req_settle GET /auth/me "" "$__tok"
+    case "$R_CODE" in 200|429) return 0 ;; esac
+  fi
+  if [ -z "$__email" ]; then eval "$__var=''"; return 0; fi
+  req POST /auth/login "$(jq -nc --arg i "$__email" --arg p "$__pass" '{identifier:$i,password:$p}')"
+  __tok="$(jbody '.accessToken // .data.accessToken // empty')"
+  while [ -z "$__tok" ] && [ "${R_CODE:-}" = "429" ] && [ "$_t" -lt 6 ]; do
+    sleep 12; _t=$((_t+1))
+    req POST /auth/login "$(jq -nc --arg i "$__email" --arg p "$__pass" '{identifier:$i,password:$p}')"
+    __tok="$(jbody '.accessToken // .data.accessToken // empty')"
+  done
+  eval "$__var=\"\$__tok\""
+}
+
 # percentile helper: feed newline-separated numbers on stdin, arg=pXX(0-100)
 pctl(){ awk -v p="$1" 'NR{a[NR]=$1} END{n=asort(a); if(n==0){print 0;exit} i=int((p/100)*n); if(i<1)i=1; if(i>n)i=n; print a[i]}'; }
 

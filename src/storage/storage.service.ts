@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { randomBytes } from 'crypto';
 import {
   S3Client,
   PutObjectCommand,
@@ -36,6 +37,16 @@ export class StorageService {
     ).replace(/\/+$/, '');
   }
 
+  /**
+   * UNI-032 (uniqueness audit): object keys are globally unique. A bare
+   * millisecond timestamp can collide under concurrent/retried uploads to the
+   * same prefix — the random suffix makes overwriting another file impossible.
+   * Prefix listing and the `<key>_thumb.jpg` derivation are unaffected.
+   */
+  private uniqueStamp(): string {
+    return `${Date.now()}-${randomBytes(4).toString('hex')}`;
+  }
+
   /** Lazily build the S3 client so the app boots even if MinIO env is absent. */
   private getClient(): S3Client {
     if (this.client) return this.client;
@@ -64,7 +75,7 @@ export class StorageService {
     mimeType: 'image/jpeg' | 'image/png',
   ): Promise<string> {
     const ext = mimeType === 'image/jpeg' ? 'jpg' : 'png';
-    const key = `org/${organizationId}/meals/${mealId}/${Date.now()}.${ext}`;
+    const key = `org/${organizationId}/meals/${mealId}/${this.uniqueStamp()}.${ext}`;
 
     await this.getClient().send(
       new PutObjectCommand({
@@ -98,7 +109,7 @@ export class StorageService {
     mimeType: 'image/jpeg' | 'image/png',
   ): Promise<string> {
     const ext = mimeType === 'image/jpeg' ? 'jpg' : 'png';
-    const key = `org/${organizationId}/avatars/${userId}/${Date.now()}.${ext}`;
+    const key = `org/${organizationId}/avatars/${userId}/${this.uniqueStamp()}.${ext}`;
 
     await this.getClient().send(
       new PutObjectCommand({
@@ -165,7 +176,7 @@ export class StorageService {
     mimeType: string,
     ext: string,
   ): Promise<string> {
-    const key = `org/${organizationId}/notices/${noticeId}/${Date.now()}.${ext}`;
+    const key = `org/${organizationId}/notices/${noticeId}/${this.uniqueStamp()}.${ext}`;
     await this.getClient().send(
       new PutObjectCommand({
         Bucket: this.bucket,

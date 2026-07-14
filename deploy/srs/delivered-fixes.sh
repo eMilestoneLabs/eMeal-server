@@ -25,12 +25,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${ADMIN_EMAIL:?set ADMIN_EMAIL}"; : "${ADMIN_PASS:?set ADMIN_PASS}"
 # REUSE tokens already obtained by functional.sh when sourced by run.sh (same
 # shell): re-logging in every account here would add ~4 more POST /auth/login
-# hits on top of functional's, risking the 10/60s login throttle. Only log in
-# what isn't already set (always the case when run standalone).
-ADMIN_TOKEN="${ADMIN_TOKEN:-}";       [ -z "$ADMIN_TOKEN" ]    && ADMIN_TOKEN="$(login "$ADMIN_EMAIL" "$ADMIN_PASS")"
-STUDENT_TOKEN="${STUDENT_TOKEN:-}";   [ -z "$STUDENT_TOKEN" ]  && [ -n "${STUDENT_EMAIL:-}" ]  && STUDENT_TOKEN="$(login "$STUDENT_EMAIL" "${STUDENT_PASS:-}")"
-ADMIN2_TOKEN="${ADMIN2_TOKEN:-}";     [ -z "$ADMIN2_TOKEN" ]   && [ -n "${ADMIN2_EMAIL:-}" ]   && ADMIN2_TOKEN="$(login "$ADMIN2_EMAIL" "${ADMIN2_PASS:-}")"
-STUDENT2_TOKEN="${STUDENT2_TOKEN:-}"; [ -z "$STUDENT2_TOKEN" ] && [ -n "${STUDENT2_EMAIL:-}" ] && STUDENT2_TOKEN="$(login "$STUDENT2_EMAIL" "${STUDENT2_PASS:-}")"
+# hits on top of functional's, risking the 10/60s login throttle. reuse_or_login
+# validates the inherited token with one cheap GET /auth/me and only logs in when
+# it is missing/expired (always the case when run standalone).
+reuse_or_login ADMIN_TOKEN    "$ADMIN_EMAIL"        "$ADMIN_PASS"
+reuse_or_login STUDENT_TOKEN  "${STUDENT_EMAIL:-}"  "${STUDENT_PASS:-}"
+reuse_or_login ADMIN2_TOKEN   "${ADMIN2_EMAIL:-}"   "${ADMIN2_PASS:-}"
+reuse_or_login STUDENT2_TOKEN "${STUDENT2_EMAIL:-}" "${STUDENT2_PASS:-}"
 if [ -z "$ADMIN_TOKEN" ]; then
   echo "FATAL: admin login failed (delivered-fixes)"
   # NEVER abort the whole suite when sourced by run.sh — just skip this module.

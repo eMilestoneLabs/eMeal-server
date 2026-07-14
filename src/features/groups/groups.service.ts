@@ -96,6 +96,20 @@ export class GroupsService {
         errors: { enabledPreferences: `Tag limit reached (${cap})` },
       });
     }
+    // UNI-021 (uniqueness audit): tag names are unique — trim + lowercase.
+    if (tags) {
+      const seen = new Set<string>();
+      for (const tag of tags) {
+        const norm = tag.trim().toLowerCase();
+        if (seen.has(norm)) {
+          throw new ConflictException({
+            message: 'Validation failed',
+            errors: { enabledPreferences: `Duplicate preference tag "${tag.trim()}"` },
+          });
+        }
+        seen.add(norm);
+      }
+    }
   }
 
   /**

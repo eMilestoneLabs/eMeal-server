@@ -146,9 +146,44 @@ export class OrganizationsService {
       }
     }
 
+    // UNI-003 (uniqueness audit): organization RENAME validates the same
+    // normalized-name uniqueness as signup — names are globally unique on the
+    // normalized slug ("ABC Hostel" ≡ "abc  hostel!!"). When the caller renames
+    // without supplying an explicit slug, the slug is re-derived from the new
+    // name (keeping the name ≡ slug invariant) and checked excluding self, so
+    // a rename can never silently collide with another organization.
+    let derivedSlug: string | undefined;
+    if (dto.name !== undefined && !dto.slug) {
+      const current = await this.orgsRepo.findById(organizationId);
+      if (current && dto.name.trim() !== current.name) {
+        derivedSlug = dto.name
+          .trim()
+          .toLowerCase()
+          .replace(/\s+/g, '-')
+          .replace(/[^a-z0-9-]/g, '')
+          .replace(/-+/g, '-')
+          .replace(/^-+|-+$/g, '');
+        if (!derivedSlug) {
+          throw new BadRequestException({
+            message: 'Validation failed',
+            errors: { name: 'Enter a valid organization name' },
+          });
+        }
+        if (await this.orgsRepo.slugExists(derivedSlug, organizationId)) {
+          throw new ConflictException({
+            message: 'Validation failed',
+            errors: {
+              name: 'This organization name is already taken. Please choose another.',
+            },
+          });
+        }
+      }
+    }
+
     const updateData: any = {};
     if (dto.name !== undefined) updateData.name = dto.name;
     if (dto.slug !== undefined) updateData.slug = dto.slug;
+    else if (derivedSlug !== undefined) updateData.slug = derivedSlug;
     if (dto.logoUrl !== undefined) updateData.logoUrl = dto.logoUrl;
     if (dto.timezone !== undefined) updateData.timezone = dto.timezone;
     if (dto.isActive !== undefined) updateData.isActive = dto.isActive;

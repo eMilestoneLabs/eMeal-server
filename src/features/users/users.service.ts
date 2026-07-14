@@ -282,7 +282,8 @@ export class UsersService {
   }
 
   async updateFcmToken(userId: string, token: string) {
-    await this.usersRepo.update(userId, { fcmToken: token });
+    // UNI-035: single-owner claim — releases the token from any other account.
+    await this.usersRepo.claimFcmToken(userId, token);
     return { message: 'FCM token updated' };
   }
   async listByOrg(organizationId: string, params: { page: number; limit: number }) {

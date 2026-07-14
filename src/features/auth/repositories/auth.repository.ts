@@ -75,7 +75,19 @@ export class AuthRepository {
     expiresAt: Date;
     userId?: string;
   }) {
-    return this.prisma.otpRequest.create({ data });
+    // UNI-013 (uniqueness audit): exactly ONE active OTP per identifier +
+    // purpose. Issuing a new code invalidates every previous unused one in the
+    // same transaction — an older code can never be replayed after a resend
+    // (findValidOtpRequest would otherwise fall back to it once the newest
+    // code exhausts its attempts). Purposes stay independent (login vs reset).
+    const [, created] = await this.prisma.$transaction([
+      this.prisma.otpRequest.updateMany({
+        where: { identifier: data.identifier, purpose: data.purpose, isUsed: false },
+        data: { isUsed: true },
+      }),
+      this.prisma.otpRequest.create({ data }),
+    ]);
+    return created;
   }
 
   async findValidOtpRequest(identifier: string, purpose: string, maxAttempts = 5) {

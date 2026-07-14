@@ -109,6 +109,83 @@ in this cache.
 
 ---
 
+## 3b. The read-path wave law (command_6 endpoint certification, 2026-07-13)
+
+Every battery endpoint was audited to its minimal query-wave count and the
+board certified 31/31 within SLO (deploy `ab1b517`). **These rules keep it
+there — a new endpoint or a change to an existing one must satisfy ALL five:**
+
+1. **ONE dependent DB wave per read endpoint.** Verification gates (tenant
+   404 probe, membership 403 gate) run **concurrently** with the org-scoped
+   payload query via `Promise.all`; the gate result is checked BEFORE
+   anything is returned, preserving 404→403→data precedence. This is safe
+   precisely because every payload query is itself org-scoped — a discarded
+   read leaks nothing. (Examples: `getMeals`, `getSchedules`, `getMembers`,
+   `listNotices`, `getMyBilling`, `getUserSummary`.)
+2. **Never use `findById` as a 404 gate.** `GroupsRepository.findById` pulls
+   the ENTIRE member relation to compute counts; verification-only call sites
+   use `existsInOrg` (select-id probe). If you need the group *row*, fine —
+   but never fetch it just to throw 404.
+3. **Ride the include.** Data derivable from a relation the query already
+   fetches must ride it — never a second wave. Shipped examples:
+   `functionalRole` rides the group member include
+   (`GroupEntity.functionalRoleOf`); preference groups ride the meal list
+   (`findByGroup({withPreferenceBindings})` +
+   `preferencesService.buildEffectiveGroupsFromBindings` — a PURE builder,
+   no query); pending-join groups ride the membership rows
+   (`findPendingJoinGroupsForUser`). Pattern: include → strip before entity
+   build → build in-process. Payload stays byte-identical.
+4. **Counts are anti-joins, never findMany-then-diff.** A number computed by
+   shipping id lists to Node is a bug (`unreadCount` shipped every visible
+   notice id + read rows to diff set sizes → p95 86 ms on a 40 ms SLO). Use
+   `count({ where, relation: { none | some: … } })` on an indexed relation.
+5. **Aggregate fan-outs are one `Promise.all`.** When N aggregate reads
+   depend only on already-resolved inputs (dates, policy row), they fire
+   together — `getBillingSummary` runs billing rows ∥ guest charges ∥ ledger
+   adjustments ∥ opening balances as a single wave. A new aggregate joins
+   that array; it never gets its own `await`.
+
+**Org-today rule (timezone).** Any endpoint defaulting a business date to
+"today" MUST use `AttendanceService.getOrgToday(orgId)` (5-min cached org
+timezone) — `new Date().toISOString().slice(0,10)` is the server's UTC day,
+which is *yesterday* between local midnight and the tz offset (00:00–05:30
+IST) and shipped a real wrong-day bug on 4 endpoints. UTC dates remain fine
+for internal keys (queue dedup, telemetry buckets).
+
+**How to verify you kept the law:** count the sequential `await`s that hit
+Prisma per request path; more than one dependent wave needs a written
+justification (row-derived ids are the only accepted reason). Post-deploy,
+`bash deploy/run.sh --benchmark --yes` run **twice**; judge min/avg/p95 —
+a single-sample max spike on the 30/40 ms SLOs that does not repeat across
+runs is VPS contention (Handbook PART 15 golden bands), not regression.
+
+---
+
+## 3c. Billing money laws (REF-001 / CREDIT-001, survey-locked 2026-07-13)
+
+Sign convention is payable-positive. **Any billing change must keep this
+table true and keep billing-summary ≡ my-billing ≡ exports reconciled:**
+
+| Ledger item | Sign | Notes |
+|---|---|---|
+| Opening balance (carry-forward) | ± | closing of last FINALIZED period; INCLUDED in every netBill |
+| Meal + guest charges | + | whole ₹ price snapshots |
+| Debit adjustment | + | posts only via member consent (approved ACR ref, or pending→member approval) |
+| **Refund** | **+** | returns money to the member → CONSUMES credit; NEVER a discount |
+| Credit adjustment | − | money received from the member |
+
+- Ledger rows are **paise**; the engine is whole ₹ — convert ONLY at
+  `sumAdjustmentsByUser` and the exports aggregation (never per entry).
+- Only `status='posted'` ledger rows bill anywhere (pending debits await the
+  member's bell approval; rejected never bill). EVERY new ledger aggregation
+  must carry the `status: 'posted'` filter.
+- Refunds are hard-capped at available credit inside a transaction under
+  `pg_advisory_xact_lock` — never move that check out of the tx.
+- Finalize / reopen / re-finalize MUST `bumpBillingVersion` (opening balances
+  of later periods depend on them).
+
+---
+
 ## 4. Crash-safety & long-term-stability rules (all currently satisfied — keep it that way)
 
 - Repos return `Result` (Ok/Err) and never throw → `Future.wait` on repo calls
@@ -208,6 +285,22 @@ features are checked with `deploy/audit-pass11-13.sh` + feature smoke calls.
   empty path; use `benchmark-full.sh` for real numbers.
 - Planner drafts and billing figures are never SWR-cached (draft-clobber /
   money-staleness) — parallelize their fetches instead.
+- A meals-ON group defaults to **Weekly Meal Mode**, where an UNSCHEDULED
+  meal is a no-meal day (`422 NO_MEAL_TODAY`, FR-MODE-032) — for EVERYONE,
+  admin self-marks included. An "always-open" test meal only marks in an
+  Attendance-Only group (`mealsEnabled:false`).
+- Signup validation ORDER is format → uniqueness: a legacy org name outside
+  the 2–30 rule 400s on length BEFORE the duplicate check can 409. Org-name
+  uniqueness = normalized slug `@unique` + P2002 race catch.
+- Group name+type uniqueness (org-scoped, ACTIVE only, case-insensitive) is
+  enforced at **create AND rename AND restore** — a new mutation path that
+  can change/revive a name must call `existsActiveByNameType(…, excludeId)`.
+- Emails: normalize on WRITE (lowercase), forgive on READ (`mode:
+  'insensitive'`) — legacy mixed-case rows must keep matching. OTP flows
+  normalize the identifier at BOTH request and verify.
+- Flutter battery floors: realtime heartbeat ≥ 60 s, reconnect backoff cap
+  30 s, sockets pause in background — never add a periodic timer < 60 s
+  (25 s heartbeat + 2 s backoff cap measured ~10%/7 min battery drain).
 
 ---
 
@@ -264,6 +357,18 @@ pattern) — must plug into it, not fork a new workflow.
     allow-list is a FALSE failure, not a real one.
 12. **Exit honesty:** a probe script that prints a summary must also `exit 2`
     when it recorded failures, or the orchestrator marks it ✅ despite fails.
+13. **Test scenarios must satisfy the product's business rules** — two false
+    FAILs shipped from scenario bugs, not product bugs: a self-mark probe
+    created a meals-ON throwaway group (Weekly mode → its unscheduled meal
+    was correctly `422 NO_MEAL_TODAY`; fix = Attendance-Only group + accept
+    NO_MEAL_TODAY as a valid member-rule gate), and a duplicate-org-name
+    probe reused a 33-char LEGACY name that 400s on the 2–30 format gate
+    before uniqueness can 409 (fix = length-gate the seed, skip with reason).
+    When a validator fails, first ask whether the SCENARIO violates an SRS
+    rule the product is correctly enforcing.
+14. **Self-provisioned test entities carry a per-run unique suffix** (e.g.
+    `ZZ_SRS_SELFMARK_$(date +%s)`) — org-scoped unique-name guards now 409
+    a leftover from a failed cleanup, silently skipping the whole test.
 - DATABASE_URL carries `connection_limit=10&pool_timeout=20` — 4 PM2 workers
   × 10 = 40 connections, deliberately under Postgres max_connections=100.
   Never raise connection_limit without redoing that math (or add PgBouncer).

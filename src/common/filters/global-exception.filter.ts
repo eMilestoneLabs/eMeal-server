@@ -74,6 +74,21 @@ export class GlobalExceptionFilter implements ExceptionFilter {
           }
         }
       }
+    } else if (GlobalExceptionFilter.isPrismaUniqueViolation(exception)) {
+      // Uniqueness audit (UNI rules): a database unique-constraint violation
+      // that escaped a service-level pre-check (concurrent request race) must
+      // surface as a proper 409 in the flat contract — never a raw 500.
+      // Duck-typed on code/meta so this file stays decoupled from @prisma/client.
+      status = HttpStatus.CONFLICT;
+      message = 'Validation failed';
+      errors = GlobalExceptionFilter.uniqueViolationErrors(exception);
+      this.logger.warn(
+        `Duplicate rejected (unique constraint) on ${request.method} ${request.url}`,
+        {
+          requestId: request.requestId,
+          constraint: (exception as any)?.meta?.target ?? null,
+        } as any,
+      );
     } else if (exception instanceof Error) {
       message = exception.message;
       this.logger.error(
@@ -95,6 +110,34 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     );
 
     response.status(status).json(errorBody);
+  }
+
+  /**
+   * Prisma P2002 = unique constraint violated. Matched structurally (name +
+   * code) so the filter never imports the Prisma runtime.
+   */
+  private static isPrismaUniqueViolation(exception: unknown): boolean {
+    return (
+      exception instanceof Error &&
+      exception.constructor?.name === 'PrismaClientKnownRequestError' &&
+      (exception as any).code === 'P2002'
+    );
+  }
+
+  /** Field map for the flat contract from the violated constraint's columns. */
+  private static uniqueViolationErrors(
+    exception: unknown,
+  ): Record<string, string> {
+    const target = (exception as any)?.meta?.target;
+    const fields: string[] = Array.isArray(target)
+      ? target.filter((t: unknown) => typeof t === 'string')
+      : typeof target === 'string'
+        ? [target]
+        : [];
+    if (fields.length === 0) return { general: 'Already exists' };
+    const errors: Record<string, string> = {};
+    for (const f of fields) errors[f] = 'Already exists';
+    return errors;
   }
 
   /**
