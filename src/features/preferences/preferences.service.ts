@@ -220,11 +220,19 @@ export class PreferencesService {
         }
         continue;
       }
-      // Fail-safe: required group with no active options = satisfied.
-      if (g.options.length === 0) continue;
+      // Fail-safe: required group with no SELECTABLE options = satisfied.
+      // Live-Test-5 ISSUE-2: "selectable" must match what the member can
+      // actually pick — a vegOnly group only offers its veg options (FR-PG-061
+      // rejects everything else), so a required vegOnly group whose active
+      // options are all non-veg used to make the meal permanently unmarkable
+      // (client hides it, server demanded it → 422 forever).
+      const selectable = g.vegOnly
+        ? g.options.filter((o) => o.isVeg)
+        : g.options;
+      if (selectable.length === 0) continue;
 
       const min = g.required ? Math.max(g.minSelect, 1) : 0;
-      const max = Math.min(Math.max(g.maxSelect, min || 1), g.options.length);
+      const max = Math.min(Math.max(g.maxSelect, min || 1), selectable.length);
       if (chosen.length < min) {
         details.push({ groupId: g.id, reason: `Choose a ${g.label} option` });
         continue;

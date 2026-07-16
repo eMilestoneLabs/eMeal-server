@@ -506,7 +506,36 @@ export class GuestsService {
       orderBy: [{ attendanceDate: 'desc' }, { createdAt: 'asc' }],
       take: 200,
     });
-    return { data: rows.map((g) => this.toResponse(g)) };
+
+    // Live-Test-5 ISSUE-2 (Guest Attendance Visibility policy): the admin
+    // Attendance tab renders guests as first-class rows — each row must name
+    // its HOST and MEAL without client-side joins. Two batched IN() lookups
+    // (never N+1), additive fields only.
+    const hostIds = [...new Set(rows.map((g) => g.hostUserId))];
+    const mealIds = [...new Set(rows.map((g) => g.mealId))];
+    const [hosts, meals] =
+      rows.length > 0
+        ? await Promise.all([
+            this.prisma.user.findMany({
+              where: { id: { in: hostIds } },
+              select: { id: true, name: true },
+            }),
+            this.prisma.meal.findMany({
+              where: { id: { in: mealIds } },
+              select: { id: true, name: true },
+            }),
+          ])
+        : [[], []];
+    const hostName = new Map(hosts.map((h) => [h.id, h.name]));
+    const mealName = new Map(meals.map((m) => [m.id, m.name]));
+
+    return {
+      data: rows.map((g) => ({
+        ...this.toResponse(g),
+        hostName: hostName.get(g.hostUserId) ?? null,
+        mealName: mealName.get(g.mealId) ?? null,
+      })),
+    };
   }
 
   // ── EDIT (FR-HG-033) ───────────────────────────────────────────────────────

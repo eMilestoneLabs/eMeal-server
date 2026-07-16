@@ -14,6 +14,7 @@ import { UpdateUserDto } from './dto/update-user.dto';
 import { StorageService } from '../../storage/storage.service';
 import { AuditService } from '../../audit/audit.service';
 import { QueueService } from '../../queue/queue.service';
+import { normalizePhone } from '../../common/utils/phone.util';
 
 @Injectable()
 export class UsersService {
@@ -87,6 +88,12 @@ export class UsersService {
   async updateMe(userId: string, dto: UpdateUserDto) {
     const user = await this.usersRepo.findById(userId);
     if (!user) throw new NotFoundException('User not found');
+
+    // UNI-002 (Live-Test-5 ISSUE-6): profile phone edits store the same
+    // canonical form signup uses, so formatting variants can't duplicate.
+    if (dto.phone !== undefined) {
+      dto.phone = normalizePhone(dto.phone) ?? dto.phone;
+    }
 
     // Check for email/phone conflicts if updating
     if (dto.email && dto.email !== user.email) {
@@ -343,7 +350,20 @@ export class UsersService {
     }
 
     const avatarKey = this.storage.keyFromUrl(user.avatarUrl);
-    await this.usersRepo.deleteAccount(userId);
+    // Live-Test-5 ISSUE-1 (user decision 2026-07-16): FULL hard purge — every
+    // row of the account is physically deleted (attendance, billing, guests,
+    // audit, OTPs, sessions, memberships, own events), so the email and
+    // mobile number are instantly reusable for a fresh signup (UNI-001/002).
+    // Falls back to the legacy anonymizing delete only if the hard-purge
+    // method is absent (partial test stubs).
+    if (this.usersRepo.hardDeleteAccount) {
+      await this.usersRepo.hardDeleteAccount(userId, {
+        email: (user as any).email,
+        phone: (user as any).phone,
+      });
+    } else {
+      await this.usersRepo.deleteAccount(userId);
+    }
 
     // REQ (delete → smooth re-create): if that was the organization's last
     // active member, archive-rename the org so its name/slug are free for a
@@ -363,25 +383,27 @@ export class UsersService {
         );
     }
 
+    // Hard-purge policy: the deletion event itself is recorded WITHOUT any
+    // reference to the erased user (no actorId/targetId, no PII) — otherwise
+    // the audit row would recreate the very trace the purge just removed.
     this.audit?.log({
       organizationId: user.organizationId ?? undefined,
-      actorId: userId,
-      targetId: userId,
       targetType: 'User',
       action: 'delete',
       metadata: {
         selfDeletion: true,
-        sessionsRevoked: true,
-        membershipsSoftRemoved: true,
-        piiAnonymized: true,
-        financialRecordsRetained: true,
+        hardPurge: true,
+        sessionsDeleted: true,
+        membershipsDeleted: true,
+        financialRecordsDeleted: true,
+        auditTrailDeleted: true,
       },
       requestId,
     });
 
     return {
       message:
-        'Account deleted. Your personal data has been anonymized; attendance and billing history required for group records is retained per policy.',
+        'Account deleted. All of your data — profile, attendance, billing and history — has been permanently removed from the server.',
     };
   }
 

@@ -903,6 +903,9 @@ export class MealsService {
     // planner never shows a ghost meal and publish is never blocked. Published
     // schedules stay untouched (members keep the last published version until
     // re-publish, where the publish self-heal drops the stale entries).
+    // Live-Test-5 ISSUE-5: published weeks' PLANNER (draft) view now filters
+    // deleted meals out at read time (schedules repository), so the admin
+    // immediately sees the auto-draft minus this meal and just has to publish.
     // Historical attendance/billing stay intact via the immutable slot key and
     // per-record price snapshots (MMT-012/013).
     const purgedDraftEntries = await this.schedulesRepo.deleteDraftEntriesForMeal(

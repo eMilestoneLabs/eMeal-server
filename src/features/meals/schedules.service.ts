@@ -337,14 +337,13 @@ export class SchedulesService {
           errors: { id: 'Schedule does not exist in your organization' },
         });
       }
-      if (existing.entries.length > 0) {
-        const knownMealIds = await this.activeMealIds(
-          existing.groupId,
-          organizationId,
-        );
-        const stale = existing.entries.filter(
-          (e) => !knownMealIds.has(e.mealId),
-        );
+      // Live-Test-5 ISSUE-5: the entity view now HIDES stale entries (the
+      // planner auto-draft), so the self-heal detects them at the DB level —
+      // same rule (meal deleted/disabled), same audited hard drop on publish.
+      {
+        const stale =
+          (await this.schedulesRepo.findStaleEntries?.(id, organizationId)) ??
+          [];
         if (stale.length > 0) {
           await this.schedulesRepo.deleteEntriesByIds(
             id,
@@ -360,7 +359,7 @@ export class SchedulesService {
             metadata: {
               autoRemovedStaleEntries: stale.map((e) => ({
                 mealId: e.mealId,
-                mealName: e.mealName ?? e.meal?.displayName ?? e.meal?.name ?? null,
+                mealName: e.mealName,
                 dayOfWeek: e.dayOfWeek,
               })),
               reason: 'meal deleted or disabled after drafting (MMT-011)',
@@ -581,17 +580,10 @@ export class SchedulesService {
   /** Practical upper bound on meals per group for the one-shot catalogue load. */
   private static readonly MAX_GROUP_MEALS = 500;
 
-  /** Active meal ids of a group, loaded in one query. */
-  private async activeMealIds(
-    groupId: string,
-    organizationId: string,
-  ): Promise<Set<string>> {
-    const catalogue = await this.mealsRepo.findByGroup(groupId, organizationId, {
-      page: 1,
-      limit: SchedulesService.MAX_GROUP_MEALS,
-    });
-    return new Set(catalogue.data.map((m) => m.id));
-  }
+  // Live-Test-5 ISSUE-5: activeMealIds() was removed — the publish self-heal
+  // now detects stale entries at the DB level (schedulesRepo.findStaleEntries)
+  // because the entity view hides them; mealCatalogue below still serves the
+  // draft-validation path.
 
   /**
    * SRS Module 03 MMT-011: full meal catalogue split into active vs known —

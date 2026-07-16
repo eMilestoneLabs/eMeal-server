@@ -42,6 +42,9 @@ export class SchedulesRepository {
             // FR-MEAL-007: template window for chronological ordering
             attendanceWindowOpen: true,
             attendanceWindowClose: true,
+            // Live-Test-5 ISSUE-5: lets the ADMIN (live/draft) view filter
+            // out entries whose master meal was soft-deleted (archived).
+            isActive: true,
           },
         },
       },
@@ -98,8 +101,15 @@ export class SchedulesRepository {
   }
 
   private buildScheduleEntity(raw: any): MealScheduleEntity {
+    // Live-Test-5 ISSUE-5 (auto-draft on master-meal delete): the LIVE/draft
+    // view never shows entries whose master meal was soft-deleted — the
+    // planner instantly reflects the deletion ("auto draft"), while members
+    // keep reading the frozen publishedSnapshot until the admin re-publishes.
+    // Entries without a meal join (snapshot rebuilds) are kept as-is.
     const entries = SchedulesRepository.sortEntriesChronologically(
-      (raw.entries ?? []).map((e: any) => this.buildEntryEntity(e)),
+      (raw.entries ?? [])
+        .filter((e: any) => !e.meal || e.meal.isActive !== false)
+        .map((e: any) => this.buildEntryEntity(e)),
     );
     return new MealScheduleEntity({
       id: raw.id,
@@ -593,6 +603,38 @@ export class SchedulesRepository {
       },
     });
     return result.count;
+  }
+
+  /**
+   * Live-Test-5 ISSUE-5: stale entries of one schedule whose master meal is
+   * soft-deleted/disabled. Queried at the DB level because the entity view
+   * (buildScheduleEntity) now hides them — the publish self-heal still needs
+   * to find and physically drop them.
+   */
+  async findStaleEntries(
+    scheduleId: string,
+    organizationId: string,
+  ): Promise<Array<{ id: string; mealId: string; mealName: string | null; dayOfWeek: number }>> {
+    const rows = await this.prisma.scheduleEntry.findMany({
+      where: {
+        scheduleId,
+        schedule: { organizationId },
+        meal: { isActive: false },
+      },
+      select: {
+        id: true,
+        mealId: true,
+        mealName: true,
+        dayOfWeek: true,
+        meal: { select: { name: true, displayName: true } },
+      },
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      mealId: r.mealId,
+      mealName: r.mealName ?? r.meal?.displayName ?? r.meal?.name ?? null,
+      dayOfWeek: r.dayOfWeek,
+    }));
   }
 
   async publish(id: string, organizationId: string): Promise<MealScheduleEntity> {

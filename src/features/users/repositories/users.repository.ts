@@ -332,12 +332,35 @@ export class UsersRepository {
   }
 
   async findByPhone(phone: string, organizationId?: string): Promise<UserEntity | null> {
+    // UNI-002: matches canonical + legacy "+91"/"91"/"0" stored variants so
+    // the signup duplicate check can never be bypassed by formatting.
     const user = await this.prisma.user.findFirst({
-      where: { phone, ...(organizationId ? { organizationId } : {}) },
+      where: {
+        ...UsersRepository.phoneWhere(phone),
+        ...(organizationId ? { organizationId } : {}),
+      },
       include: this.memberInclude,
     });
     if (!user) return null;
     return this.buildEntityFromInclude(user);
+  }
+
+  /**
+   * UNI-002 (Live-Test-5 ISSUE-6): phone lookups match every stored format of
+   * the same real number. New rows store the canonical 10-digit form, but the
+   * signup DTO historically also accepted "+91…"/"0…" — legacy rows in those
+   * shapes must stay reachable for login AND must still trip the duplicate
+   * check. Indexed IN() of ≤3 literals — same cost class as the equality.
+   */
+  private static phoneWhere(phone: string) {
+    const p = phone.trim();
+    const variants = new Set([p]);
+    if (/^[6-9]\d{9}$/.test(p)) {
+      variants.add(`+91${p}`);
+      variants.add(`91${p}`);
+      variants.add(`0${p}`);
+    }
+    return { phone: { in: [...variants] } };
   }
 
   async findByIdentifier(identifier: string): Promise<UserEntity | null> {
@@ -345,7 +368,7 @@ export class UsersRepository {
     const user = await this.prisma.user.findFirst({
       where: isEmail
         ? UsersRepository.emailWhere(identifier)
-        : { phone: identifier.trim() },
+        : UsersRepository.phoneWhere(identifier),
       include: this.memberInclude,
     });
     if (!user) return null;
@@ -411,7 +434,10 @@ export class UsersRepository {
 
   async existsByPhone(phone: string, organizationId?: string): Promise<boolean> {
     const count = await this.prisma.user.count({
-      where: { phone, ...(organizationId ? { organizationId } : {}) },
+      where: {
+        ...UsersRepository.phoneWhere(phone),
+        ...(organizationId ? { organizationId } : {}),
+      },
     });
     return count > 0;
   }
@@ -448,8 +474,75 @@ export class UsersRepository {
         avatarUrl: true,
         isActive: true,
         name: true,
+        email: true,
+        phone: true,
       },
     });
+  }
+
+  /**
+   * Live-Test-5 ISSUE-1 (user decision 2026-07-16: "Full hard purge") — the
+   * account-deletion transaction now erases EVERY row belonging to the user:
+   * identity, sessions, memberships, attendance (+preference selections via
+   * FK cascade), billing ledger, hosted-guest bookings, vacation/correction
+   * requests, notice receipts, OTPs (by userId AND identifier), their own
+   * events (event-admin), and their audit-log entries. Email and mobile are
+   * reusable for a fresh signup the moment this commits (UNI-001/UNI-002).
+   *
+   * Ordering note: explicit deleteMany calls run before the final user.delete
+   * so the transaction never relies on FK cascade side effects for tables
+   * that only soft-reference the user (no FK: billing ledger, guests, audit).
+   * Group ownership is detached (adminId → null), never deleted — a group
+   * with remaining members is the group's data, not the leaver's.
+   */
+  async hardDeleteAccount(
+    userId: string,
+    identity: { email?: string | null; phone?: string | null },
+  ): Promise<void> {
+    const identifiers = [identity.email, identity.phone].filter(
+      (v): v is string => !!v,
+    );
+    await this.prisma.$transaction([
+      this.prisma.refreshToken.deleteMany({ where: { userId } }),
+      this.prisma.otpRequest.deleteMany({
+        where: {
+          OR: [
+            { userId },
+            ...(identifiers.length > 0
+              ? [{ identifier: { in: identifiers } }]
+              : []),
+          ],
+        },
+      }),
+      this.prisma.attendanceCorrectionRequest.deleteMany({
+        where: { userId },
+      }),
+      this.prisma.vacationRequest.deleteMany({ where: { userId } }),
+      this.prisma.noticeRead.deleteMany({ where: { userId } }),
+      this.prisma.mealGuest.deleteMany({ where: { hostUserId: userId } }),
+      this.prisma.billingLedgerEntry.deleteMany({ where: { userId } }),
+      // Cascades attendance_preference_selections rows via FK.
+      this.prisma.attendanceRecord.deleteMany({ where: { userId } }),
+      // Overrides the user performed on OTHERS' records: keep the record
+      // (it is the other member's data), drop the dangling reference.
+      this.prisma.attendanceRecord.updateMany({
+        where: { markedBy: userId },
+        data: { markedBy: null },
+      }),
+      // Event-admin accounts: their events (and cascaded meal types, guest
+      // parties, persons) die with the account.
+      this.prisma.event.deleteMany({ where: { adminId: userId } }),
+      this.prisma.groupMember.deleteMany({ where: { userId } }),
+      (this.prisma as any).group.updateMany({
+        where: { adminId: userId },
+        data: { adminId: null },
+      }),
+      // Full audit erasure per the hard-purge decision (actor AND target).
+      this.prisma.auditLog.deleteMany({
+        where: { OR: [{ actorId: userId }, { targetId: userId }] },
+      }),
+      this.prisma.user.delete({ where: { id: userId } }),
+    ]);
   }
 
   /**

@@ -336,4 +336,76 @@ else
   skip "duplicate org name field" "could not resolve admin org name via /organizations/me" "FR-AUTH-LT1-033"
 fi
 
+# ═════════════════════════════════════════════════════════════════════════════
+sec "DELIVERED FIX — Live-Test-5 batch (billing lines, guests join, UNI-002)"
+# ═════════════════════════════════════════════════════════════════════════════
+# READ-ONLY. Validates the deployed contract additions of the 2026-07-16 batch.
+# Zero coupling with prod code: pure HTTP probes of additive response fields.
+
+# (1) ISSUE-4: my-billing exposes the itemised ledger components + policy flag.
+STUDENT_GROUP="$(req GET /users/me "" "$STUDENT_TOKEN"; jbody '.groupId // .data.groupId // empty')"
+if [ -n "$STUDENT_GROUP" ]; then
+  req GET "/attendance/my-billing?groupId=$STUDENT_GROUP" "" "$STUDENT_TOKEN"
+  if [ "$R_CODE" = "200" ]; then
+    _HAS="$(jbody 'has("debitsTotal") and has("creditsTotal") and has("refundsTotal") and has("billSkippedMeals") and has("mealCharges")')"
+    [ "$_HAS" = "true" ] \
+      && ok "my-billing itemised components present" "debits/credits/refunds/billSkippedMeals/mealCharges" "FR-BILL-LT5-001" \
+      || no "my-billing missing itemised components" "$R_BODY" "FR-BILL-LT5-001"
+    # Reconciliation: net = opening + mealCharges + guestAmount + adjustments.
+    _RECON="$(jbody '(.openingBalance + .mealCharges + .guestAmount + .adjustmentsTotal) == .netBill')"
+    [ "$_RECON" = "true" ] \
+      && ok "my-billing components sum EXACTLY to netBill" "" "FR-BILL-LT5-002" \
+      || no "my-billing components do not reconcile to netBill" "$R_BODY" "FR-BILL-LT5-002"
+  else
+    skip "my-billing itemised components" "my-billing returned $R_CODE (unpriced group?)" "FR-BILL-LT5-001,FR-BILL-LT5-002"
+  fi
+else
+  skip "my-billing itemised components" "student has no group" "FR-BILL-LT5-001,FR-BILL-LT5-002"
+fi
+
+# (2) ISSUE-4: admin billing-summary carries the group-wide itemised totals.
+ADMIN_GROUP="$(req GET /groups "" "$ADMIN_TOKEN"; jbody '.data[0].id // empty')"
+if [ -n "$ADMIN_GROUP" ]; then
+  req GET "/attendance/billing-summary?groupId=$ADMIN_GROUP" "" "$ADMIN_TOKEN"
+  if [ "$R_CODE" = "200" ]; then
+    _HAS="$(jbody '.summary | has("debitsTotal") and has("creditsTotal") and has("refundsTotal")')"
+    [ "$_HAS" = "true" ] \
+      && ok "billing-summary itemised ledger totals present" "" "FR-BILL-LT5-003" \
+      || no "billing-summary missing itemised ledger totals" "$R_BODY" "FR-BILL-LT5-003"
+  else
+    skip "billing-summary itemised totals" "returned $R_CODE" "FR-BILL-LT5-003"
+  fi
+
+  # (3) ISSUE-2: guest list rows carry server-joined hostName/mealName.
+  req GET "/attendance/guests?groupId=$ADMIN_GROUP" "" "$ADMIN_TOKEN"
+  if [ "$R_CODE" = "200" ]; then
+    _N="$(jbody '.data | length')"
+    if [ "${_N:-0}" -gt 0 ]; then
+      _HAS="$(jbody '.data[0] | has("hostName") and has("mealName")')"
+      [ "$_HAS" = "true" ] \
+        && ok "guest rows carry hostName/mealName (server join)" "" "FR-GST-LT5-001" \
+        || no "guest rows missing hostName/mealName" "$R_BODY" "FR-GST-LT5-001"
+    else
+      skip "guest rows hostName/mealName" "no guest bookings to inspect" "FR-GST-LT5-001"
+    fi
+  else
+    skip "guest rows hostName/mealName" "guests list returned $R_CODE" "FR-GST-LT5-001"
+  fi
+else
+  skip "billing-summary + guest join checks" "admin has no groups" "FR-BILL-LT5-003,FR-GST-LT5-001"
+fi
+
+# (4) UNI-002: login accepts the +91-prefixed variant of a known mobile.
+# READ-ONLY auth probe (one extra login against the 10/60s budget).
+ADMIN_PHONE2="$(req GET /auth/me "" "$ADMIN_TOKEN"; jbody '.phone // .data.phone // empty')"
+if [ -n "$ADMIN_PHONE2" ] && [[ "$ADMIN_PHONE2" =~ ^[6-9][0-9]{9}$ ]]; then
+  req POST /auth/login "$(jq -nc --arg i "+91$ADMIN_PHONE2" --arg p "$ADMIN_PASS" '{identifier:$i,password:$p}')"
+  _TOK="$(jbody '.accessToken // empty')"
+  [ -n "$_TOK" ] \
+    && ok "login accepts +91-prefixed mobile (UNI-002 normalization)" "" "FR-UNI-LT5-002" \
+    || no "login rejected +91-prefixed mobile" "$R_CODE $R_BODY" "FR-UNI-LT5-002"
+else
+  skip "+91 login normalization" "admin has no 10-digit Indian mobile on file" "FR-UNI-LT5-002"
+fi
+
 [ "${SRS_SOURCED:-0}" = "1" ] || summary "DELIVERED-FIXES"

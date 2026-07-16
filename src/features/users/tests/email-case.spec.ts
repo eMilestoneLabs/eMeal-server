@@ -25,10 +25,26 @@ describe('users repository — case-insensitive email matching', () => {
     );
   });
 
-  it('findByIdentifier still matches phones exactly (trimmed)', async () => {
+  // UNI-002 (Live-Test-5): a 10-digit Indian mobile also matches its legacy
+  // stored variants (+91 / 91 / 0 prefixes) so old rows stay reachable at
+  // login and can never be duplicated by formatting differences.
+  it('findByIdentifier matches phone canonical + legacy variants (trimmed)', async () => {
     await repo.findByIdentifier(' 9876543210 ');
     expect(prisma.user.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { phone: '9876543210' } }),
+      expect.objectContaining({
+        where: {
+          phone: {
+            in: ['9876543210', '+919876543210', '919876543210', '09876543210'],
+          },
+        },
+      }),
+    );
+  });
+
+  it('findByIdentifier leaves non-Indian phone formats exact', async () => {
+    await repo.findByIdentifier('+14155552671');
+    expect(prisma.user.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { phone: { in: ['+14155552671'] } } }),
     );
   });
 

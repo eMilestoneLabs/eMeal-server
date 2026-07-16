@@ -1438,7 +1438,7 @@ export class AttendanceService {
     // billing rows, guest charges, ledger adjustments, opening balances) run
     // in ONE parallel wave — they only depend on the policy/dates resolved
     // above, never on each other. Values and policy gating are unchanged.
-    const [{ members, records }, guestByHost, adjustmentsByUser, opening] =
+    const [{ members, records }, guestByHost, adjustmentsDetail, opening] =
       await Promise.all([
         this.attendanceRepo.getBillingData(
           query.groupId,
@@ -1457,12 +1457,22 @@ export class AttendanceService {
           : Promise.resolve(
               new Map<string, { guestCount: number; guestAmount: number }>(),
             ),
-        this.billing?.sumAdjustmentsByUser?.(
+        // Live-Test-5 ISSUE-4: per-TYPE ledger rollup — same rows, same net
+        // (total keeps the exact single-round netting), plus the Debits /
+        // Credits / Refunds display components. Optional-chained fallback
+        // keeps partial test stubs of the billing service working.
+        this.billing?.sumAdjustmentsByUserDetailed?.(
           organizationId,
           query.groupId,
           fromDate,
           toDate,
-        ) ?? Promise.resolve(new Map<string, number>()),
+        ) ??
+          Promise.resolve(
+            new Map<
+              string,
+              { total: number; credits: number; debits: number; refunds: number }
+            >(),
+          ),
         this.billing?.computeOpeningBalances?.(
           organizationId,
           query.groupId,
@@ -1569,8 +1579,21 @@ export class AttendanceService {
 
     // Pass 12 (FR-BILLX-030/043): signed append-only ledger adjustments —
     // balance = Σ(price snapshots) + Σ(guest snapshots) + Σ(adjustments).
+    // Live-Test-5 ISSUE-4: adjustmentsByUser keeps the legacy net-total map
+    // (identical values/rounding as before); the per-type components ride
+    // alongside for the itemised Debits/Credits/Refunds display lines.
+    const adjustmentsByUser = new Map<string, number>();
+    for (const [uid, d] of adjustmentsDetail) adjustmentsByUser.set(uid, d.total);
     let adjustmentsTotal = 0;
-    for (const v of adjustmentsByUser.values()) adjustmentsTotal += v;
+    let debitsTotal = 0;
+    let creditsTotal = 0;
+    let refundsTotal = 0;
+    for (const d of adjustmentsDetail.values()) {
+      adjustmentsTotal += d.total;
+      debitsTotal += d.debits;
+      creditsTotal += d.credits;
+      refundsTotal += d.refunds;
+    }
 
     // CREDIT-001 (survey 2026-07-13): carried-forward OPENING BALANCES — the
     // closing position of everything through the last FINALIZED period before
@@ -1598,6 +1621,9 @@ export class AttendanceService {
         const meta = memberMeta.get(uid);
         const guest = guestByHost.get(uid) ?? { guestCount: 0, guestAmount: 0 };
         const adjustments = adjustmentsByUser.get(uid) ?? 0;
+        const adjDetail =
+          adjustmentsDetail.get(uid) ??
+          { total: 0, credits: 0, debits: 0, refunds: 0 };
         return {
           userId: uid,
           userName: meta?.name ?? uid,
@@ -1605,6 +1631,10 @@ export class AttendanceService {
           email: meta?.email ?? null,
           phone: meta?.phone ?? null,
           totalBill: agg.totalBill + guest.guestAmount,
+          // Live-Test-5 ISSUE-4: own meal charges (incl. policy-billed
+          // skipped/absent) as an independent component — guest charges are
+          // never merged into meal charges (enterprise display policy).
+          mealCharges: agg.totalBill,
           presentCount: agg.present,
           skippedCount: agg.skipped,
           absentCount: agg.absent,
@@ -1615,6 +1645,12 @@ export class AttendanceService {
           guestAmount: guest.guestAmount,
           // FR-BILLX-030/031: signed ledger total + the resulting net bill.
           adjustmentsTotal: adjustments,
+          // Live-Test-5 ISSUE-4 (enterprise display policy): each financial
+          // concept as its own line item — never merged. Signs per REF-001:
+          // debit +, credit −(shown as deduction), refund + (credit returned).
+          debitsTotal: adjDetail.debits,
+          creditsTotal: adjDetail.credits,
+          refundsTotal: adjDetail.refunds,
           // CREDIT-001: carried-forward opening balance — display item that
           // is ALREADY included in netBill (transparency line).
           openingBalance: openingByUser.get(uid) ?? 0,
@@ -1675,6 +1711,10 @@ export class AttendanceService {
         guestRevenue,
         // Pass 12: ledger + vacation transparency (FR-BILLX-030/012).
         adjustmentsTotal,
+        // Live-Test-5 ISSUE-4: itemised ledger components (group-wide).
+        debitsTotal,
+        creditsTotal,
+        refundsTotal,
         // CREDIT-001: group-wide carried-forward total (display item — every
         // member netBill already includes their share).
         openingBalanceTotal,
@@ -1762,6 +1802,14 @@ export class AttendanceService {
       guestCount: mine?.guestCount ?? 0,
       guestAmount,
       adjustmentsTotal,
+      // Live-Test-5 ISSUE-4 (enterprise display policy): every financial
+      // concept as its own line — Debits / Credits / Refunds never merged.
+      debitsTotal: mine?.debitsTotal ?? 0,
+      creditsTotal: mine?.creditsTotal ?? 0,
+      refundsTotal: mine?.refundsTotal ?? 0,
+      // Group policy flag so the client can label billed skipped/absent rows
+      // ("Billed" vs "Not Billed") without a second request.
+      billSkippedMeals: summary.billSkippedMeals ?? false,
       openingBalance: mine?.openingBalance ?? 0,
       totalBill,
       netBill: mine?.netBill ?? totalBill,

@@ -22,6 +22,7 @@ import { LoginDto, OtpRequestDto, OtpVerifyDto } from './dto/login.dto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { MailerService } from '../../shared/mailer/mailer.service';
 import { SmsService } from '../../shared/sms/sms.service';
+import { normalizePhone } from '../../common/utils/phone.util';
 
 @Injectable()
 export class AuthService {
@@ -55,6 +56,9 @@ export class AuthService {
       });
     }
 
+    // UNI-002: store ONE canonical form ("+91"/"0" variants collapse to the
+    // 10-digit national number) so the same mobile can never register twice.
+    dto.phone = normalizePhone(dto.phone);
     await this.checkIdentifierAvailability(dto.email, dto.phone);
 
     const passwordHash = await bcrypt.hash(
@@ -95,6 +99,9 @@ export class AuthService {
       });
     }
 
+    // UNI-002: store ONE canonical form ("+91"/"0" variants collapse to the
+    // 10-digit national number) so the same mobile can never register twice.
+    dto.phone = normalizePhone(dto.phone);
     await this.checkIdentifierAvailability(dto.email, dto.phone);
 
     const passwordHash = await bcrypt.hash(
@@ -206,6 +213,9 @@ export class AuthService {
       });
     }
 
+    // UNI-002: store ONE canonical form ("+91"/"0" variants collapse to the
+    // 10-digit national number) so the same mobile can never register twice.
+    dto.phone = normalizePhone(dto.phone);
     await this.checkIdentifierAvailability(dto.email, dto.phone);
 
     const passwordHash = await bcrypt.hash(
@@ -274,7 +284,11 @@ export class AuthService {
    */
   private static normalizeIdentifier(identifier: string): string {
     const trimmed = identifier.trim();
-    return trimmed.includes('@') ? trimmed.toLowerCase() : trimmed;
+    if (trimmed.includes('@')) return trimmed.toLowerCase();
+    // UNI-002 (Live-Test-5 ISSUE-6): mobile identifiers normalize to the
+    // canonical stored format ("+91 82503 64916" → "8250364916") so login,
+    // OTP and reset find the account no matter how the number was typed.
+    return normalizePhone(trimmed) ?? trimmed;
   }
 
   async login(dto: LoginDto, meta: { userAgent?: string; ip?: string; requestId?: string }) {

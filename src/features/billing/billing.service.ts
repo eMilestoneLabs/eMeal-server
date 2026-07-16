@@ -863,6 +863,74 @@ export class BillingService {
   }
 
   /**
+   * Live-Test-5 ISSUE-4 — per-TYPE ledger rollup so billing screens can show
+   * "Debits / Credits / Refunds" as independent line items (the enterprise
+   * display policy forbids merging different financial concepts into one
+   * "Adjustments" line). Signs follow the locked REF-001 math exactly:
+   * credit = −, debit = +, refund = + (credit returned as cash).
+   *
+   * `total` keeps the EXACT netting used by sumAdjustmentsByUser (rounded
+   * once on the net paise), so netBill never drifts; the per-type figures
+   * are display items rounded per type.
+   */
+  async sumAdjustmentsByUserDetailed(
+    organizationId: string,
+    groupId: string,
+    fromDate: Date,
+    toDate: Date,
+  ): Promise<
+    Map<
+      string,
+      { total: number; credits: number; debits: number; refunds: number }
+    >
+  > {
+    const rows: Array<{ userId: string; type: string; _sum: { amount: number | null } }> =
+      await (this.prisma as any).billingLedgerEntry.groupBy({
+        by: ['userId', 'type'],
+        where: {
+          organizationId,
+          groupId,
+          entryDate: { gte: fromDate, lte: toDate },
+          status: 'posted',
+        },
+        _sum: { amount: true },
+      });
+    const paise = new Map<
+      string,
+      { net: number; credits: number; debits: number; refunds: number }
+    >();
+    for (const r of rows) {
+      const p =
+        paise.get(r.userId) ?? { net: 0, credits: 0, debits: 0, refunds: 0 };
+      const amt = r._sum.amount ?? 0;
+      if (r.type === 'credit') {
+        p.net -= amt;
+        p.credits += amt;
+      } else if (r.type === 'refund') {
+        p.net += amt;
+        p.refunds += amt;
+      } else {
+        p.net += amt;
+        p.debits += amt;
+      }
+      paise.set(r.userId, p);
+    }
+    const byUser = new Map<
+      string,
+      { total: number; credits: number; debits: number; refunds: number }
+    >();
+    for (const [userId, p] of paise) {
+      byUser.set(userId, {
+        total: Math.round(p.net / 100),
+        credits: Math.round(p.credits / 100),
+        debits: Math.round(p.debits / 100),
+        refunds: Math.round(p.refunds / 100),
+      });
+    }
+    return byUser;
+  }
+
+  /**
    * Pass 12 (FR-BILLX-020/041) + SRS Module 03 BILL-012 (survey Q8/Q20):
    * the group's current billing period computed in the org timezone.
    * billingCycleStartDay=N (1–31) → [effective N of this-or-last month,
