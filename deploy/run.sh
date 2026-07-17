@@ -53,6 +53,7 @@ reg diagnose    RO    "Box-contention snapshot — CPU steal vs local hogs vs ap
 reg benchmark   RO    "Endpoint speed battery — admin+student p95 vs SLO budgets (benchmark-full.sh)"
 reg certificate RO    "Graded production certificate — speed+stability+memory+db+redis+security+disk (generate-certificate.sh)"
 reg db          RO    "Database deep parameters — cache-hit, connections, index usage, bloat, autovacuum"
+reg unidoctor   RO    "UNI race-proof index doctor — names missing UNIQUE indexes + the exact duplicate rows blocking them (uni-index-doctor.sh; diagnosis-only — the --fix repair stays a manual operational step)"
 reg system      RO    "System health — CPU, RAM, disk, PM2, docker, logs, TLS, uptime"
 reg recovery    RO    "Auto-recovery configuration audit (verify-auto-recovery.sh)"
 reg security    RO    "Security / pen-test probes — auth, isolation, injection, headers (srs/security.sh)"
@@ -200,6 +201,7 @@ run_module() { # $1 = name
     srs)         ( WRITE_TESTS=$WRITES bash deploy/srs/run.sh )  2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     security)    ( cd deploy/srs && bash security.sh )          2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     db)          mod_db                                         2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
+    unidoctor)   bash deploy/uni-index-doctor.sh                2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     system)      mod_system                                     2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     recovery)    bash deploy/verify-auto-recovery.sh            2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     e2e)         bash deploy/validate-e2e.sh                    2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;

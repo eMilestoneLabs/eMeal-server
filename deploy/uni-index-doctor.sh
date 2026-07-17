@@ -56,8 +56,16 @@ fi
 if [ "${1:-}" = "--fix" ]; then
   echo "── Re-applying guarded index blocks (idempotent; still skips dirty rules) ──"
   docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -X -q < "$MIGRATION"
-  echo "── Done — re-run without --fix to confirm ──"
+  STILL="$(psql_ro "SELECT 5 - count(*) FROM pg_indexes WHERE indexname IN ('users_email_global_uniq','users_phone_global_uniq','groups_org_type_name_active_uniq','meals_group_name_active_uniq','billing_periods_group_span_finalized_uniq')")"
+  if [ "$STILL" = "0" ]; then
+    echo "── FIXED — all 5 race-proof indexes present ──"
+    exit 0
+  fi
+  echo "── $STILL index(es) still skipped (dirty rows remain) — re-run without --fix to see them ──"
+  exit 1
 else
   echo "Resolve the duplicates above (merge/rename/archive — NEVER blind-delete),"
   echo "then re-apply the guarded blocks with:  bash deploy/uni-index-doctor.sh --fix"
+  # Audit semantics (run.sh module): missing indexes = attention required.
+  exit 1
 fi
