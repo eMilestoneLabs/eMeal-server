@@ -931,6 +931,10 @@ model MealGuest {
   isAdult        Boolean @default(true)
   displayName    String?
   mealPreference String?
+  // Live-Test-6 ISSUE-2: per-guest multi-preference-group selections —
+  // immutable JSON snapshot at booking (same shape as AttendanceRecord
+  // .preferences); price deltas are already folded into priceSnapshot.
+  preferences    Json?
   status         String  @default("booked")
   pendingApproval Boolean @default(false)
   priceSnapshot  Int?    // effective guest price at booking — immutable

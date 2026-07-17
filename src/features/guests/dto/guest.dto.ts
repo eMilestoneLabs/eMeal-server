@@ -11,6 +11,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { PreferenceSelectionDto } from '../../preferences/dto/preference-group.dto';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -29,6 +30,19 @@ export class GuestRowDto {
   @IsString()
   @MaxLength(50)
   mealPreference?: string;
+
+  /**
+   * Live-Test-6 ISSUE-2: this guest's multi-preference-group picks (FR-PG-*).
+   * Validated server-side against the meal's effective groups exactly like a
+   * member's own Present mark; price deltas fold into the guest's
+   * priceSnapshot. Omitted/empty = legacy flat-preference behaviour.
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => PreferenceSelectionDto)
+  selections?: PreferenceSelectionDto[];
 }
 
 /** POST /attendance/:mealId/guests — book N guests (FR-HG-001/080). */
@@ -64,6 +78,18 @@ export class UpdateGuestDto {
   @IsString()
   @MaxLength(50)
   mealPreference?: string;
+
+  /**
+   * Live-Test-6 ISSUE-2: replace this guest's preference-group picks. The
+   * priceSnapshot is re-derived exactly (old delta out, new delta in) so the
+   * booking-time base price is never re-quoted.
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => PreferenceSelectionDto)
+  selections?: PreferenceSelectionDto[];
 }
 
 export class QueryGuestsDto {

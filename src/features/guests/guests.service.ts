@@ -17,6 +17,8 @@ import { AuditService } from '../../audit/audit.service';
 import { BillingService } from '../billing/billing.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NoticesService } from '../notices/notices.service';
+import { PreferencesService } from '../preferences/preferences.service';
+import type { ValidatedSelections } from '../preferences/preferences.service';
 import { MembersRepository } from '../groups/repositories/members.repository';
 import { ADMIN_ROLES } from '../../common/decorators/roles.decorator';
 import {
@@ -50,6 +52,10 @@ const GROUP_SELECT = {
   id: true,
   isActive: true,
   mealsEnabled: true,
+  // Live-Test-6 ISSUE-2: planner flags gate the per-day preference override
+  // (guest selections validate against the day-effective group set).
+  weeklyMenuEnabled: true,
+  dayWiseMealsEnabled: true,
   mealPricingEnabled: true,
   preferencesEnabled: true,
   enabledPreferences: true,
@@ -109,6 +115,11 @@ export class GuestsService {
       emitToUser(userId: string, event: string, payload: unknown): void;
       emitToAdmin(organizationId: string, event: string, payload: unknown): void;
     } | null,
+    // Live-Test-6 ISSUE-2: per-guest preference-group validation + pricing.
+    // LAST + @Optional so existing unit tests construct positionally unchanged.
+    @Optional()
+    @Inject(PreferencesService)
+    private readonly preferences: PreferencesService | null = null,
   ) {}
 
   /**
@@ -309,11 +320,46 @@ export class GuestsService {
       }
     }
 
-    // Per-guest preference validation (FR-HG-031/071/081).
+    // Live-Test-6 ISSUE-2: per-guest multi-preference-group picks (FR-PG-*).
+    // One effective-group resolution for the meal, then each guest's picks are
+    // validated by the SAME server-authoritative validator members use —
+    // required groups gate guest booking exactly like a member's Present mark.
+    // Validation uses the DAY-EFFECTIVE set (planner override) — the same
+    // groups the booking sheet rendered from /meals/today for that date.
+    let pgGroups = this.preferences
+      ? await this.preferences.getEffectiveGroupsForMeal(mealId, organizationId)
+      : [];
+    pgGroups = await this.applyGuestDayOverride(
+      pgGroups,
+      group,
+      group.id,
+      organizationId,
+      mealId,
+      dateStr,
+    );
+    const guestSelections: Array<ValidatedSelections | null> = dto.guests.map(
+      (g) =>
+        pgGroups.length > 0
+          ? this.preferences!.validateSelections(pgGroups, g.selections ?? [])
+          : null,
+    );
+
+    // Per-guest FLAT preference validation (FR-HG-031/071/081). The required
+    // rule is enforceable only when the guest can actually satisfy it:
+    //  • no flat options configured (allowed=[])  → nothing to pick (fail-safe,
+    //    same philosophy as the veg-only group fail-safe), and
+    //  • the meal runs preference GROUPS → the group picks (validated above)
+    //    are the guest's meal choice; demanding a legacy flat tag on top made
+    //    booking impossible from the sheet (it renders groups, not flat chips).
     const prefRequired = group.guestPreferenceRequired === true;
     const allowed = (group.enabledPreferences ?? []) as string[];
     for (const g of dto.guests) {
-      if (prefRequired && !g.mealPreference) {
+      if (
+        prefRequired &&
+        !g.mealPreference &&
+        allowed.length > 0 &&
+        pgGroups.length === 0
+      ) {
         throw new UnprocessableEntityException({
           message: 'A meal preference is required for every guest',
           code: 'GUEST_PREFERENCE_REQUIRED',
@@ -332,6 +378,16 @@ export class GuestsService {
     // pricing is off.
     const priceFor = (isAdult: boolean): number | null =>
       this.resolveGuestPrice(group, effective.price, isAdult);
+    // Preference price deltas are stored in paise; guest prices are whole ₹ —
+    // same unit boundary as attendance marking (single conversion point).
+    const priceWithDelta = (
+      isAdult: boolean,
+      v: ValidatedSelections | null,
+    ): number | null => {
+      const base = priceFor(isAdult);
+      if (base == null || v == null) return base;
+      return base + Math.round(v.totalDelta / 100);
+    };
 
     // Admin-on-behalf (FR-HG-062) and approval workflow (FR-HG-042) both park
     // the booking as pendingApproval — cleared by host-confirm or admin-approve.
@@ -384,7 +440,7 @@ export class GuestsService {
         });
       }
 
-      const rows = dto.guests.map((g) => ({
+      const rows = dto.guests.map((g, i) => ({
         organizationId,
         groupId: group.id,
         mealId,
@@ -392,10 +448,18 @@ export class GuestsService {
         hostUserId,
         isAdult: g.isAdult ?? true,
         displayName: g.displayName ?? null,
-        mealPreference: g.mealPreference ?? null,
+        // Group-pick meals derive the flat tag from the primary selection —
+        // exactly how member marking derives it (keeps veg/non-veg analytics).
+        mealPreference:
+          g.mealPreference ?? guestSelections[i]?.primaryKey ?? null,
+        // Immutable per-guest selection snapshot (Live-Test-6 ISSUE-2).
+        preferences:
+          guestSelections[i] && guestSelections[i]!.snapshot.length > 0
+            ? (guestSelections[i]!.snapshot as any)
+            : undefined,
         status: 'booked',
         pendingApproval,
-        priceSnapshot: priceFor(g.isAdult ?? true),
+        priceSnapshot: priceWithDelta(g.isAdult ?? true, guestSelections[i]),
         createdBy: callerId,
         ...(pendingApproval ? {} : { approvedBy: null }),
       }));
@@ -572,11 +636,59 @@ export class GuestsService {
       }
     }
 
+    // Live-Test-6 ISSUE-2: replace the guest's preference-group picks. The
+    // new set is validated against the meal's CURRENT effective groups; the
+    // priceSnapshot is re-derived exactly — old delta out, new delta in — so
+    // the booking-time base price is never re-quoted (FR-HG-051 immutability).
+    let selectionData: Record<string, unknown> = {};
+    if (dto.selections !== undefined && this.preferences) {
+      let pgGroups = await this.preferences.getEffectiveGroupsForMeal(
+        guest.mealId,
+        organizationId,
+      );
+      // Day-effective set for the guest's booked date (same rule as booking).
+      pgGroups = await this.applyGuestDayOverride(
+        pgGroups,
+        meal.group ?? null,
+        meal.groupId,
+        organizationId,
+        guest.mealId,
+        guest.attendanceDate.toISOString().slice(0, 10),
+      );
+      if (pgGroups.length > 0) {
+        const validated = this.preferences.validateSelections(
+          pgGroups,
+          dto.selections ?? [],
+        );
+        const oldSnapshot: any[] = Array.isArray(guest.preferences)
+          ? (guest.preferences as any[])
+          : [];
+        let oldDeltaPaise = 0;
+        for (const s of oldSnapshot) {
+          oldDeltaPaise +=
+            (Number(s?.priceDelta) || 0) * (Number(s?.quantity) || 1);
+        }
+        selectionData = {
+          preferences:
+            validated.snapshot.length > 0 ? (validated.snapshot as any) : [],
+          ...(guest.priceSnapshot != null
+            ? {
+                priceSnapshot:
+                  guest.priceSnapshot -
+                  Math.round(oldDeltaPaise / 100) +
+                  Math.round(validated.totalDelta / 100),
+              }
+            : {}),
+        };
+      }
+    }
+
     const updated = await this.prisma.mealGuest.update({
       where: { id },
       data: {
         ...(dto.displayName !== undefined ? { displayName: dto.displayName } : {}),
         ...(dto.mealPreference !== undefined ? { mealPreference: dto.mealPreference } : {}),
+        ...selectionData,
       },
     });
     this.audit.log({
@@ -966,6 +1078,61 @@ export class GuestsService {
   }
 
   /** Effective window/price: published per-day entry overrides the master. */
+  /**
+   * Live-Test-6 ISSUE-2: narrow the master preference groups to the DAY's
+   * published override (same rule /meals/today renders and markAttendance now
+   * validates with). Exact-date entry first, else the recurring weekday
+   * fallback — mirroring the today overlay. Runs ONLY when the group runs a
+   * planner mode AND the meal actually has groups (plain meals pay nothing).
+   * Pref-fields-only lookup: the guest money path (cutoff/price) is untouched.
+   */
+  private async applyGuestDayOverride(
+    pgGroups: Awaited<
+      ReturnType<PreferencesService['getEffectiveGroupsForMeal']>
+    >,
+    group: {
+      weeklyMenuEnabled?: boolean | null;
+      dayWiseMealsEnabled?: boolean | null;
+    } | null,
+    groupId: string,
+    organizationId: string,
+    mealId: string,
+    dateStr: string,
+  ) {
+    if (!this.preferences || pgGroups.length === 0) return pgGroups;
+    const plannerOn =
+      group?.weeklyMenuEnabled === true || group?.dayWiseMealsEnabled === true;
+    if (!plannerOn) return pgGroups;
+    const dateUtc = toUtcMidnight(dateStr);
+    const dow = (dateUtc.getUTCDay() + 6) % 7;
+    const entrySelect = {
+      preferencesEnabled: true,
+      enabledPreferenceGroupIds: true,
+    } as const;
+    // Both lookups are group+org scoped — never another tenant's schedule.
+    let entry = await this.prisma.scheduleEntry.findFirst({
+      where: {
+        mealId,
+        date: dateUtc,
+        schedule: { groupId, organizationId, isPublished: true },
+      },
+      select: entrySelect,
+    });
+    if (!entry) {
+      entry = await this.prisma.scheduleEntry.findFirst({
+        where: {
+          mealId,
+          dayOfWeek: dow,
+          schedule: { groupId, organizationId, isPublished: true },
+        },
+        orderBy: { schedule: { weekStart: 'desc' } },
+        select: entrySelect,
+      });
+    }
+    if (!entry) return pgGroups;
+    return this.preferences.applyDayOverride(pgGroups, entry);
+  }
+
   private async resolveEffectiveWindow(
     meal: {
       id: string;
@@ -1159,6 +1326,9 @@ export class GuestsService {
             guestCutoffMinutesBeforeClose: true,
             attendanceGraceMinutes: true,
             enabledPreferences: true,
+            // Live-Test-6 ISSUE-2: planner flags gate the day override on edit.
+            weeklyMenuEnabled: true,
+            dayWiseMealsEnabled: true,
           },
         },
         organization: { select: { timezone: true } },
@@ -1242,6 +1412,7 @@ export class GuestsService {
     isAdult: boolean;
     displayName: string | null;
     mealPreference: string | null;
+    preferences?: unknown;
     status: string;
     pendingApproval: boolean;
     priceSnapshot: number | null;
@@ -1257,6 +1428,9 @@ export class GuestsService {
       isAdult: g.isAdult,
       displayName: g.displayName,
       mealPreference: g.mealPreference,
+      // Live-Test-6 ISSUE-2 (additive): per-guest preference-group snapshot —
+      // [{groupId, groupLabel, optionKey, optionLabel, isVeg, priceDelta, quantity}].
+      preferences: Array.isArray(g.preferences) ? g.preferences : null,
       status: g.status,
       pendingApproval: g.pendingApproval,
       priceSnapshot: g.priceSnapshot,

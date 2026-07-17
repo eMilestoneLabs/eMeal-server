@@ -6,6 +6,7 @@ import { GroupsModule } from '../groups/groups.module';
 import { BillingModule } from '../billing/billing.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { NoticesModule } from '../notices/notices.module';
+import { PreferencesModule } from '../preferences/preferences.module';
 import { GuestsController } from './guests.controller';
 import { GuestsService } from './guests.service';
 
@@ -28,6 +29,10 @@ import { GuestsService } from './guests.service';
     BillingModule,
     NotificationsModule,
     NoticesModule,
+    // Live-Test-6 ISSUE-2: per-guest preference-group validation + pricing
+    // reuses the ONE server-authoritative resolver (DRY — no duplicated
+    // business logic). PreferencesModule is upstream (no cycle).
+    PreferencesModule,
   ],
   controllers: [GuestsController],
   providers: [GuestsService],

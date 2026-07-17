@@ -558,10 +558,16 @@ export class SchedulesService {
         mealId: entry.mealId,
         dayOfWeek: toDayOfWeek(date),
         date,
-        mealName: entry.mealName ?? null,
+        // Live-Test-6 ISSUE-3 (user decision 2026-07-17): meal NAME and meal
+        // IMAGE are editable ONLY in the Master Meal Template. Day entries
+        // always inherit both (serializer falls back to the master values),
+        // so any client-sent override is coerced to null at the single write
+        // point. Operational per-day overrides (price, window, preferences,
+        // menu items, notes, description) remain exactly as before.
+        mealName: null,
         notes: entry.notes ?? null,
         description: entry.description ?? null,
-        imageUrl: entry.imageUrl ?? null,
+        imageUrl: null,
         openTime: entry.attendanceWindow?.openTime ?? null,
         closeTime: entry.attendanceWindow?.closeTime ?? null,
         preferencesEnabled: entry.preferencesEnabled ?? null,

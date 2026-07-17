@@ -36,6 +36,7 @@ echo "════════════════════════�
 # first gets a clean token; security's flood is the last thing that runs.
 . "$HERE/functional.sh"
 . "$HERE/delivered-fixes.sh"  # admin self-attendance + vacation-members + notif center
+. "$HERE/consistency.sh"      # server-truth consistency: guest pref-groups, day-name immutability, billing parity, default-attendance
 . "$HERE/uniqueness.sh"       # UNI-001..036 duplicate-rejection sweep (read-only)
 . "$HERE/performance.sh"
 . "$HERE/security.sh"

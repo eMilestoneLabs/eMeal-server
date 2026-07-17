@@ -250,16 +250,28 @@ export class AttendanceService {
     price: number | null;
     /** SRS FR-MODE-032: whether a published entry schedules this meal today. */
     scheduledToday: boolean;
+    /** Live-Test-6 ISSUE-2: the day's preference override — rides the SAME
+     *  entry query (zero extra reads) so Present validation can mirror the
+     *  exact group set /meals/today rendered for this day. */
+    preferencesEnabled: boolean | null;
+    enabledPreferenceGroupIds: string[];
   }> {
     const dateUtc = toUtcMidnight(dateStr);
     const dow = (dateUtc.getUTCDay() + 6) % 7;
+    const entrySelect = {
+      openTime: true,
+      closeTime: true,
+      price: true,
+      preferencesEnabled: true,
+      enabledPreferenceGroupIds: true,
+    } as const;
     let entry = await this.prisma.scheduleEntry.findFirst({
       where: {
         mealId,
         date: dateUtc,
         schedule: { groupId, organizationId, isPublished: true },
       },
-      select: { openTime: true, closeTime: true, price: true },
+      select: entrySelect,
     });
     if (!entry) {
       entry = await this.prisma.scheduleEntry.findFirst({
@@ -269,7 +281,7 @@ export class AttendanceService {
           schedule: { groupId, organizationId, isPublished: true },
         },
         orderBy: { schedule: { weekStart: 'desc' } },
-        select: { openTime: true, closeTime: true, price: true },
+        select: entrySelect,
       });
     }
     return {
@@ -277,6 +289,8 @@ export class AttendanceService {
       closeTime: entry?.openTime ? entry.closeTime : master.closeTime,
       price: entry?.price != null ? entry.price : master.price,
       scheduledToday: !!entry,
+      preferencesEnabled: entry?.preferencesEnabled ?? null,
+      enabledPreferenceGroupIds: entry?.enabledPreferenceGroupIds ?? [],
     };
   }
 
@@ -507,10 +521,22 @@ export class AttendanceService {
       | Parameters<AttendanceRepository['upsert']>[0]['selectionRows']
       | undefined;
     if (status === 'present') {
-      const pgGroups = await this.preferencesService.getEffectiveGroupsForMeal(
+      let pgGroups = await this.preferencesService.getEffectiveGroupsForMeal(
         meal.id,
         organizationId,
       );
+      // Live-Test-6 ISSUE-2: validate against the DAY-EFFECTIVE group set —
+      // the same planner overlay /meals/today rendered (preferences off for
+      // the day / day subset). Without this, a day that hides a required
+      // master group made Present un-markable for members AND admin self-marks
+      // (client sends the day set, server demanded the master set → 422).
+      // The override rode the resolveEffectiveWindow query above: zero cost.
+      if (plannerActive && effective.scheduledToday) {
+        pgGroups = this.preferencesService.applyDayOverride(
+          pgGroups,
+          effective,
+        );
+      }
       if (pgGroups.length > 0) {
         const validated = this.preferencesService.validateSelections(
           pgGroups,
@@ -940,15 +966,29 @@ export class AttendanceService {
 
     const meal = await this.prisma.meal.findFirst({
       where: { id: params.mealId, organizationId: params.organizationId },
-      select: { price: true },
+      // Live-Test-6 ISSUE-2: planner flags ride the same meal query so the
+      // selection validation below can apply the day override (zero cost).
+      select: {
+        price: true,
+        group: {
+          select: {
+            mealsEnabled: true,
+            weeklyMenuEnabled: true,
+            dayWiseMealsEnabled: true,
+          },
+        },
+      },
     });
-    const price = await this.resolveEffectiveMealPrice(
+    // Same call resolveEffectiveMealPrice wraps — taking the full effective
+    // object also yields the day's preference override for free.
+    const effective = await this.resolveEffectiveWindow(
       params.mealId,
       params.groupId,
       params.organizationId,
       params.attendanceDate,
-      meal?.price ?? null,
+      { openTime: null, closeTime: null, price: meal?.price ?? null },
     );
+    const price = effective.price;
 
     // ATT-004/COR-006: apply the member's selection set on approval — the
     // exact validation + pricing path markAttendance uses (FR-PG-031/040).
@@ -959,10 +999,24 @@ export class AttendanceService {
       | Parameters<AttendanceRepository['upsert']>[0]['selectionRows']
       | undefined;
     if (params.status === 'present' && params.selections?.length) {
-      const pgGroups = await this.preferencesService.getEffectiveGroupsForMeal(
+      let pgGroups = await this.preferencesService.getEffectiveGroupsForMeal(
         params.mealId,
         params.organizationId,
       );
+      // Live-Test-6 ISSUE-2: correction approvals replay the member's
+      // day-filtered selection set — validate it against the same
+      // day-effective groups markAttendance now uses (planner days that
+      // narrow/disable groups must not 422 the approval).
+      const plannerActive =
+        meal?.group?.mealsEnabled !== false &&
+        (meal?.group?.weeklyMenuEnabled === true ||
+          meal?.group?.dayWiseMealsEnabled === true);
+      if (plannerActive && effective.scheduledToday) {
+        pgGroups = this.preferencesService.applyDayOverride(
+          pgGroups,
+          effective,
+        );
+      }
       if (pgGroups.length > 0) {
         const validated = this.preferencesService.validateSelections(
           pgGroups,

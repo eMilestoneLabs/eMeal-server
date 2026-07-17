@@ -720,7 +720,15 @@ export class SystemDefaultWorker extends WorkerHost {
             isPublished: true,
           },
         },
-        select: { mealId: true, openTime: true, closeTime: true, price: true },
+        select: {
+          mealId: true,
+          openTime: true,
+          closeTime: true,
+          price: true,
+          // Live-Test-6 follow-up: a day entry can ENABLE preferences on a
+          // meal whose master flag is off — that day must stay manual too.
+          preferencesEnabled: true,
+        },
       }),
     ]);
     if (!meals.length) return;
@@ -742,8 +750,15 @@ export class SystemDefaultWorker extends WorkerHost {
       const entry = entryMap.get(meal.id);
       // FR-MODE-032: holiday / no-meal day in planner mode → nothing to mark.
       if (plannerActive && !entry) continue;
-      // ATT-011: preference-required meals stay manual (flat tags OR groups).
-      if (meal.preferencesEnabled === true || hasGroups.has(meal.id)) continue;
+      // ATT-011: preference-required meals stay manual (flat tags OR groups —
+      // whether flagged on the master meal or by the day's published entry).
+      if (
+        meal.preferencesEnabled === true ||
+        entry?.preferencesEnabled === true ||
+        hasGroups.has(meal.id)
+      ) {
+        continue;
+      }
 
       const open = entry?.openTime ? entry.openTime : meal.attendanceWindowOpen;
       const close = entry?.openTime

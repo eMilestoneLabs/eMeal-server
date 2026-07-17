@@ -100,6 +100,41 @@ export class PreferencesService {
 
   // ── Effective resolution (FR-PG-012/020) ───────────────────────────────────
 
+  /**
+   * Live-Test-6 ISSUE-2 root cause: apply a published day entry's preference
+   * override to the master effective groups — the EXACT rule /meals/today
+   * uses to RENDER them (meals.service planner overlay). Validation must use
+   * the same day-effective set the member was shown, otherwise a day that
+   * disables or narrows preferences makes Present un-markable (client sends
+   * the day set, server demanded the master set → 422 forever).
+   *   preferencesEnabled === false  → no groups apply that day
+   *   enabledPreferenceGroupIds ≠ [] → narrow to that subset
+   *   anything else                 → inherit the master set unchanged
+   */
+  applyDayOverride(
+    groups: EffectivePreferenceGroup[],
+    override:
+      | {
+          preferencesEnabled: boolean | null;
+          enabledPreferenceGroupIds: string[];
+        }
+      | null
+      | undefined,
+  ): EffectivePreferenceGroup[] {
+    if (!override || groups.length === 0) return groups;
+    let next = groups;
+    if (override.preferencesEnabled === false) next = [];
+    if (
+      next.length > 0 &&
+      Array.isArray(override.enabledPreferenceGroupIds) &&
+      override.enabledPreferenceGroupIds.length > 0
+    ) {
+      const allow = new Set(override.enabledPreferenceGroupIds);
+      next = next.filter((g) => allow.has(g.id));
+    }
+    return next;
+  }
+
   /** Effective groups for ONE meal (active groups, active options, overrides). */
   async getEffectiveGroupsForMeal(
     mealId: string,
