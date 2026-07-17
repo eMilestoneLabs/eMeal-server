@@ -408,7 +408,8 @@ export class PreferencesService {
     } else {
       assertLabelUnique(dto.label);
       this.validateGroupRules(dto);
-      this.validateOptionList(dto.options ?? []);
+      // Live-Test-7 ISSUE-2: creation-time floor — 2..5 options per group.
+      this.validateOptionList(dto.options ?? [], true);
       const created = await this.repo.createGroup({
         organizationId,
         groupId: meal.groupId,
@@ -578,6 +579,24 @@ export class PreferencesService {
         });
       }
     }
+    // Live-Test-7 ISSUE-2: PATCHing isActive obeys the same 2..5 window the
+    // create/add/delete paths enforce (floor on deactivate, cap on reactivate).
+    if (dto.isActive === false && option.isActive !== false) {
+      await this.assertActiveOptionFloor(option.group.id, organizationId);
+    }
+    if (dto.isActive === true && option.isActive === false) {
+      const group = await this.repo.findById(option.group.id, organizationId);
+      const maxOptions = this.cfg('maxOptionsPerGroup', 5);
+      if (
+        group &&
+        group.options.filter((o) => o.isActive).length >= maxOptions
+      ) {
+        throw new BadRequestException({
+          message: `A group supports at most ${maxOptions} options`,
+          errors: { isActive: 'Option limit reached' },
+        });
+      }
+    }
     const updated = await this.repo.updateOption(id, dto);
     this.auditConfig(organizationId, adminId, option.group.id, 'update', { optionId: id }, requestId);
     this.emitConfigChanged(organizationId, option.group.groupId, null);
@@ -594,6 +613,12 @@ export class PreferencesService {
     const option = await this.repo.findOptionById(id);
     if (!option || option.group.organizationId !== organizationId) {
       throw new NotFoundException('Preference option not found');
+    }
+    // Live-Test-7 ISSUE-2: a live group may never drop below the option floor
+    // (default 2) — a "choice" with one option is not a choice. Deactivate the
+    // group itself to retire the whole set.
+    if (option.isActive !== false) {
+      await this.assertActiveOptionFloor(option.group.id, organizationId);
     }
     await this.repo.updateOption(id, { isActive: false });
     this.auditConfig(organizationId, adminId, option.group.id, 'update', { deactivatedOption: option.key }, requestId);
@@ -617,7 +642,8 @@ export class PreferencesService {
     requestId?: string,
   ) {
     this.validateGroupRules(dto);
-    this.validateOptionList(dto.options ?? []);
+    // Live-Test-7 ISSUE-2: creation-time floor — 2..5 options per group.
+    this.validateOptionList(dto.options ?? [], true);
     const created = await this.repo.createGroup({
       organizationId,
       groupId,
@@ -727,10 +753,46 @@ export class PreferencesService {
     }
   }
 
-  /** FR-PG-081 option coherence: unique keys, sane quantity bounds. */
-  private validateOptionList(options: PreferenceOptionDto[]): void {
+  /** Live-Test-7 ISSUE-2: reject an option deactivation that would leave an
+   *  ACTIVE group with fewer than the configured floor (default 2). Inactive
+   *  groups can be drained freely — they render nowhere. */
+  private async assertActiveOptionFloor(
+    prefGroupId: string,
+    organizationId: string,
+  ): Promise<void> {
+    const group = await this.repo.findById(prefGroupId, organizationId);
+    if (!group || !group.isActive) return;
+    const minOptions = this.cfg('minOptionsPerGroup', 2);
+    if (group.options.filter((o) => o.isActive).length <= minOptions) {
+      throw new BadRequestException({
+        message: `A preference group needs at least ${minOptions} options`,
+        errors: {
+          options: `Keep at least ${minOptions} active options, or disable the group instead`,
+        },
+      });
+    }
+  }
+
+  /** FR-PG-081 option coherence: unique keys, sane quantity bounds.
+   *  Live-Test-7 ISSUE-2: `enforceMin` applies the creation-time floor
+   *  (default 2, config-driven) — a choice needs at least two options.
+   *  Incremental addOption passes single-item lists, so the floor is only
+   *  asserted where the FULL option set is known (create paths). */
+  private validateOptionList(
+    options: PreferenceOptionDto[],
+    enforceMin = false,
+  ): void {
     const keys = new Set<string>();
     const maxQtyCap = this.cfg('maxQuantityCap', 10);
+    if (enforceMin) {
+      const minOptions = this.cfg('minOptionsPerGroup', 2);
+      if (options.length < minOptions) {
+        throw new BadRequestException({
+          message: `A preference group needs at least ${minOptions} options`,
+          errors: { options: `Add at least ${minOptions} options` },
+        });
+      }
+    }
     // SRS Module 03 PREF-006.3: a group carries at most N tags (default 5) —
     // enforced here so inline creation (createForMeal / createTemplate) obeys
     // the same cap as incremental addOption.

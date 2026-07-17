@@ -553,6 +553,10 @@ export class GroupsService {
       if (mc.billSkippedMeals !== undefined) {
         updateData.billSkippedMeals = mc.billSkippedMeals;
       }
+      // Live-Test-7 ISSUE-4: independent "Bill Absent" policy — audited below.
+      if (mc.billAbsentMeals !== undefined) {
+        updateData.billAbsentMeals = mc.billAbsentMeals;
+      }
       // SRS FR-TIME-005 (LOOP-090): per-group grace period — audited below.
       if (mc.attendanceGraceMinutes !== undefined) {
         updateData.attendanceGraceMinutes = mc.attendanceGraceMinutes;
@@ -740,6 +744,8 @@ export class GroupsService {
       'mealPricingEnabled',
       // SRS Module 03: Bill-Skip policy flips change every member's bill.
       'billSkippedMeals',
+      // Live-Test-7 ISSUE-4: Bill-Absent flips are equally billing-relevant.
+      'billAbsentMeals',
       // FR-TIME-005: grace changes are auditable (who/when/old→new).
       'attendanceGraceMinutes',
       // FR-TRUST-001/003: trust-model changes are high-impact policy flips.
@@ -1914,6 +1920,10 @@ export class GroupsService {
       mealPricingEnabled: group.mealPricingEnabled,
       // SRS Module 03 (survey Q17/Q22): Bill-Skip policy (default OFF).
       billSkippedMeals: (group as any).billSkippedMeals ?? false,
+      // Live-Test-7 ISSUE-4: EFFECTIVE Bill-Absent policy (legacy = Bill-Skip).
+      billAbsentMeals:
+        ((group as any).billAbsentMeals ?? (group as any).billSkippedMeals) ===
+        true,
       // SRS FR-TIME-005: per-group late-marking grace (minutes, 0 = none).
       attendanceGraceMinutes: group.attendanceGraceMinutes ?? 0,
       // SRS FR-TRUST-001/003: trust model (opt-in default) + fair floor.

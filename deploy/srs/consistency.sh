@@ -222,10 +222,43 @@ else
   skip "vacation contract checks" "no student token" "LT6-VAC"
 fi
 
+# ═════════════════════════════════════════════════════════════════════════════
+sec "LIVE-TEST-7 — org-less reads never 500 + split billing toggles"
+# ═════════════════════════════════════════════════════════════════════════════
+# LT7-P0: a student with no group/organization must receive empty contracts,
+# never a 500 (Prisma null-filter crash class). These reads are cheap and safe
+# for ANY student, grouped or not — a 500 here is always a regression.
+if [ -n "$STUDENT_TOKEN" ]; then
+  for _ep in "/attendance/today" "/attendance/history?limit=5" \
+             "/attendance/weekly-summary" "/dashboard/student"; do
+    req GET "$_ep" "" "$STUDENT_TOKEN"
+    [ "$R_CODE" != "500" ] \
+      && ok "no-500 guard: GET $_ep" "($R_CODE)" "LT7-P0" \
+      || no "GET $_ep crashed (500)" "org-less/null-filter regression" "LT7-P0"
+  done
+else
+  skip "LT7-P0 no-500 guards" "no student token" "LT7-P0"
+fi
+# LT7-ISSUE4: the split billing policy is exposed on every contract surface
+# so all screens label/compute from the SAME flags.
+if [ -n "$ADMIN_TOKEN" ] && [ -n "$GRP" ]; then
+  req GET "/groups/$GRP/meal-config" "" "$ADMIN_TOKEN"
+  [ "$(jbody 'has("billAbsentMeals")')" = "true" ] \
+    && ok "meal-config exposes billAbsentMeals" "" "LT7-ISSUE4" \
+    || no "meal-config missing billAbsentMeals" "$R_BODY" "LT7-ISSUE4"
+  req GET "/attendance/billing-summary?groupId=$GRP" "" "$ADMIN_TOKEN"
+  [ "$(jbody 'has("billAbsentMeals") and has("billSkippedMeals")')" = "true" ] \
+    && ok "billing-summary exposes BOTH billing toggles" "" "LT7-ISSUE4" \
+    || no "billing-summary missing split toggles" "" "LT7-ISSUE4"
+else
+  skip "LT7-ISSUE4 contract probes" "no admin token/group" "LT7-ISSUE4"
+fi
+
 # Device-only surfaces (Flutter): premium preference-group sheet + Verify-now
 # navigation — cannot be asserted over HTTP.
 tag "LT6-ISSUE1" MANUAL "premium preference-group sheet — verify on device (light+dark)"
 tag "LT6-ISSUE5" MANUAL "Verify now opens /otp for a signed-in user — verify on device"
-MANUAL=$((MANUAL+2))
+tag "LT7-ISSUE1" MANUAL "Preference Builder mode cards + mutual exclusivity — verify on device (light+dark)"
+MANUAL=$((MANUAL+3))
 
 [ "${SRS_SOURCED:-0}" = "1" ] || summary

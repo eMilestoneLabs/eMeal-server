@@ -33,6 +33,9 @@ export class DashboardRepository {
   // Pass 15 (FR-ANL-011): public — the service layer uses this to default
   // analytics date ranges in the ORG timezone instead of device/UTC time.
   async getOrgTimezone(organizationId: string): Promise<string> {
+    // Live-Test-7 P0: org-less accounts (pre-join) — findUnique with a null
+    // id throws (500). Use the same default the lookup below falls back to.
+    if (!organizationId) return 'Asia/Kolkata';
     const now = Date.now();
     const hit = DashboardRepository._tzCache.get(organizationId);
     if (hit && hit.expires > now) return hit.tz;
@@ -74,6 +77,36 @@ export class DashboardRepository {
     userId: string,
     organizationId: string,
   ): Promise<StudentDashboardEntity> {
+    // Live-Test-7 P0: accounts that have not joined a group yet carry no
+    // organizationId — every org-scoped query below would throw on the null
+    // non-nullable filter (500). Serve the identical contract with empty
+    // operational data + the user's own flags so the "join a group" home
+    // screen renders instead of an error state. ONE indexed point read.
+    if (!organizationId) {
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { isVacationMode: true, isDefaultAttendance: true },
+      });
+      return new StudentDashboardEntity({
+        userId,
+        organizationId: '',
+        upcomingMeals: [],
+        todayAttendance: [],
+        weeklyMeals: [],
+        notifications: [],
+        attendanceSummary: {
+          totalDays: 0,
+          presentDays: 0,
+          absentDays: 0,
+          skippedDays: 0,
+          vacationDays: 0,
+        },
+        activeGroups: [],
+        vacationMode: user?.isVacationMode ?? false,
+        defaultAttendanceMode: user?.isDefaultAttendance ?? false,
+        generatedAt: new Date().toISOString(),
+      });
+    }
     const { todayUtc } = await this.getTodayBoundsInOrgTz(organizationId);
 
     // PERF (additive): the 30-day summary depends only on userId/org/date — not

@@ -228,6 +228,9 @@ export class ExportsService {
         // FR-BILLX-043 parity (command_6): the summary bills skipped/absent
         // meals when Bill-Skip is ON — the export must reconcile exactly.
         billSkippedMeals: true,
+        // Live-Test-7 ISSUE-4: independent Absent policy rides along so the
+        // export reconciles with the split-toggle engine line by line.
+        billAbsentMeals: true,
         guestAttendanceEnabled: true,
       },
     });
@@ -298,6 +301,7 @@ export class ExportsService {
       fromDate,
       {
         billSkippedMeals: (group as any).billSkippedMeals === true,
+        billAbsentMeals: (group as any).billAbsentMeals ?? null,
         guestAttendanceEnabled: (group as any).guestAttendanceEnabled === true,
         billNoShowGuests: group.billNoShowGuests !== false,
       },
@@ -322,6 +326,10 @@ export class ExportsService {
       return v;
     };
     const billSkipped = (group as any).billSkippedMeals === true;
+    // Live-Test-7 ISSUE-4: Absent bills under its own (or the legacy) flag.
+    const billAbsent =
+      ((group as any).billAbsentMeals ?? (group as any).billSkippedMeals) ===
+      true;
     for (const s of statusAgg) {
       const v = agg(s.userId);
       if (s.status === 'present') {
@@ -334,7 +342,7 @@ export class ExportsService {
         if (billSkipped) v.mealAmount += s._sum.price ?? 0;
       } else if (s.status === 'absent') {
         v.absent = s._count._all;
-        if (billSkipped) v.mealAmount += s._sum.price ?? 0;
+        if (billAbsent) v.mealAmount += s._sum.price ?? 0;
       } else if (s.status === 'onVacation') v.vacation = s._count._all;
     }
     for (const g of guestAgg) {

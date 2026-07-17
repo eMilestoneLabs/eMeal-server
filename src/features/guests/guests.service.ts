@@ -671,6 +671,13 @@ export class GuestsService {
         selectionData = {
           preferences:
             validated.snapshot.length > 0 ? (validated.snapshot as any) : [],
+          // Live-Test-7 ISSUE-2 (FR-PG-100 parity with booking): when the
+          // picks change and the caller sent no explicit flat tag, re-derive
+          // the primary display tag from the new picks — otherwise the row
+          // keeps advertising an option the guest no longer has.
+          ...(dto.mealPreference === undefined
+            ? { mealPreference: validated.primaryKey ?? null }
+            : {}),
           ...(guest.priceSnapshot != null
             ? {
                 priceSnapshot:

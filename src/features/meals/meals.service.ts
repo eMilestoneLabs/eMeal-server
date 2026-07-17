@@ -116,11 +116,36 @@ export class MealsService {
     return this.config.get<number>('preferences.maxStandaloneTags', 5);
   }
 
+  /** Live-Test-7 ISSUE-2: minimum standalone tags for an ENABLED set. */
+  private get minStandaloneTags(): number {
+    return this.config.get<number>('preferences.minStandaloneTags', 2);
+  }
+
   /**
    * SRS Module 03 PREF-006.1 — a meal carries at most maxStandaloneTags
    * standalone preference tags. Enforced on create and update.
+   * Live-Test-7 ISSUE-2 adds the creation-time floor: when standalone
+   * preferences are ENABLED, the set must offer at least minStandaloneTags
+   * (default 2) — one option is not a choice. Disabled meals may carry any
+   * (or no) tags, so toggling preferences off never trips validation, and
+   * existing data is untouched (asserted only when the SET is being written).
    */
-  private assertStandaloneTagCap(tags: string[] | undefined): void {
+  private assertStandaloneTagCap(
+    tags: string[] | undefined,
+    preferencesEnabled?: boolean,
+  ): void {
+    if (
+      preferencesEnabled === true &&
+      tags !== undefined &&
+      tags.length < this.minStandaloneTags
+    ) {
+      throw new BadRequestException({
+        message: `Enable at least ${this.minStandaloneTags} preference options`,
+        errors: {
+          enabledPreferences: `Standalone preferences need ${this.minStandaloneTags}–${this.maxStandaloneTags} options`,
+        },
+      });
+    }
     if (tags && tags.length > this.maxStandaloneTags) {
       throw new BadRequestException({
         message: `A meal supports at most ${this.maxStandaloneTags} standalone preference tags`,
@@ -267,8 +292,11 @@ export class MealsService {
       });
     }
 
-    // SRS Module 03 PREF-006.1: standalone tag cap.
-    this.assertStandaloneTagCap(dto.enabledPreferences);
+    // SRS Module 03 PREF-006.1 + Live-Test-7 ISSUE-2: standalone tag window.
+    this.assertStandaloneTagCap(
+      dto.enabledPreferences,
+      dto.preferencesEnabled ?? false,
+    );
 
     // A base64 data-URI image is uploaded to MinIO AFTER the row exists (the
     // meal id keys the object); store null first, then patch the resolved URL —
@@ -847,8 +875,12 @@ export class MealsService {
     if ('imageUrl' in dto)            updateData.imageUrl = await this.resolveMealImageUrl(organizationId, id, dto.imageUrl, existing.imageUrl) ?? null;
     if (dto.preferencesEnabled !== undefined) updateData.preferencesEnabled = dto.preferencesEnabled;
     if (dto.enabledPreferences !== undefined) {
-      // SRS Module 03 PREF-006.1: standalone tag cap.
-      this.assertStandaloneTagCap(dto.enabledPreferences);
+      // SRS Module 03 PREF-006.1 + Live-Test-7 ISSUE-2: standalone tag window
+      // (floor applies only when the meal's preferences are/stay enabled).
+      this.assertStandaloneTagCap(
+        dto.enabledPreferences,
+        dto.preferencesEnabled ?? existing.preferencesEnabled,
+      );
       updateData.enabledPreferences = dto.enabledPreferences;
     }
     if (dto.price !== undefined) updateData.price = dto.price;

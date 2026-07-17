@@ -53,6 +53,9 @@ export class GroupEntity {
   mealPricingEnabled: boolean;
   // SRS Module 03 (survey Q17/Q22): Bill-Skip policy (default OFF).
   billSkippedMeals: boolean;
+  // Live-Test-7 ISSUE-4: independent Bill-Absent policy. Null = legacy
+  // coupling (Absent follows billSkippedMeals).
+  billAbsentMeals?: boolean | null;
   // SRS FR-TIME-005: per-group late-marking grace (minutes). Null = 0.
   attendanceGraceMinutes: number | null;
   // SRS FR-TRUST-001: group trust model ('absent' opt-in | 'present' opt-out).
@@ -122,6 +125,7 @@ export class GroupEntity {
     this.enabledPreferences = this.enabledPreferences ?? [];
     this.mealPricingEnabled = this.mealPricingEnabled ?? false;
     this.billSkippedMeals = this.billSkippedMeals ?? false;
+    this.billAbsentMeals = this.billAbsentMeals ?? null;
     this.description = this.description ?? null;
     this.adminId = this.adminId ?? null;
     this.maxMembers = this.maxMembers ?? null;

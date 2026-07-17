@@ -286,6 +286,11 @@ model Group {
   // Absent AND system-generated Skip are billed at the final scheduled price
   // (base + day override, no add-ons). Default OFF = today's live behaviour.
   billSkippedMeals              Boolean @default(false)
+  // Live-Test-7 ISSUE-4: independent "Bill Absent Meals" policy. NULL =
+  // legacy coupling (Absent follows billSkippedMeals, exactly the pre-split
+  // behaviour, so existing groups' bills never move); an explicit true/false
+  // decouples Absent billing from Skip billing.
+  billAbsentMeals               Boolean?
 
   maxMembers Int?
 

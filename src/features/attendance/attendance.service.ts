@@ -139,6 +139,12 @@ export class AttendanceService {
    * cache), so any international org gets its own correct day.
    */
   async getOrgToday(organizationId: string): Promise<string> {
+    // Live-Test-7 P0: accounts that never joined a group carry no
+    // organizationId (nullable column → absent from the JWT). A null id in
+    // findUnique throws a PrismaClientValidationError → 500 on every read
+    // that resolves "today". Fall back to the same default timezone the org
+    // lookup below uses.
+    if (!organizationId) return getTodayInTimezone('Asia/Kolkata');
     const ttlMs = parseInt(process.env.ORG_TZ_CACHE_TTL_MS ?? '300000', 10);
     const hit = this.orgTzCache.get(organizationId);
     let tz: string;
@@ -1099,6 +1105,13 @@ export class AttendanceService {
     organizationId: string,
     query: QueryAttendanceDto,
   ) {
+    // Live-Test-7 P0: org-less accounts (pre-join, or membership purged) must
+    // receive the empty pagination contract — organizationId is a non-nullable
+    // column, so a null filter makes Prisma throw (500) before any row is read.
+    // Mirrors the /meals/today guard.
+    if (!organizationId) {
+      return { data: [], total: 0, page: query.page ?? 1, limit: query.limit ?? 20 };
+    }
     const isAdmin = ADMIN_ROLES.includes(requesterRole);
 
     // Students always see only their own records
@@ -1174,6 +1187,28 @@ export class AttendanceService {
 
     const fromStr = fromDate.toISOString().slice(0, 10);
     const toStr = toDate.toISOString().slice(0, 10);
+
+    // Live-Test-7 P0: no organization context → all counts are zero by
+    // definition. Serve the normal contract instead of letting the org-scoped
+    // groupBy throw on a null non-nullable filter (500).
+    if (!organizationId) {
+      const empty = AttendanceSummarySerializer.toResponse(
+        new AttendanceSummaryEntity({
+          userId,
+          groupId: query.groupId,
+          organizationId,
+          fromDate: fromStr,
+          toDate: toStr,
+          totalDays: 0,
+          presentCount: 0,
+          absentCount: 0,
+          skippedCount: 0,
+          onVacationCount: 0,
+        }),
+      );
+      (empty as Record<string, unknown>).vacationDays = 0;
+      return empty;
+    }
 
     // Try cache (5min TTL)
     const cacheKey = summaryKey(organizationId, userId, query.groupId);
@@ -1436,6 +1471,9 @@ export class AttendanceService {
         billingCycleStartDay: true,
         // SRS Module 03 (survey Q17/Q22): Bill-Skip policy.
         billSkippedMeals: true,
+        // Live-Test-7 ISSUE-4: independent Bill-Absent policy (NULL = legacy
+        // coupling — Absent follows Bill-Skip, the exact pre-split rule).
+        billAbsentMeals: true,
         organization: { select: { timezone: true } },
       },
     });
@@ -1533,6 +1571,7 @@ export class AttendanceService {
           fromDate,
           {
             billSkippedMeals: (groupPolicy as any)?.billSkippedMeals === true,
+            billAbsentMeals: (groupPolicy as any)?.billAbsentMeals ?? null,
             guestAttendanceEnabled:
               groupPolicy?.guestAttendanceEnabled === true,
             billNoShowGuests: groupPolicy?.billNoShowGuests !== false,
@@ -1607,9 +1646,13 @@ export class AttendanceService {
       } else if (r.status === 'absent') {
         u.absent += 1;
         absentMeals += 1;
-        // Bill Skip = ON also bills member-chosen Absent — otherwise the
-        // Absent button would recreate the do-nothing billing loophole.
-        if ((groupPolicy as any).billSkippedMeals === true) {
+        // Live-Test-7 ISSUE-4: Absent billing follows its OWN toggle when the
+        // admin has set one; NULL keeps the legacy coupling to Bill-Skip
+        // ("the Absent button must not recreate the do-nothing loophole").
+        if (
+          ((groupPolicy as any).billAbsentMeals ??
+            (groupPolicy as any).billSkippedMeals) === true
+        ) {
           const p = r.price ?? 0;
           u.totalBill += p;
           revenue += p;
@@ -1754,6 +1797,11 @@ export class AttendanceService {
       // SRS Module 03 (survey Q17/Q22): whether skipped/absent meals were
       // billed in this summary — additive, lets clients label the policy.
       billSkippedMeals: (groupPolicy as any)?.billSkippedMeals ?? false,
+      // Live-Test-7 ISSUE-4: EFFECTIVE Absent policy (explicit toggle, or the
+      // legacy coupling to Bill-Skip when unset) — additive display field.
+      billAbsentMeals:
+        ((groupPolicy as any)?.billAbsentMeals ??
+          (groupPolicy as any)?.billSkippedMeals) === true,
       summary: {
         revenue,
         memberCount,
@@ -1820,6 +1868,17 @@ export class AttendanceService {
       });
     }
 
+    // Live-Test-7 P0: an account with no organization cannot be an active
+    // member of any group — return the same 403 the membership gate below
+    // produces, instead of letting the org-scoped summary query throw first
+    // (Prisma null-filter validation error → 500).
+    if (!organizationId) {
+      throw new ForbiddenException({
+        message: 'You are not an active member of this group',
+        errors: { groupId: 'No active membership' },
+      });
+    }
+
     // command_6 ultra pass: the self-membership gate and the (cached, org
     // scoped) group summary are independent — ONE parallel wave. The 403
     // still fires before anything is returned; only the caller's own row
@@ -1864,6 +1923,9 @@ export class AttendanceService {
       // Group policy flag so the client can label billed skipped/absent rows
       // ("Billed" vs "Not Billed") without a second request.
       billSkippedMeals: summary.billSkippedMeals ?? false,
+      // Live-Test-7 ISSUE-4: effective Absent policy rides along (falls back
+      // to the Skip flag exactly like the engine does when unset).
+      billAbsentMeals: summary.billAbsentMeals ?? summary.billSkippedMeals ?? false,
       openingBalance: mine?.openingBalance ?? 0,
       totalBill,
       netBill: mine?.netBill ?? totalBill,

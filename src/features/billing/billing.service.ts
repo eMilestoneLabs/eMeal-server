@@ -359,6 +359,7 @@ export class BillingService {
         // REF-001 (survey 2026-07-13): billing policy for the refund cap —
         // the member's true net position depends on what the group bills.
         billSkippedMeals: true,
+        billAbsentMeals: true,
         guestAttendanceEnabled: true,
         billNoShowGuests: true,
       },
@@ -460,6 +461,7 @@ export class BillingService {
           dto.userId,
           {
             billSkippedMeals: (group as any).billSkippedMeals === true,
+            billAbsentMeals: (group as any).billAbsentMeals ?? null,
             guestAttendanceEnabled: (group as any).guestAttendanceEnabled === true,
             billNoShowGuests: (group as any).billNoShowGuests !== false,
           },
@@ -727,6 +729,26 @@ export class BillingService {
    * Runs on the [tx] client so the refund cap check and the insert commit
    * atomically under the advisory lock.
    */
+  /**
+   * Live-Test-7 ISSUE-4: ONE resolver for which attendance statuses bill.
+   * Present always bills. Skip bills under billSkippedMeals. Absent bills
+   * under billAbsentMeals when explicitly set; NULL/undefined keeps the
+   * legacy coupling (Absent follows billSkippedMeals) so pre-split groups'
+   * bills are byte-identical. Every engine (summary, exports, refund cap,
+   * carry-forward, finalize snapshot) MUST use this — never inline the list.
+   */
+  static billedStatuses(policy: {
+    billSkippedMeals?: boolean;
+    billAbsentMeals?: boolean | null;
+  }): string[] {
+    const statuses = ['present'];
+    if (policy.billSkippedMeals === true) statuses.push('skipped');
+    if (policy.billAbsentMeals ?? policy.billSkippedMeals === true) {
+      statuses.push('absent');
+    }
+    return statuses;
+  }
+
   private async computeMemberNetBalance(
     tx: any,
     organizationId: string,
@@ -734,13 +756,12 @@ export class BillingService {
     userId: string,
     policy: {
       billSkippedMeals: boolean;
+      billAbsentMeals?: boolean | null;
       guestAttendanceEnabled: boolean;
       billNoShowGuests: boolean;
     },
   ): Promise<number> {
-    const billedStatuses = policy.billSkippedMeals
-      ? ['present', 'skipped', 'absent']
-      : ['present'];
+    const billedStatuses = BillingService.billedStatuses(policy);
     const [meal, guest, ledger] = await Promise.all([
       tx.attendanceRecord.aggregate({
         where: {
@@ -1030,6 +1051,7 @@ export class BillingService {
     fromDate: Date,
     policy: {
       billSkippedMeals?: boolean;
+      billAbsentMeals?: boolean | null;
       guestAttendanceEnabled?: boolean;
       billNoShowGuests?: boolean;
     },
@@ -1047,10 +1069,8 @@ export class BillingService {
     if (!lastFinal) return { byUser: new Map(), carriedThrough: null };
     const cutoff = lastFinal.periodEnd;
 
-    const billedStatuses =
-      policy.billSkippedMeals === true
-        ? ['present', 'skipped', 'absent']
-        : ['present'];
+    // Live-Test-7 ISSUE-4: shared resolver — Skip/Absent bill independently.
+    const billedStatuses = BillingService.billedStatuses(policy);
     const [meals, guests, ledger] = await Promise.all([
       this.prisma.attendanceRecord.groupBy({
         by: ['userId'],
@@ -1183,18 +1203,19 @@ export class BillingService {
       where: { id: groupId, organizationId },
       select: {
         billSkippedMeals: true,
+        billAbsentMeals: true,
         guestAttendanceEnabled: true,
         billNoShowGuests: true,
       },
     });
     const policy = {
       billSkippedMeals: (policyRow as any)?.billSkippedMeals === true,
+      billAbsentMeals: (policyRow as any)?.billAbsentMeals ?? null,
       guestAttendanceEnabled: policyRow?.guestAttendanceEnabled === true,
       billNoShowGuests: policyRow?.billNoShowGuests !== false,
     };
-    const billedStatuses = policy.billSkippedMeals
-      ? ['present', 'skipped', 'absent']
-      : ['present'];
+    // Live-Test-7 ISSUE-4: shared resolver — Skip/Absent bill independently.
+    const billedStatuses = BillingService.billedStatuses(policy);
 
     const [perMember, billedPerMember, guests, adjustments, opening] =
       await Promise.all([

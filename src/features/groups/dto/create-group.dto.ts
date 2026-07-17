@@ -198,6 +198,16 @@ export class MealConfigDto {
   billSkippedMeals?: boolean;
 
   /**
+   * Live-Test-7 ISSUE-4 — independent "Bill Absent" policy: when set, meals
+   * a member explicitly marked Absent bill (true) or never bill (false),
+   * regardless of the Skip policy. Unset/never-sent = legacy coupling
+   * (Absent follows billSkippedMeals — the exact pre-split behaviour).
+   */
+  @IsOptional()
+  @IsBoolean()
+  billAbsentMeals?: boolean;
+
+  /**
    * SRS FR-TIME-005 (LOOP-090): grace period in minutes that extends the
    * attendance-window close for late marking. 0 or null = no grace.
    */

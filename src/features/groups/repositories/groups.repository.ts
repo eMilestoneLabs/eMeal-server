@@ -355,6 +355,8 @@ export class GroupsRepository {
       billingCycleStartDay: number | null;
       mealPricingEnabled: boolean;
       billSkippedMeals: boolean;
+      // Live-Test-7 ISSUE-4: independent Absent policy (null = legacy coupling).
+      billAbsentMeals: boolean | null;
       attendanceGraceMinutes: number | null;
       attendanceDefault: string | null;
       minOptOutMinutes: number | null;
