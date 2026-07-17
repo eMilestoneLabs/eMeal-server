@@ -494,6 +494,10 @@ model MealPreferenceGroup {
   mealId            String
   preferenceGroupId String
   order             Int      @default(0)
+  // Live-Test-8 ISSUE-001/002: false = binding SUSPENDED (meal switched to
+  // Standalone mode) — the group stays attached for restore but drops out of
+  // every effective view. Default true keeps all existing rows live.
+  isActive          Boolean  @default(true)
   // Per-meal rule overrides — null = use the group's own rule (FR-PG-012)
   requiredOverride  Boolean?
   minSelectOverride Int?

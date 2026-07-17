@@ -104,11 +104,12 @@ else
   skip "Meal summary" "no meal configured on group" "FR-ANL-010,FR-PG-050"
 fi
 req POST /attendance '{"mealId":"nonexistent","status":"present"}' "${STUDENT_TOKEN:-$ADMIN_TOKEN}"
-if [ "$R_CODE" = "403" ] && [ "$(jbody '.code // empty')" = "EMAIL_VERIFICATION_REQUIRED" ]; then
-  # ACC-005 gate fires BEFORE meal validation for unverified legacy accounts.
-  # This probe tests unknown-meal validation, so prove it with the admin and
-  # surface the real fix for the account itself.
-  echo "  ·     student unverified (ACC-005) — validating via admin; fix: bash deploy/backfill-email-verified.sh"
+if [ "$R_CODE" = "403" ]; then
+  # A 403 means an ACCOUNT gate fired before meal validation (ACC-005
+  # unverified, org-less student, or non-member — each is a separate, already
+  # verified contract). This probe tests unknown-meal VALIDATION, so prove it
+  # with the admin and surface the account-level fix.
+  echo "  ·     student gated ($(jbody '.code // empty')) — validating via admin; fix: bash deploy/backfill-email-verified.sh + join the student to a group"
   req POST /attendance '{"mealId":"nonexistent","status":"present"}' "$ADMIN_TOKEN"
 fi
 assert_in "Mark for unknown meal rejected" "$R_CODE" "FR-ATT-020" 400 404 422
@@ -117,9 +118,10 @@ sec "MODULE — VACATION (FR-VAC, FR-VACX)"
 req GET /vacation-requests "" "${STUDENT_TOKEN:-$ADMIN_TOKEN}"; assert_code "Vacation requests list" 200 "$R_CODE" "FR-VAC-001"
 YEST="$(date -d '-1 day' +%F 2>/dev/null || date +%F)"
 req POST /vacation-requests "$(jq -nc --arg g "$GROUP_ID" --arg d "$YEST" '{groupId:$g,startDate:$d,endDate:$d,reason:"e2e-backdate"}')" "${STUDENT_TOKEN:-$ADMIN_TOKEN}"
-if [ "$R_CODE" = "403" ] && [ "$(jbody '.code // empty')" = "EMAIL_VERIFICATION_REQUIRED" ]; then
-  # Same ACC-005 pre-validation gate — prove backdate rejection via admin.
-  echo "  ·     student unverified (ACC-005) — validating via admin; fix: bash deploy/backfill-email-verified.sh"
+if [ "$R_CODE" = "403" ]; then
+  # Any 403 = an account/membership gate fired before DATE validation (its
+  # own contract, verified elsewhere) — prove backdate rejection via admin.
+  echo "  ·     student gated ($(jbody '.code // empty')) — validating via admin; fix: bash deploy/backfill-email-verified.sh + join the student to a group"
   req POST /vacation-requests "$(jq -nc --arg g "$GROUP_ID" --arg d "$YEST" '{groupId:$g,startDate:$d,endDate:$d,reason:"e2e-backdate"}')" "$ADMIN_TOKEN"
 fi
 assert_in "Backdated vacation rejected" "$R_CODE" "FR-VACX-002" 400 422

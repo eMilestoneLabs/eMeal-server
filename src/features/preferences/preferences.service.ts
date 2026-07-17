@@ -166,6 +166,10 @@ export class PreferencesService {
     const result = new Map<string, EffectivePreferenceGroup[]>();
     for (const b of bindings) {
       const g = b.preferenceGroup;
+      // Live-Test-8 ISSUE-001/002: SUSPENDED bindings (meal in Standalone
+      // mode) drop out of every effective view — rendering, validation,
+      // guests, auto-attendance — while staying stored for restore.
+      if (b.isActive === false) continue;
       // Tenant isolation + soft-deleted groups drop out of the effective view.
       if (!g || g.organizationId !== organizationId || !g.isActive) continue;
       const options = g.options
@@ -344,11 +348,61 @@ export class PreferencesService {
 
   // ── Admin config CRUD (FR-PG-080/081/090) ──────────────────────────────────
 
-  /** Effective groups for a meal — member/admin read (org-isolated). */
+  /**
+   * Effective groups for a meal — member/admin read (org-isolated).
+   * Live-Test-8 ISSUE-001/002 (additive field): `suspended` carries the
+   * meal's SUSPENDED bindings (Standalone mode active) in the same shape, so
+   * the admin Preference Builder can show "saved — restores on switch back"
+   * without a second request. `data` keeps its exact prior meaning (active
+   * effective groups only) — member surfaces are untouched.
+   */
   async listForMeal(mealId: string, organizationId: string) {
     await this.assertMeal(mealId, organizationId);
-    const groups = await this.getEffectiveGroupsForMeal(mealId, organizationId);
-    return { data: groups };
+    const bindings = await this.repo.listBindingsForMeal(mealId);
+    const groups =
+      this.buildEffectiveGroupsFromBindings(bindings, organizationId).get(
+        mealId,
+      ) ?? [];
+    // Suspended bindings re-enter the SAME mapper with the suspension lifted
+    // so both lists serialize identically (DRY — one shape, one mapper).
+    const suspendedBindings = bindings
+      .filter((b: any) => b.isActive === false)
+      .map((b: any) => ({ ...b, isActive: true }));
+    const suspended =
+      suspendedBindings.length > 0
+        ? (this.buildEffectiveGroupsFromBindings(
+            suspendedBindings,
+            organizationId,
+          ).get(mealId) ?? [])
+        : [];
+    return { data: groups, suspended };
+  }
+
+  /**
+   * Live-Test-8 ISSUE-001/002: suspend (Standalone mode) or restore (Groups
+   * mode) ALL of a meal's preference-group bindings — the non-destructive
+   * mode switch. Nothing is deleted; the effective view simply excludes
+   * suspended bindings everywhere (rendering, validation, guests, sweeps).
+   */
+  async setMealBindingsActive(
+    adminId: string,
+    organizationId: string,
+    mealId: string,
+    active: boolean,
+    requestId?: string,
+  ) {
+    const meal = await this.assertMeal(mealId, organizationId);
+    const result = await this.repo.setBindingsActive(mealId, active);
+    this.auditConfig(
+      organizationId,
+      adminId,
+      mealId,
+      'update',
+      { bindingsActive: active, bindingsAffected: result.count },
+      requestId,
+    );
+    this.emitConfigChanged(organizationId, meal.groupId, mealId);
+    return { success: true, affected: result.count };
   }
 
   /**

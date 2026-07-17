@@ -182,13 +182,17 @@ export class UsersRepository {
     }
     if (!covering && isVacationMode) {
       // Only request-driven flags auto-resume; toggle-mode flags stay.
-      const hasAnyApproved =
-        approvedNearToday.length > 0 ||
-        !!(await this.prisma.vacationRequest.findFirst({
-          where: { userId, status: 'approved', deletedAt: null },
-          select: { id: true },
-        }));
-      if (hasAnyApproved) {
+      // Live-Test-8 ISSUE-007: "request-driven" = an approved request that
+      // JUST ENDED (inside the prefetch's ±48h margin). The old "any approved
+      // request ever" fallback force-cleared MANUAL toggle vacations for
+      // members with historical requests — exposing them to auto-Present
+      // billing mid-vacation. A recently-ended request is the only legitimate
+      // auto-resume trigger; anything older means the flag is toggle-driven
+      // and stays until the member turns it off.
+      const recentlyEnded = approvedNearToday.some(
+        (r) => r.endDate.getTime() < todayUtc.getTime(),
+      );
+      if (recentlyEnded) {
         await this.prisma.user.update({
           where: { id: userId },
           data: { isVacationMode: false },

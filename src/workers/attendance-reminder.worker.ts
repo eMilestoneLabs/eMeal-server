@@ -35,6 +35,8 @@ import { QueueService } from '../queue/queue.service';
 import { NotificationPayloadService } from '../features/notifications/services/notification-payload.service';
 import { QUEUE_NAMES, JOB_TYPES } from '../queue/constants/queue.constants';
 import type { ScheduleReminderPayload } from '../queue/interfaces/job-payload.interface';
+import { getTodayInTimezone, toUtcMidnight } from '../common/utils/date.utils';
+import { getVacationCoveredUserIds } from '../common/utils/vacation-coverage.util';
 
 const REMINDER_DEDUP_TTL = 4 * 60 * 60; // 4 hours
 
@@ -83,7 +85,7 @@ export class AttendanceReminderWorker extends WorkerHost {
     const tomorrowUtc = new Date(todayUtc);
     tomorrowUtc.setUTCDate(tomorrowUtc.getUTCDate() + 1);
 
-    const [membersWithToken, alreadyAttended] = await Promise.all([
+    const [membersWithToken, alreadyAttended, mealRow] = await Promise.all([
       this.prisma.groupMember.findMany({
         where: {
           groupId,
@@ -105,12 +107,43 @@ export class AttendanceReminderWorker extends WorkerHost {
         },
         select: { userId: true },
       }),
+      // Live-Test-8 ISSUE-007: org timezone + meal open time for the
+      // vacation-coverage check below (rides the same parallel wave).
+      this.prisma.meal.findUnique({
+        where: { id: mealId },
+        select: {
+          attendanceWindowOpen: true,
+          organization: { select: { timezone: true } },
+        },
+      }),
     ]);
 
     const attendedUserIds = new Set(alreadyAttended.map((r) => r.userId));
 
+    // Live-Test-8 ISSUE-007 (locked rule 4): NEVER remind during vacation.
+    // The flag filter above misses APPROVED requests whose activation lags
+    // (the lifecycle sweep flips the flag up to a cadence later) — coverage
+    // governs, exactly like the sweeps and the marking guard. Slot-aware:
+    // boundary days only suppress meals inside the covered range.
+    const tz = mealRow?.organization?.timezone ?? 'Asia/Kolkata';
+    const onVacation = await getVacationCoveredUserIds(this.prisma as any, {
+      organizationId,
+      groupId,
+      dateUtc: toUtcMidnight(getTodayInTimezone(tz)),
+      mealOpenTime: mealRow?.attendanceWindowOpen ?? null,
+      candidates: membersWithToken.map((m) => ({
+        userId: m.userId,
+        isVacationMode: false, // flag=true members were already filtered out
+      })),
+    });
+
     const eligibleRecipients = membersWithToken
-      .filter((m) => !attendedUserIds.has(m.userId) && m.user.fcmToken)
+      .filter(
+        (m) =>
+          !attendedUserIds.has(m.userId) &&
+          !onVacation.has(m.userId) &&
+          m.user.fcmToken,
+      )
       .map((m) => ({ userId: m.userId, fcmToken: m.user.fcmToken! }));
 
     if (!eligibleRecipients.length) {

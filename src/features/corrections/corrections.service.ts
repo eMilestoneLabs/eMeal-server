@@ -132,6 +132,11 @@ export class CorrectionsService {
         attendanceWindowOpen: true,
         attendanceWindowClose: true,
         organization: { select: { timezone: true } },
+        // Live-Test-8 ISSUE-004: planner flags gate the day-override below —
+        // rides the same query, no extra round-trip.
+        group: {
+          select: { weeklyMenuEnabled: true, dayWiseMealsEnabled: true },
+        },
       },
     });
     if (!meal) throw new NotFoundException('Meal not found');
@@ -178,6 +183,11 @@ export class CorrectionsService {
     // COR-005 eligibility: the attendance window must have already CLOSED —
     // while it is open, status changes go through normal marking. Applies to
     // every status-changing type (claim_present AND correct_to_absent).
+    // Live-Test-8 ISSUE-004: the resolved day view is KEPT — the preference
+    // validation below applies the same published-day override as marking.
+    let dayEffective: Awaited<
+      ReturnType<AttendanceService['resolveEffectiveWindow']>
+    > | null = null;
     if (STATUS_CHANGE_TYPES.has(dto.requestType) && dateStr === todayStr) {
       const effective = await this.attendanceService.resolveEffectiveWindow(
         meal.id,
@@ -190,6 +200,7 @@ export class CorrectionsService {
           price: meal.price ?? null,
         },
       );
+      dayEffective = effective;
       if (
         effective.openTime &&
         effective.closeTime &&
@@ -227,10 +238,28 @@ export class CorrectionsService {
     // normal attendance marking. The validated set is stored on the request
     // and applied verbatim on approval (the admin never edits it).
     if (dto.requestType === 'claim_present') {
-      const pgGroups = await this.preferencesService.getEffectiveGroupsForMeal(
+      let pgGroups = await this.preferencesService.getEffectiveGroupsForMeal(
         meal.id,
         organizationId,
       );
+      // Live-Test-8 ISSUE-004: corrections follow the SAME single source of
+      // truth as marking — the published day entry narrows/disables the
+      // required groups (applyDayOverride), so a claim_present never demands
+      // master groups the member was never shown that day. Same gate as
+      // markAttendance: planner ON + an entry published for the date.
+      const plannerActive =
+        (meal as any).group?.weeklyMenuEnabled === true ||
+        (meal as any).group?.dayWiseMealsEnabled === true;
+      if (
+        pgGroups.length > 0 &&
+        plannerActive &&
+        dayEffective?.scheduledToday
+      ) {
+        pgGroups = this.preferencesService.applyDayOverride(
+          pgGroups,
+          dayEffective,
+        );
+      }
       if (pgGroups.length > 0) {
         // Throws 422 with per-group errors when mandatory selections are
         // missing/invalid — mirrors markAttendance (FR-PG-031/032).

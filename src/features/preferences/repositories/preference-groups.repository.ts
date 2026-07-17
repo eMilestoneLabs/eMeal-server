@@ -225,6 +225,19 @@ export class PreferenceGroupsRepository {
     });
   }
 
+  /**
+   * Live-Test-8 ISSUE-001/002: suspend (false) or restore (true) ALL of a
+   * meal's group bindings in one statement. Suspended bindings stay stored —
+   * the effective-view builder skips them — so a Standalone↔Groups mode
+   * switch never loses the admin's configuration.
+   */
+  setBindingsActive(mealId: string, active: boolean) {
+    return this.prisma.mealPreferenceGroup.updateMany({
+      where: { mealId },
+      data: { isActive: active } as any,
+    });
+  }
+
   // ── Cross-tab analytics (FR-PG-050/051) ────────────────────────────────────
 
   /**

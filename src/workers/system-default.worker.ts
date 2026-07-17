@@ -569,33 +569,32 @@ export class SystemDefaultWorker extends WorkerHost {
       }
     }
 
-    // Resumes: flag ON, has approved requests, none covering today. Users
-    // with NO approved requests in the candidate window may still have older
-    // ones — resolve per user with one batched query.
+    // Resumes: flag ON, an approved request JUST ENDED (inside the ±2-day
+    // candidate window), none covering today. Live-Test-8 ISSUE-007: the old
+    // rule ("has ANY approved request ever", resolved with an extra batched
+    // query) force-cleared MANUAL toggle vacations for members with
+    // historical requests — exposing them to auto-Present billing
+    // mid-vacation. A recently-ended request is the only legitimate
+    // auto-resume trigger (identical rule to the read-time sync); the extra
+    // query is gone with it.
     const coveredNow = new Set(
       activeRequests.filter(coversToday).map((r) => r.userId),
     );
-    const resumeCandidates = flaggedUsers.filter(
-      (u) => u.organizationId && !coveredNow.has(u.id) && !toActivate.has(u.id),
+    const recentlyEnded = new Set(
+      activeRequests
+        .filter((r) => {
+          const today = todayByOrg.get(r.organizationId);
+          return today !== undefined && r.endDate.getTime() < today;
+        })
+        .map((r) => r.userId),
     );
-    let toResume: Array<{ id: string; organizationId: string }> = [];
-    if (resumeCandidates.length) {
-      const withApproved: Array<{ userId: string }> = await (
-        this.prisma as any
-      ).vacationRequest.findMany({
-        where: {
-          userId: { in: resumeCandidates.map((u) => u.id) },
-          status: 'approved',
-          deletedAt: null,
-        },
-        select: { userId: true },
-        distinct: ['userId'],
-      });
-      const requestDriven = new Set(withApproved.map((r) => r.userId));
-      toResume = resumeCandidates.filter((u) =>
-        requestDriven.has(u.id),
-      ) as Array<{ id: string; organizationId: string }>;
-    }
+    const toResume = flaggedUsers.filter(
+      (u) =>
+        u.organizationId &&
+        !coveredNow.has(u.id) &&
+        !toActivate.has(u.id) &&
+        recentlyEnded.has(u.id),
+    ) as Array<{ id: string; organizationId: string }>;
 
     if (toActivate.size) {
       await this.prisma.user.updateMany({
@@ -688,6 +687,11 @@ export class SystemDefaultWorker extends WorkerHost {
     dayWiseMealsEnabled: boolean;
     organization: { timezone: string | null } | null;
   }): Promise<void> {
+    // Live-Test-8 ISSUE-003/006: meal system OFF = meals are hidden from every
+    // member — never auto-mark (and thereby auto-bill) invisible meals. The
+    // group's stored sub-flags are preserved for re-enable; this gate is what
+    // makes them inert meanwhile.
+    if (group.mealsEnabled === false) return;
     const tz = group.organization?.timezone ?? 'Asia/Kolkata';
     const todayStr = todayInTimezone(tz);
     const nowTime = getCurrentTimeInTimezone(tz);
@@ -734,29 +738,38 @@ export class SystemDefaultWorker extends WorkerHost {
     if (!meals.length) return;
 
     // ATT-011/013: preference-group meals are excluded from auto-attendance.
+    // Live-Test-8 ISSUE-001: suspended bindings (meal in Standalone mode)
+    // don't require picks — only ACTIVE bindings gate the exclusion.
     const boundGroups = await this.prisma.mealPreferenceGroup.findMany({
-      where: { mealId: { in: meals.map((m) => m.id) } },
+      where: { mealId: { in: meals.map((m) => m.id) }, isActive: true } as any,
       select: { mealId: true },
       distinct: ['mealId'],
     });
     const hasGroups = new Set(boundGroups.map((b) => b.mealId));
 
     const entryMap = new Map(entries.map((e) => [e.mealId, e]));
+    // mealsEnabled === false already early-returned above, so planner mode is
+    // decided by the two planner flags alone here.
     const plannerActive =
-      group.mealsEnabled !== false &&
-      (group.weeklyMenuEnabled === true || group.dayWiseMealsEnabled === true);
+      group.weeklyMenuEnabled === true || group.dayWiseMealsEnabled === true;
 
     for (const meal of meals) {
       const entry = entryMap.get(meal.id);
       // FR-MODE-032: holiday / no-meal day in planner mode → nothing to mark.
       if (plannerActive && !entry) continue;
-      // ATT-011: preference-required meals stay manual (flat tags OR groups —
-      // whether flagged on the master meal or by the day's published entry).
-      if (
-        meal.preferencesEnabled === true ||
-        entry?.preferencesEnabled === true ||
-        hasGroups.has(meal.id)
-      ) {
+      // ATT-011: preference-required meals stay manual — auto-attendance
+      // NEVER guesses a member's picks. Live-Test-8 ISSUE-006: the
+      // requirement is DAY-EFFECTIVE (published schedule = single source of
+      // truth): a day entry that disables preferences clears both the flat
+      // tags AND the meal's bound groups for that day (the exact
+      // applyDayOverride rule /meals/today renders and marking validates),
+      // so such days auto-mark normally. Master flags gate only when the day
+      // entry doesn't override them.
+      const dayFlatPrefs =
+        entry?.preferencesEnabled ?? meal.preferencesEnabled;
+      const dayGroupPrefs =
+        hasGroups.has(meal.id) && entry?.preferencesEnabled !== false;
+      if (dayFlatPrefs === true || dayGroupPrefs) {
         continue;
       }
 
@@ -974,6 +987,11 @@ export class SystemDefaultWorker extends WorkerHost {
     },
     defaultFloor: number,
   ): Promise<void> {
+    // Live-Test-8 ISSUE-003/006: meal system OFF = meals hidden from every
+    // member — the close-time sweep must not materialize Present/Skip records
+    // (and bills) for invisible meals. Stored sub-flags stay preserved for
+    // the next meals-ON flip; this gate keeps them inert meanwhile.
+    if (group.mealsEnabled === false) return;
     // Opt-out (auto-Present) wins when both policies are enabled — a group
     // where everyone defaults to Present has no unmarked members to Skip.
     const materializeStatus: 'present' | 'skipped' =
@@ -995,6 +1013,7 @@ export class SystemDefaultWorker extends WorkerHost {
         select: {
           id: true,
           name: true,
+          preferencesEnabled: true,
           attendanceWindowOpen: true,
           attendanceWindowClose: true,
           price: true,
@@ -1009,20 +1028,64 @@ export class SystemDefaultWorker extends WorkerHost {
             isPublished: true,
           },
         },
-        select: { mealId: true, openTime: true, closeTime: true, price: true },
+        select: {
+          mealId: true,
+          openTime: true,
+          closeTime: true,
+          price: true,
+          preferencesEnabled: true,
+        },
       }),
     ]);
     if (!meals.length) return;
 
+    // Live-Test-8 ISSUE-006 (locked rule): the group-level Auto-Present policy
+    // NEVER guesses a member's picks either — preference-required meals are
+    // excluded from auto-Present exactly like personal auto-attendance
+    // (ATT-011, day-effective: the published day entry can clear or enable
+    // the requirement). System-SKIP materialization is unaffected — a Skip is
+    // a recorded no-response and carries no preference selection.
+    let hasGroups = new Set<string>();
+    if (materializeStatus === 'present') {
+      const boundGroups = await this.prisma.mealPreferenceGroup.findMany({
+        where: {
+          mealId: { in: meals.map((m) => m.id) },
+          isActive: true,
+        } as any,
+        select: { mealId: true },
+        distinct: ['mealId'],
+      });
+      hasGroups = new Set(boundGroups.map((b) => b.mealId));
+    }
+
     const entryMap = new Map(entries.map((e) => [e.mealId, e]));
+    // mealsEnabled === false already early-returned above, so planner mode is
+    // decided by the two planner flags alone here.
     const plannerActive =
-      group.mealsEnabled !== false &&
-      (group.weeklyMenuEnabled === true || group.dayWiseMealsEnabled === true);
+      group.weeklyMenuEnabled === true || group.dayWiseMealsEnabled === true;
 
     for (const meal of meals) {
       const entry = entryMap.get(meal.id);
       // FR-MODE-032: holiday / no-meal day in planner mode → never auto-bill.
       if (plannerActive && !entry) continue;
+
+      // Live-Test-8 ISSUE-006: auto-Present NEVER guesses a member's picks —
+      // preference-required meals (day-effective, same rule as the personal
+      // auto-attendance sweep) are excluded from Present materialization.
+      // When the group ALSO runs Bill-Skip, the no-response policy still
+      // governs: such meals fall back to the system SKIP (a Skip carries no
+      // preference selection); otherwise they simply stay unmarked.
+      let mealStatus = materializeStatus;
+      if (materializeStatus === 'present') {
+        const dayFlatPrefs =
+          entry?.preferencesEnabled ?? meal.preferencesEnabled;
+        const dayGroupPrefs =
+          hasGroups.has(meal.id) && entry?.preferencesEnabled !== false;
+        if (dayFlatPrefs === true || dayGroupPrefs) {
+          if (group.billSkippedMeals !== true) continue;
+          mealStatus = 'skipped';
+        }
+      }
 
       const open = entry?.openTime ? entry.openTime : meal.attendanceWindowOpen;
       const close = entry?.openTime
@@ -1044,7 +1107,7 @@ export class SystemDefaultWorker extends WorkerHost {
         dateStr: todayStr,
         price: entry?.price != null ? entry.price : (meal.price ?? null),
         openTime: open,
-        status: materializeStatus,
+        status: mealStatus,
       });
     }
   }

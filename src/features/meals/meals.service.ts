@@ -479,6 +479,13 @@ export class MealsService {
     role: string,
     organizationId: string,
     groupId: string,
+    /**
+     * Live-Test-8 ISSUE-004: optional YYYY-MM-DD — resolves the planner
+     * overlay (windows, prices, preference narrowing) for THAT published day
+     * instead of today. Used by the admin guest sheet so guest preference
+     * groups match the published day-effective set the validator enforces.
+     */
+    date?: string,
   ) {
     // command_6 ultra pass: the group row, the meal list (preference
     // bindings riding the same query) and the planner overlay are ALL
@@ -497,7 +504,7 @@ export class MealsService {
         50,
         isAdmin,
       ),
-      this.schedulesRepo.findTodayOverlay(groupId, organizationId),
+      this.schedulesRepo.findTodayOverlay(groupId, organizationId, date),
     ]);
     if (!planGroup) {
       // Same 404 shape getMeals raised on the legacy path (its duplicate

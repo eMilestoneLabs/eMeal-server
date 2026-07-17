@@ -44,6 +44,7 @@ import {
   UpdatePreferenceGroupDto,
   PreferenceOptionDto,
   UpdatePreferenceOptionDto,
+  SetMealBindingsActiveDto,
 } from './dto/preference-group.dto';
 
 @UseGuards(JwtAuthGuard)
@@ -82,6 +83,28 @@ export class PreferencesController {
       this.orgOf(user),
       mealId,
       dto,
+      req.requestId,
+    );
+  }
+
+  // Live-Test-8 ISSUE-001/002: non-destructive Standalone↔Groups mode switch —
+  // suspends (active=false) or restores (active=true) ALL of the meal's group
+  // bindings; nothing is deleted. MUST be declared before the :id delete so
+  // "state" is never captured as a group id.
+  @Patch('meals/:mealId/preference-groups/state')
+  @UseGuards(RolesGuard)
+  @Roles(...ADMIN_ROLES)
+  setMealBindingsActive(
+    @CurrentUser() user: JwtPayload,
+    @Param('mealId') mealId: string,
+    @Body() dto: SetMealBindingsActiveDto,
+    @Req() req: Request,
+  ) {
+    return this.service.setMealBindingsActive(
+      user.sub,
+      this.orgOf(user),
+      mealId,
+      dto.active,
       req.requestId,
     );
   }

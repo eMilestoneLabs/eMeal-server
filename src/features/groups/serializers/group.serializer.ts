@@ -126,10 +126,9 @@ export class GroupSerializer {
         mealPricingEnabled: group.mealPricingEnabled,
         // SRS Module 03 (survey Q17/Q22): Bill-Skip policy (default OFF).
         billSkippedMeals: group.billSkippedMeals ?? false,
-        // Live-Test-7 ISSUE-4: EFFECTIVE Bill-Absent policy — explicit value,
-        // or the legacy coupling to Bill-Skip when never configured.
-        billAbsentMeals:
-          (group.billAbsentMeals ?? group.billSkippedMeals) === true,
+        // Live-Test-8 ISSUE-005: Absent is always FREE — Bill-Absent removed.
+        // Inert field (always false) kept for client-contract compatibility.
+        billAbsentMeals: false,
         // SRS FR-TIME-005: per-group late-marking grace (minutes, 0 = none).
         attendanceGraceMinutes: group.attendanceGraceMinutes ?? 0,
         // SRS FR-TRUST-001/003: trust model ('absent' opt-in default) + floor.

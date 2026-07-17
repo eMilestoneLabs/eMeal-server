@@ -15,8 +15,12 @@
 set -euo pipefail
 
 PG_CONTAINER="${PG_CONTAINER:-emeal_postgres}"
-PG_USER="${PG_USER:-emeal}"
-PG_DB="${PG_DB:-emeal}"
+# Live-Test-8 ISSUE-008: resolve credentials from the CONTAINER's own env
+# (same pattern as run.sh's db module) — the hardcoded 'emeal' default
+# aborted with `FATAL: database "emeal" does not exist` on servers whose DB
+# uses a different name (unidoctor exit=2 in the audit report).
+PG_USER="${PG_USER:-$(docker exec "$PG_CONTAINER" printenv POSTGRES_USER 2>/dev/null || echo emeal)}"
+PG_DB="${PG_DB:-$(docker exec "$PG_CONTAINER" printenv POSTGRES_DB 2>/dev/null || echo emeal)}"
 MIGRATION="$(dirname "$0")/../prisma/migrations/20260714120000_uniqueness_audit_constraints/migration.sql"
 
 psql_ro() { docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -X -q -t -A -F' | ' -c "$1"; }

@@ -631,16 +631,31 @@ export class GroupsService {
           updateData.guestAttendanceEnabled ??
           (existing as any).guestAttendanceEnabled;
         const effMeals2 = updateData.mealsEnabled ?? existing.mealsEnabled;
-        // FR-HG-004: guest hosting is Meal-Mode only.
+        // FR-HG-004: guest hosting is Meal-Mode only. Live-Test-8 ISSUE-003:
+        // reject ONLY when this patch NEWLY enables guests in Attendance-Only
+        // mode. The Flutter client PATCHes the FULL mealConfig on every
+        // toggle, so turning Meals OFF while guests were already ON used to
+        // hit this throw and block the master toggle. Now the stored flag is
+        // simply left untouched (stripped from the patch when it is a no-op
+        // echo) — guest hosting is EFFECTIVELY inert while meals are off, and
+        // re-enabling meals restores the admin's prior configuration exactly.
         if (effGuests === true && effMeals2 === false) {
-          throw new UnprocessableEntityException({
-            message: 'Hosted guests require the meal system to be enabled',
-            code: 'GUESTS_REQUIRE_MEALS',
-            errors: {
-              guestAttendanceEnabled:
-                'Enable meals for this group before turning on hosted guests',
-            },
-          });
+          const guestsNewlyEnabled =
+            updateData.guestAttendanceEnabled === true &&
+            (existing as any).guestAttendanceEnabled !== true;
+          if (guestsNewlyEnabled) {
+            throw new UnprocessableEntityException({
+              message: 'Hosted guests require the meal system to be enabled',
+              code: 'GUESTS_REQUIRE_MEALS',
+              errors: {
+                guestAttendanceEnabled:
+                  'Enable meals for this group before turning on hosted guests',
+              },
+            });
+          }
+          // Echo of the already-ON stored flag while meals go/stay OFF —
+          // drop it so the state is preserved for the next meals-ON flip.
+          delete updateData.guestAttendanceEnabled;
         }
         // FR-HG-021: pricing-mode field requirements (final effective state).
         // `!== undefined` (not `??`): an explicit null means "CLEAR this
@@ -700,7 +715,10 @@ export class GroupsService {
         updateData.mealPricingEnabled ?? existing.mealPricingEnabled;
       const effMealsOn = updateData.mealsEnabled ?? existing.mealsEnabled;
       if (effPricing && effMealsOn === false) {
-        if (updateData.mealPricingEnabled === true) {
+        const pricingNewlyEnabled =
+          updateData.mealPricingEnabled === true &&
+          existing.mealPricingEnabled !== true;
+        if (pricingNewlyEnabled) {
           // This patch tried to ENABLE pricing in Attendance-Only → reject.
           throw new UnprocessableEntityException({
             message: 'Meal pricing requires the meal system to be enabled',
@@ -711,9 +729,13 @@ export class GroupsService {
             },
           });
         }
-        // This patch disabled meals while pricing was already ON → cascade
-        // pricing OFF (recorded in modeChanges audit) instead of blocking.
-        updateData.mealPricingEnabled = false;
+        // Live-Test-8 ISSUE-003: meals going/staying OFF while pricing was
+        // already ON no longer cascades pricing to a PERSISTED false (that
+        // lost the admin's setup on re-enable). The stored flag is preserved
+        // (patch echo dropped) — pricing is effectively inert while meals are
+        // off (no meal UI, no marking, and the auto-sweep skips meals-off
+        // groups), and flipping meals back ON restores the prior state.
+        delete updateData.mealPricingEnabled;
       }
     }
 
@@ -1920,10 +1942,9 @@ export class GroupsService {
       mealPricingEnabled: group.mealPricingEnabled,
       // SRS Module 03 (survey Q17/Q22): Bill-Skip policy (default OFF).
       billSkippedMeals: (group as any).billSkippedMeals ?? false,
-      // Live-Test-7 ISSUE-4: EFFECTIVE Bill-Absent policy (legacy = Bill-Skip).
-      billAbsentMeals:
-        ((group as any).billAbsentMeals ?? (group as any).billSkippedMeals) ===
-        true,
+      // Live-Test-8 ISSUE-005: Absent is always FREE — Bill-Absent removed.
+      // Inert field (always false) kept for client-contract compatibility.
+      billAbsentMeals: false,
       // SRS FR-TIME-005: per-group late-marking grace (minutes, 0 = none).
       attendanceGraceMinutes: group.attendanceGraceMinutes ?? 0,
       // SRS FR-TRUST-001/003: trust model (opt-in default) + fair floor.

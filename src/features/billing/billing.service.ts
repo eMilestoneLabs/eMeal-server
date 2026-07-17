@@ -730,23 +730,27 @@ export class BillingService {
    * atomically under the advisory lock.
    */
   /**
-   * Live-Test-7 ISSUE-4: ONE resolver for which attendance statuses bill.
-   * Present always bills. Skip bills under billSkippedMeals. Absent bills
-   * under billAbsentMeals when explicitly set; NULL/undefined keeps the
-   * legacy coupling (Absent follows billSkippedMeals) so pre-split groups'
-   * bills are byte-identical. Every engine (summary, exports, refund cap,
-   * carry-forward, finalize snapshot) MUST use this — never inline the list.
+   * Live-Test-8 ISSUE-005: ONE resolver for which attendance statuses bill.
+   *   • present  → ALWAYS bills.
+   *   • skipped  → ALWAYS bills. A persisted `skipped` row exists ONLY for a
+   *     date whose Bill-Skip policy was ON at window-close: the sweep
+   *     materializes system-Skip records only when billSkippedMeals=true
+   *     (system-default.worker), and a member-submitted "skip" is coerced to
+   *     `absent` (attendance.service). So the record's mere existence IS the
+   *     date-forward gate — billing every skipped row is correct, never
+   *     touches prior bills, and survives arbitrary ON/OFF flips. This is why
+   *     the current flag is NOT consulted here (turning Bill-Skip off must not
+   *     retroactively un-bill skips that were policy-billed when they closed).
+   *   • absent   → NEVER bills. Absent is always FREE (Bill-Absent removed).
+   * Policy arg kept for call-site compatibility; the list is policy-independent
+   * by design. Every engine (summary, exports, refund cap, carry-forward,
+   * finalize snapshot) MUST use this — never inline the list.
    */
-  static billedStatuses(policy: {
+  static billedStatuses(_policy?: {
     billSkippedMeals?: boolean;
     billAbsentMeals?: boolean | null;
   }): string[] {
-    const statuses = ['present'];
-    if (policy.billSkippedMeals === true) statuses.push('skipped');
-    if (policy.billAbsentMeals ?? policy.billSkippedMeals === true) {
-      statuses.push('absent');
-    }
-    return statuses;
+    return ['present', 'skipped'];
   }
 
   private async computeMemberNetBalance(

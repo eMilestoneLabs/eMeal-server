@@ -141,6 +141,9 @@ export class MealsController {
   async getTodayMeals(
     @CurrentUser() user: JwtPayload,
     @Query('groupId') groupId?: string,
+    // Live-Test-8 ISSUE-004: optional YYYY-MM-DD — day-effective view for
+    // that published day (admin guest sheet). Invalid/missing = today.
+    @Query('date') date?: string,
   ) {
     if (!user.organizationId || !groupId) {
       return { data: [], total: 0, page: 1, limit: 20 };
@@ -152,6 +155,7 @@ export class MealsController {
       user.role,
       user.organizationId,
       groupId,
+      date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : undefined,
     );
   }
 

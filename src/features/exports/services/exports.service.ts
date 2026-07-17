@@ -325,11 +325,6 @@ export class ExportsService {
       byUser.set(uid, v);
       return v;
     };
-    const billSkipped = (group as any).billSkippedMeals === true;
-    // Live-Test-7 ISSUE-4: Absent bills under its own (or the legacy) flag.
-    const billAbsent =
-      ((group as any).billAbsentMeals ?? (group as any).billSkippedMeals) ===
-      true;
     for (const s of statusAgg) {
       const v = agg(s.userId);
       if (s.status === 'present') {
@@ -337,12 +332,14 @@ export class ExportsService {
         v.mealAmount += s._sum.price ?? 0;
       } else if (s.status === 'skipped') {
         v.skipped = s._count._all;
-        // FR-BILLX-043 parity: Bill-Skip groups charge skipped/absent meals in
-        // the summary — the export must show the identical meal amount.
-        if (billSkipped) v.mealAmount += s._sum.price ?? 0;
+        // Live-Test-8 ISSUE-005 (date-forward Bill-Skip): a `skipped` record
+        // exists only for a date whose policy was ON at close, so bill it
+        // unconditionally — identical rule to BillingService.billedStatuses()
+        // and the meal-summary engine (FR-BILLX-043 parity).
+        v.mealAmount += s._sum.price ?? 0;
       } else if (s.status === 'absent') {
         v.absent = s._count._all;
-        if (billAbsent) v.mealAmount += s._sum.price ?? 0;
+        // Live-Test-8 ISSUE-005: Absent is always FREE — count only, no amount.
       } else if (s.status === 'onVacation') v.vacation = s._count._all;
     }
     for (const g of guestAgg) {

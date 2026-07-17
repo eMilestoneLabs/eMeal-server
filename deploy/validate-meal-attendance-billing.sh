@@ -372,8 +372,10 @@ if [ -n "${FIRST_MEAL_ID:-}" ] && [ "$FIRST_MEAL_ID" != "null" ]; then
   PG_CREATED=0; PG_CAP=""; PG1_ID=""
   for i in $(seq 1 8); do
     # PreferenceOptionDto: `key` (lowercase slug) is REQUIRED alongside label.
+    # Live-Test-7/8 rule: every group carries 2–5 options — a 1-option group
+    # is a non-choice and is (correctly) rejected, so seed TWO options.
     req POST "/meals/$FIRST_MEAL_ID/preference-groups" \
-      "$(jq -nc --arg l "ZZ PG $i" '{label:$l,options:[{key:"opt1",label:"Opt 1"}]}')" "$ADMIN_TOKEN"
+      "$(jq -nc --arg l "ZZ PG $i" '{label:$l,options:[{key:"opt1",label:"Opt 1"},{key:"opt2",label:"Opt 2"}]}')" "$ADMIN_TOKEN"
     if [ "$R_CODE" = "201" ] || [ "$R_CODE" = "200" ]; then
       PG_CREATED=$((PG_CREATED+1)); [ -z "$PG1_ID" ] && PG1_ID="$(j '.id // .data.id')"
     else PG_CAP="$R_CODE"; break; fi
@@ -382,8 +384,10 @@ if [ -n "${FIRST_MEAL_ID:-}" ] && [ "$FIRST_MEAL_ID" != "null" ]; then
     ok "PREF-006.2 preference-group cap enforced" "created=$PG_CREATED then $PG_CAP"
   else no "PREF-006.2 group cap" "created=$PG_CREATED capCode=${PG_CAP:-none} (expected 4xx after cap)"; fi
   if [ -n "$PG1_ID" ] && [ "$PG1_ID" != "null" ]; then
+    # Group already holds opt1+opt2 — add from opt3 so a duplicate-key 409 is
+    # never mistaken for the 5-option cap rejection.
     OPT_ADDED=0; OPT_CAP=""
-    for i in $(seq 2 9); do
+    for i in $(seq 3 9); do
       req POST "/preference-groups/$PG1_ID/options" "$(jq -nc --arg k "opt$i" --arg l "ZZ Opt $i" '{key:$k,label:$l}')" "$ADMIN_TOKEN"
       if [ "$R_CODE" = "201" ] || [ "$R_CODE" = "200" ]; then OPT_ADDED=$((OPT_ADDED+1)); else OPT_CAP="$R_CODE"; break; fi
     done

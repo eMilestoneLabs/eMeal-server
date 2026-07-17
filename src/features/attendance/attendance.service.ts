@@ -385,14 +385,6 @@ export class AttendanceService {
     const status =
       (dto.status ?? 'present') === 'skipped' ? 'absent' : dto.status ?? 'present';
 
-    if (user?.isVacationMode && status !== 'onVacation') {
-      // During vacation mode, auto-set status to onVacation instead of blocking
-      // (student may still mark but we override to onVacation if active)
-      this.logger.debug(
-        `User ${userId} is in vacation mode — status remains present but flagged`,
-      );
-    }
-
     // 5. Attendance window validation (using org timezone — from Organization, not Group)
     const orgTimezone = meal.organization?.timezone ?? 'Asia/Kolkata';
     const todayInTz = getTodayInTimezone(orgTimezone);
@@ -403,6 +395,36 @@ export class AttendanceService {
       throw new BadRequestException(
         `Attendance can only be marked for today (${todayInTz})`,
       );
+    }
+
+    // Live-Test-8 ISSUE-007 (locked rule 1): attendance is BLOCKED during
+    // vacation — the old path only logged and let the mark through. The
+    // shared Pass-11 coverage util governs: an APPROVED request covering
+    // (date, meal-slot) blocks even when the isVacationMode flag lags
+    // (activation sweep delay), boundary days stay meal-granular, and an
+    // early return (request shortened/cancelled) unblocks immediately. The
+    // instant toggle covers the whole day when no request governs the date.
+    if (status !== 'onVacation') {
+      const onVacation = await getVacationCoveredUserIds(this.prisma as any, {
+        organizationId,
+        groupId: meal.groupId,
+        dateUtc: toUtcMidnight(attendanceDate),
+        mealOpenTime: meal.attendanceWindowOpen ?? null,
+        candidates: [
+          { userId, isVacationMode: user?.isVacationMode === true },
+        ],
+      });
+      if (onVacation.has(userId)) {
+        throw new UnprocessableEntityException({
+          message:
+            'You are on vacation for this meal — attendance is paused',
+          code: 'VACATION_ACTIVE',
+          errors: {
+            mealId:
+              'End your vacation early from Settings to resume marking attendance',
+          },
+        });
+      }
     }
 
     // SRS FR-DISP-010: no writes into a finalized billing period.
@@ -1634,11 +1656,16 @@ export class AttendanceService {
       } else if (r.status === 'skipped') {
         u.skipped += 1;
         skippedMeals += 1;
-        // SRS Module 03 (survey Q17/Q22/Q23): Bill Skip = ON bills the
-        // system-generated Skip at its snapshotted scheduled price (base +
-        // day override — no add-ons, none were selected). Kitchen counts
-        // (byMeal/bySlot presentCount) are Present-only and stay untouched.
-        if ((groupPolicy as any).billSkippedMeals === true) {
+        // Live-Test-8 ISSUE-005 (date-forward Bill-Skip): a persisted `skipped`
+        // record exists ONLY for a date whose Bill-Skip policy was ON at
+        // window-close (the sweep materializes system-Skip records only when
+        // billSkippedMeals=true; a member's own "skip" is coerced to `absent`).
+        // So the record's existence IS the gate — bill it at its snapshotted
+        // scheduled price unconditionally. The current flag is NOT consulted:
+        // turning Bill-Skip off must never un-bill skips that were policy-billed
+        // when they closed. Matches BillingService.billedStatuses(). Kitchen
+        // counts (byMeal/bySlot presentCount) are Present-only and untouched.
+        {
           const p = r.price ?? 0;
           u.totalBill += p;
           revenue += p;
@@ -1646,17 +1673,8 @@ export class AttendanceService {
       } else if (r.status === 'absent') {
         u.absent += 1;
         absentMeals += 1;
-        // Live-Test-7 ISSUE-4: Absent billing follows its OWN toggle when the
-        // admin has set one; NULL keeps the legacy coupling to Bill-Skip
-        // ("the Absent button must not recreate the do-nothing loophole").
-        if (
-          ((groupPolicy as any).billAbsentMeals ??
-            (groupPolicy as any).billSkippedMeals) === true
-        ) {
-          const p = r.price ?? 0;
-          u.totalBill += p;
-          revenue += p;
-        }
+        // Live-Test-8 ISSUE-005: Absent is ALWAYS FREE (Bill-Absent removed) —
+        // no bill component, only the count for display.
       } else if (r.status === 'onVacation') {
         u.vacation += 1;
         vacationDays += 1;
@@ -1794,14 +1812,12 @@ export class AttendanceService {
         // carried through (null = nothing finalized before this range).
         openingCarriedThrough: opening.carriedThrough,
       },
-      // SRS Module 03 (survey Q17/Q22): whether skipped/absent meals were
-      // billed in this summary — additive, lets clients label the policy.
+      // SRS Module 03 (survey Q17/Q22): whether skipped meals are billed —
+      // additive, lets clients label the policy.
       billSkippedMeals: (groupPolicy as any)?.billSkippedMeals ?? false,
-      // Live-Test-7 ISSUE-4: EFFECTIVE Absent policy (explicit toggle, or the
-      // legacy coupling to Bill-Skip when unset) — additive display field.
-      billAbsentMeals:
-        ((groupPolicy as any)?.billAbsentMeals ??
-          (groupPolicy as any)?.billSkippedMeals) === true,
+      // Live-Test-8 ISSUE-005: Absent is always FREE now — kept as an inert
+      // display field (always false) for client-contract compatibility.
+      billAbsentMeals: false,
       summary: {
         revenue,
         memberCount,
@@ -1920,12 +1936,12 @@ export class AttendanceService {
       debitsTotal: mine?.debitsTotal ?? 0,
       creditsTotal: mine?.creditsTotal ?? 0,
       refundsTotal: mine?.refundsTotal ?? 0,
-      // Group policy flag so the client can label billed skipped/absent rows
+      // Group policy flag so the client can label billed skipped rows
       // ("Billed" vs "Not Billed") without a second request.
       billSkippedMeals: summary.billSkippedMeals ?? false,
-      // Live-Test-7 ISSUE-4: effective Absent policy rides along (falls back
-      // to the Skip flag exactly like the engine does when unset).
-      billAbsentMeals: summary.billAbsentMeals ?? summary.billSkippedMeals ?? false,
+      // Live-Test-8 ISSUE-005: Absent is always FREE — inert display field
+      // kept for client-contract compatibility.
+      billAbsentMeals: false,
       openingBalance: mine?.openingBalance ?? 0,
       totalBill,
       netBill: mine?.netBill ?? totalBill,

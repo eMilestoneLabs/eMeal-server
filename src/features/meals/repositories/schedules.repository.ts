@@ -297,10 +297,17 @@ export class SchedulesRepository {
    * Returns per-meal overrides for TODAY (org timezone) sourced from the
    * group's published schedule. Empty map = no active schedule for today,
    * so the caller falls back to master meals (no behavioural change).
+   *
+   * Live-Test-8 ISSUE-004: optional [dateStr] (YYYY-MM-DD) resolves the
+   * overlay for THAT calendar date instead of today — the admin guest sheet
+   * books guests for arbitrary dates and must see the same published
+   * day-effective preference set the member flow validates against. Omitted =
+   * today in org timezone (existing behaviour, byte-identical).
    */
   async findTodayOverlay(
     groupId: string,
     organizationId: string,
+    dateStr?: string,
   ): Promise<
     Map<
       string,
@@ -341,13 +348,17 @@ export class SchedulesRepository {
     });
     const tz = org?.timezone ?? 'Asia/Kolkata';
 
-    // Today's calendar date in org tz -> UTC midnight + dayOfWeek (0=Mon..6=Sun).
-    const todayStr = new Intl.DateTimeFormat('en-CA', {
-      timeZone: tz,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    }).format(new Date());
+    // Target calendar date: explicit [dateStr] (ISSUE-004) or today in org
+    // tz -> UTC midnight + dayOfWeek (0=Mon..6=Sun).
+    const todayStr =
+      dateStr && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)
+        ? dateStr
+        : new Intl.DateTimeFormat('en-CA', {
+            timeZone: tz,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+          }).format(new Date());
     const [yy, mm, dd] = todayStr.split('-').map(Number);
     const todayUtc = new Date(Date.UTC(yy, mm - 1, dd));
     const dow = (todayUtc.getUTCDay() + 6) % 7;

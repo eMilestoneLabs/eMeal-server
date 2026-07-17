@@ -4,10 +4,14 @@ import { UsersRepository } from '../repositories/users.repository';
  * command_6 perf: GET /users/me now resolves the vacation flag from a
  * prefetched bundle (one parallel DB wave) instead of the sequential
  * syncVacationExpiry → findById path. These tests pin the flag rules to the
- * original semantics (Pass 11 FR-VACX-006):
+ * original semantics (Pass 11 FR-VACX-006), tightened by Live-Test-8
+ * ISSUE-007:
  *   • approved request covers today + flag OFF  → flip ON
- *   • flag ON + approved requests exist + none covers today → flip OFF
- *   • pure-toggle users (no approved requests at all) are NEVER touched
+ *   • flag ON + a request that RECENTLY ENDED (inside the ±48h prefetch
+ *     margin) + none covers today → flip OFF (auto-resume)
+ *   • toggle-mode flags are NEVER force-cleared — the old "any approved
+ *     request ever" fallback wrongly resumed manual vacations for members
+ *     with historical requests, exposing them to auto-Present billing.
  */
 describe('UsersRepository.resolveVacationFlagPrefetched (command_6 perf bundle)', () => {
   const DAY = 24 * 60 * 60 * 1000;
@@ -57,18 +61,17 @@ describe('UsersRepository.resolveVacationFlagPrefetched (command_6 perf bundle)'
       where: { id: 'u1' },
       data: { isVacationMode: false },
     });
-    // near-window rows already prove hasAnyApproved — no fallback lookup
+    // near-window rows already prove the request-driven resume — no lookup
     expect(prisma.vacationRequest.findFirst).not.toHaveBeenCalled();
   });
 
-  it('flips OFF via the fallback lookup when approved requests exist only outside the near window', async () => {
+  it('keeps a manual toggle ON when approved requests exist only OUTSIDE the near window (Live-Test-8: no force-clear)', async () => {
     prisma.vacationRequest.findFirst.mockResolvedValue({ id: 'v1' });
     const flag = await repo.resolveVacationFlagPrefetched('u1', true, 'Asia/Kolkata', []);
-    expect(flag).toBe(false);
-    expect(prisma.user.update).toHaveBeenCalledWith({
-      where: { id: 'u1' },
-      data: { isVacationMode: false },
-    });
+    expect(flag).toBe(true);
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    // The "any approved request ever" fallback query is gone entirely.
+    expect(prisma.vacationRequest.findFirst).not.toHaveBeenCalled();
   });
 
   it('never touches pure-toggle users (flag on, zero approved requests anywhere)', async () => {

@@ -249,6 +249,15 @@ export class UpdatePreferenceOptionDto {
   isActive?: boolean;
 }
 
+/**
+ * Live-Test-8 ISSUE-001/002: suspend/restore ALL of a meal's group bindings —
+ * the non-destructive Standalone↔Groups mode switch.
+ */
+export class SetMealBindingsActiveDto {
+  @IsBoolean()
+  active!: boolean;
+}
+
 /** One chosen option in a member's selection set (FR-PG-013/031). */
 export class PreferenceSelectionDto {
   @IsString()
