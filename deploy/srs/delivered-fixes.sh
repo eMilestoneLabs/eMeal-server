@@ -402,7 +402,7 @@ if [ -n "$ADMIN_GROUP" ]; then
     # Meals MUST stay enabled: hosted guests are Meal-Mode only (403
     # GUESTS_REQUIRE_MEALS in attendance-only groups), and a PUBLISHED entry
     # for today makes the meal day-effective under every planner mode.
-    req POST /groups "$(jq -nc --arg n "ZZ_SRS_GUESTROWS_$_GST_SFX" '{name:$n,type:"hostel",maxMembers:5,joinApprovalRequired:false,mealConfig:{mealsEnabled:true}}')" "$ADMIN_TOKEN"
+    req POST /groups "$(jq -nc --arg n "ZZ_SRS_GUESTROWS_$_GST_SFX" '{name:$n,type:"hostel",maxMembers:5,joinApprovalRequired:false,mealConfig:{mealsEnabled:true,weeklyMenuEnabled:true}}')" "$ADMIN_TOKEN"
     _ZZ_GST_GID="$(jbody '.id // .data.id // empty')"
     if [ -n "$_ZZ_GST_GID" ] && [ "$_ZZ_GST_GID" != "null" ]; then
       req PATCH "/groups/$_ZZ_GST_GID" "$(jq -nc '{mealConfig:{guestConfig:{guestAttendanceEnabled:true,allowGuestWithoutHost:true}}}')" "$ADMIN_TOKEN"
@@ -416,7 +416,7 @@ if [ -n "$ADMIN_GROUP" ]; then
           '{groupId:$g,weekStartDate:$w,entries:[{mealId:$m,date:$d}]}')" "$ADMIN_TOKEN"
         _GST_SID="$(jbody '.id // .data.id // empty')"
         [ -n "$_GST_SID" ] && [ "$_GST_SID" != "null" ] && req POST "/schedules/$_GST_SID/publish" '{}' "$ADMIN_TOKEN"
-        req POST "/attendance/$_GST_MID/guests" "$(jq -nc --arg d "$_GST_DATE" '{attendanceDate:$d,guests:[{isAdult:true,name:"ZZ Probe Guest"}]}')" "$ADMIN_TOKEN"
+        req POST "/attendance/$_GST_MID/guests" "$(jq -nc --arg d "$_GST_DATE" '{attendanceDate:$d,guests:[{isAdult:true,displayName:"ZZ Probe Guest"}]}')" "$ADMIN_TOKEN"
         if [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; then
           echo "  ·     seeded 1 throwaway guest booking for the join-field assertion"
           _guest_rows_assert "$_ZZ_GST_GID"; _GR_RC=$?

@@ -95,11 +95,80 @@ else
     skip "UNI-016 duplicate meal name" "no group available" "UNI-016"
   fi
 
-  # ── UNI-013 / UNI-035: verified at code/unit level, not safely probeable ───
-  # OTP invalidation needs live mail delivery; overwriting a real account's
-  # FCM token would break its push notifications. Both are unit-covered.
-  manual "UNI-013 single-active OTP (unit-covered)" "" "UNI-013"
-  manual "UNI-035 single-owner FCM token (unit-covered)" "" "UNI-035"
+  # ── UNI-013 / UNI-035: LIVE probes of the single-active invariants ─────────
+  # Long parked as MANUAL ("needs live mail" / "would break real push") — both
+  # objections are obsolete: the invariants are directly observable with a
+  # read-only in-container SQL count, and the FCM probe restores every token
+  # it touches through the SAME product API (junk it created is cleared by
+  # exact value — a real token is never modified). WRITE-gated + self-cleaned;
+  # read-only runs keep the MANUAL fallback exactly as before.
+  _PGC_UNI="$(docker ps --format '{{.Names}}' 2>/dev/null | grep -m1 postgres || true)"
+  _pg_uni(){ docker exec -i "$_PGC_UNI" bash -c 'psql -tAU "$POSTGRES_USER" -d "$POSTGRES_DB"' 2>/dev/null; }
+  if [ "$WRITE_TESTS" = "1" ] && [ -n "$_PGC_UNI" ]; then
+    # UNI-013: issuing a new OTP must invalidate every previous unused one for
+    # the same identifier+purpose. Request TWO codes for the standing test
+    # student, then count ACTIVE rows — exactly 1 may remain. The rows are
+    # transient (TTL-expired + invalidated by the next real request): no
+    # cleanup needed, and the emailed codes only reach the test inbox.
+    _OTP_ID="$(printf '%s' "${STUDENT_EMAIL:-}" | tr 'A-Z' 'a-z')"
+    if [ -n "$_OTP_ID" ]; then
+      req POST /auth/otp/request "$(jq -nc --arg i "$_OTP_ID" '{identifier:$i,purpose:"login"}')"
+      _O1="$R_CODE"
+      req POST /auth/otp/request "$(jq -nc --arg i "$_OTP_ID" '{identifier:$i,purpose:"login"}')"
+      _O2="$R_CODE"
+      if [ "${_O1:0:1}" = "2" ] && [ "${_O2:0:1}" = "2" ]; then
+        _ACTIVE="$(printf '%s' "SELECT count(*) FROM otp_requests WHERE identifier='$_OTP_ID' AND purpose='login' AND \"isUsed\"=false AND \"expiresAt\">now();" | _pg_uni)"
+        if [ "$_ACTIVE" = "1" ]; then
+          ok "UNI-013 resend invalidates the prior OTP (1 active code)" "" "UNI-013"
+        else
+          no "UNI-013 single-active OTP" "active codes=${_ACTIVE:-?} (expected exactly 1)" "UNI-013"
+        fi
+      else
+        skip "UNI-013 single-active OTP" "otp/request returned $_O1/$_O2 (OTP throttle 5/min?)" "UNI-013"
+      fi
+    else
+      manual "UNI-013 single-active OTP (unit-covered)" "no STUDENT_EMAIL configured" "UNI-013"
+    fi
+
+    # UNI-035: a device token belongs to exactly ONE account — claiming it
+    # must release the previous owner in the same transaction. Probe with a
+    # synthetic ZZ token between the two test students, then restore.
+    reuse_or_login STUDENT_TOKEN  "${STUDENT_EMAIL:-}"  "${STUDENT_PASS:-}"
+    reuse_or_login STUDENT2_TOKEN "${STUDENT2_EMAIL:-}" "${STUDENT2_PASS:-}"
+    if [ -n "${STUDENT_TOKEN:-}" ] && [ -n "${STUDENT2_TOKEN:-}" ]; then
+      req GET /auth/me "" "$STUDENT_TOKEN";  _U1="$(jbody '.id // .data.id // empty')"
+      req GET /auth/me "" "$STUDENT2_TOKEN"; _U2="$(jbody '.id // .data.id // empty')"
+      _T1="$(printf '%s' "SELECT coalesce(\"fcmToken\",'') FROM users WHERE id='$_U1';" | _pg_uni)"
+      _T2="$(printf '%s' "SELECT coalesce(\"fcmToken\",'') FROM users WHERE id='$_U2';" | _pg_uni)"
+      _ZZTOK="ZZ_UNI035_PROBE_$(date +%s)"
+      req POST /auth/fcm-token "$(jq -nc --arg t "$_ZZTOK" '{token:$t}')" "$STUDENT_TOKEN"
+      req POST /auth/fcm-token "$(jq -nc --arg t "$_ZZTOK" '{token:$t}')" "$STUDENT2_TOKEN"
+      _OWNERS="$(printf '%s' "SELECT count(*) FROM users WHERE \"fcmToken\"='$_ZZTOK';" | _pg_uni)"
+      _IS2="$(printf '%s' "SELECT count(*) FROM users WHERE \"fcmToken\"='$_ZZTOK' AND id='$_U2';" | _pg_uni)"
+      if [ "$_OWNERS" = "1" ] && [ "$_IS2" = "1" ]; then
+        ok "UNI-035 claiming a device token releases the prior owner" "1 owner (the claimer)" "UNI-035"
+      else
+        no "UNI-035 single-owner FCM token" "owners=${_OWNERS:-?} claimer-owns=${_IS2:-?}" "UNI-035"
+      fi
+      # SELF-CLEAN: put each student's ORIGINAL token back via the same API;
+      # a student who had none gets the probe junk cleared by exact value.
+      [ -n "$_T1" ] && req POST /auth/fcm-token "$(jq -nc --arg t "$_T1" '{token:$t}')" "$STUDENT_TOKEN"
+      if [ -n "$_T2" ]; then
+        req POST /auth/fcm-token "$(jq -nc --arg t "$_T2" '{token:$t}')" "$STUDENT2_TOKEN"
+      else
+        printf '%s' "UPDATE users SET \"fcmToken\"=NULL WHERE \"fcmToken\"='$_ZZTOK';" | _pg_uni >/dev/null
+      fi
+      _LEFT="$(printf '%s' "SELECT count(*) FROM users WHERE \"fcmToken\"='$_ZZTOK';" | _pg_uni)"
+      [ "${_LEFT:-1}" = "0" ] \
+        && ok "cleanup: probe token cleared, real tokens restored" "" "UNI-035" \
+        || no "cleanup: UNI-035 probe token still present" "rows=${_LEFT:-?}" "UNI-035"
+    else
+      manual "UNI-035 single-owner FCM token (unit-covered)" "needs both student logins" "UNI-035"
+    fi
+  else
+    manual "UNI-013 single-active OTP (unit-covered)" "live probe needs WRITE_TESTS=1 + postgres container (run on the VPS)" "UNI-013"
+    manual "UNI-035 single-owner FCM token (unit-covered)" "live probe needs WRITE_TESTS=1 + postgres container (run on the VPS)" "UNI-035"
+  fi
 
   # ── UNI-036: Idempotency-Key replay on ledger adjustments (WRITE gated) ────
   if [ "$WRITE_TESTS" = "1" ] && [ -n "$_G_ID" ]; then

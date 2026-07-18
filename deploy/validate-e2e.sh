@@ -43,17 +43,17 @@ command -v jq  >/dev/null || { echo "FATAL: jq not installed";  exit 1; }
 command -v curl >/dev/null || { echo "FATAL: curl not installed"; exit 1; }
 [ -z "$ADMIN_EMAIL" ] && { echo "FATAL: set ADMIN_EMAIL/ADMIN_PASS (see header)"; exit 1; }
 
-# ── RUN-ONCE DEDUP (master-audit orchestration) ──────────────────────────────
-# Under deploy/run.sh, sibling modules already own several batteries this
-# script historically repeated (srs = read contracts + write lifecycle,
-# security = pen probes + isolation, benchmark = perf sweeps, system/db =
-# infra snapshots). run.sh exports AUDIT_DEDUP=1 + AUDIT_MODULES; every
-# duplicated section below then prints a one-line pointer instead of
-# re-running, so each battery executes exactly ONCE per audit session.
-# Standalone runs (no orchestrator env) keep full coverage unchanged.
+# ── SECTION POLICY (user ruling 2026-07-18) ──────────────────────────────────
+# This e2e suite ALWAYS runs its FULL section set — under run.sh and
+# standalone alike. Cross-module run-once dedup applies only where the
+# IDENTICAL script file would otherwise execute twice in one audit session
+# (srs skips re-sourcing security.sh; certificate reuses the benchmark log) —
+# e2e's own sections are e2e's own coverage and are never skipped.
+# E2E_DEDUP=1 is a deliberate manual opt-in (never set by run.sh) that thins
+# sections a sibling module covers; leave it unset for the full suite.
 _amods=" ${AUDIT_MODULES:-} "
-_dedup(){ [ "${AUDIT_DEDUP:-0}" = "1" ] || return 1; case "$_amods" in *" $1 "*) return 0;; *) return 1;; esac; }
-dedup_note(){ sec "$1"; echo "  ·     runs once per audit session in the '$2' module — see $2.log"; }
+_dedup(){ [ "${E2E_DEDUP:-0}" = "1" ] || return 1; case "$_amods" in *" $1 "*) return 0;; *) return 1;; esac; }
+dedup_note(){ sec "$1"; echo "  ·     thinned by explicit E2E_DEDUP=1 — covered by the '$2' module (see $2.log)"; }
 
 # ── output plumbing ──────────────────────────────────────────────────────────
 exec > >(tee "$OUT") 2>&1

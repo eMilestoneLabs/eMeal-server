@@ -236,20 +236,20 @@ CERT_ARGS=()
 COOLDOWN="${COOLDOWN:-65}"
 declare -A NEEDS_COLD=( [security]=1 [srs]=1 [e2e]=1 [mealcheck]=1 [production]=1 [fixtures]=1 )
 
-# ── RUN-ONCE DEDUP CONTRACT ─────────────────────────────────────────────────
-# Several validators historically re-ran the SAME battery (the SEC-A..G suite
-# appeared verbatim in both the security module and inside srs; e2e repeated
-# srs's read-contract probes, the signup→delete lifecycle ran 3×, perf sweeps
-# 4×). Under this orchestrator every battery now runs EXACTLY ONCE per audit
-# session: run.sh advertises the selected module list + a SHARED results dir,
-# and each script skips (with a printed pointer) any battery a sibling module
-# owns this session. Standalone script runs are unaffected — they still cover
-# everything themselves.
+# ── RUN-ONCE DEDUP CONTRACT (user ruling 2026-07-18) ────────────────────────
+# Every module ALWAYS runs its full own section set. Run-once dedup applies
+# ONLY where the IDENTICAL script file would otherwise execute twice in one
+# session:
+#   • srs skips re-sourcing security.sh when the `security` module already ran
+#     (its FR-SECX tags reconcile via the SHARED requirements log below);
+#   • certificate grades from the benchmark module's log instead of running
+#     benchmark-full.sh a second time.
+# e2e / production never thin their sections under this orchestrator; the
+# manual opt-ins E2E_DEDUP=1 / PROD_DEDUP=1 exist but run.sh does NOT set them.
 export AUDIT_DEDUP=1
 export AUDIT_MODULES="${SELECTED[*]}"
-# Write-mode flag for dedup decisions: sections that defer to the srs WRITE
-# lifecycle (e2e §12, production §C) must only defer when srs actually runs
-# its write flows — otherwise (srs read-only) they keep their own copy.
+# Write-mode flag: opt-in sections that would defer to the srs WRITE lifecycle
+# may only defer when srs actually runs its write flows.
 export AUDIT_WRITES="$WRITES"
 # Shared traceability sink: security + srs append to ONE requirements.tsv, so
 # the srs certificate reconciles security's FR-SECX tags without re-running.

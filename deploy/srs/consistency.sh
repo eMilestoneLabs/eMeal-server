@@ -147,7 +147,7 @@ for _g in $_GIDS; do _parity_scan_group "$_g"; done
 _ZZ_PAR_GID=""
 if [ "$_CHECKED" -eq 0 ] && [ "${WRITE_TESTS:-0}" = "1" ]; then
   _PAR_SFX="$(date +%s)"
-  req POST /groups "$(jq -nc --arg n "ZZ_SRS_SCHEDPARITY_$_PAR_SFX" '{name:$n,type:"hostel",maxMembers:5,joinApprovalRequired:false,mealConfig:{mealsEnabled:true}}')" "$ADMIN_TOKEN"
+  req POST /groups "$(jq -nc --arg n "ZZ_SRS_SCHEDPARITY_$_PAR_SFX" '{name:$n,type:"hostel",maxMembers:5,joinApprovalRequired:false,mealConfig:{mealsEnabled:true,weeklyMenuEnabled:true}}')" "$ADMIN_TOKEN"
   _ZZ_PAR_GID="$(jbody '.id // .data.id // empty')"
   if [ -n "$_ZZ_PAR_GID" ] && [ "$_ZZ_PAR_GID" != "null" ]; then
     req POST /meals "$(jq -nc --arg g "$_ZZ_PAR_GID" '{groupId:$g,slotKey:"zz_parity",name:"ZZ Parity Meal",attendanceEnabled:true,attendanceWindow:{openTime:"00:00",closeTime:"23:59"}}')" "$ADMIN_TOKEN"

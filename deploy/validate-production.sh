@@ -115,12 +115,11 @@ if [ -n "${ADMIN2_EMAIL:-}" ]; then
   check "B3 secondary admin login" $([ "$R_CODE" = "200" ] && [ -n "$A2T" ] && [ "$A2T" != "null" ] && echo 0 || echo 1) "code=$R_CODE ${R_MS}ms"
 fi
 
-# Login negatives (case-insensitive / wrong password / no-token): under the
-# master audit these exact probes run once in the srs module (FR-AUTH tags) —
-# repeating them here also burned the shared 10/min login budget. Standalone
-# runs keep them (this script must stand alone as the production gate).
+# Login negatives always run (user ruling 2026-07-18: every module executes
+# its own probes). PROD_DEDUP=1 is a deliberate manual opt-in — never set by
+# run.sh — for thinning probes the srs module covers.
 _amods=" ${AUDIT_MODULES:-} "
-if [ "${AUDIT_DEDUP:-0}" = "1" ] && case "$_amods" in *" srs "*) true;; *) false;; esac; then
+if [ "${PROD_DEDUP:-0}" = "1" ] && case "$_amods" in *" srs "*) true;; *) false;; esac; then
   log "  ·  B4-B6 login negatives asserted once by the srs module this session (run-once dedup)"
 else
   # case-insensitive login (deployed fix)
@@ -151,7 +150,7 @@ check "B9 /auth/me with original access token still valid" $([ "$R_CODE" = "200"
 # this session — repeating it here would be the 2nd disposable signup of the
 # same audit. Standalone runs keep it (this script must stand alone as the
 # production gate). (_amods is set once in section B above.)
-if [ "${AUDIT_DEDUP:-0}" = "1" ] && [ "${AUDIT_WRITES:-0}" = "1" ] && case "$_amods" in *" srs "*) true;; *) false;; esac; then
+if [ "${PROD_DEDUP:-0}" = "1" ] && [ "${AUDIT_WRITES:-0}" = "1" ] && case "$_amods" in *" srs "*) true;; *) false;; esac; then
   hdr "C. SIGNUP + ACCOUNT DELETION E2E — deduplicated"
   log "  ·  lifecycle ran once this session in the srs module (write lifecycle) — see srs.log"
 else

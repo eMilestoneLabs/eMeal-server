@@ -414,7 +414,7 @@ sec "12. Q17/Q21/ATT-004 — LIVE STATUS MODEL (Present/Absent only; admin never
 [ -n "$G_AO"  ] && [ "$G_AO"  != "null" ] && req DELETE "/groups/$G_AO/permanent"  "" "$ADMIN_TOKEN" >/dev/null 2>&1
 G_Q17=""; Q17_MEAL=""
 if [ "$CAN_CREATE" = "true" ] && [ -n "$STUDENT_TOKEN" ]; then
-  req POST /groups "$(jq -nc '{name:"ZZ_M03_VERIFY_q17",type:"hostel",maxMembers:5,joinApprovalRequired:false,mealConfig:{mealsEnabled:true}}')" "$ADMIN_TOKEN"
+  req POST /groups "$(jq -nc '{name:"ZZ_M03_VERIFY_q17",type:"hostel",maxMembers:5,joinApprovalRequired:false,mealConfig:{mealsEnabled:true,weeklyMenuEnabled:true}}')" "$ADMIN_TOKEN"
   G_Q17="$(j '.id // .data.id')"; CLEANUP_GROUPS+=("$G_Q17")
   req POST /meals "$(jq -nc --arg g "$G_Q17" '{groupId:$g,slotKey:"zz_q17_open",name:"ZZ Q17 Open",attendanceEnabled:true,attendanceWindow:{openTime:"00:00",closeTime:"23:59"}}')" "$ADMIN_TOKEN"
   Q17_MEAL="$(j '.id // .data.id')"
