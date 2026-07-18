@@ -142,6 +142,16 @@ else
 fi
 req PATCH /users/me '{"isVacationMode":true}' "${STUDENT_TOKEN:-$ADMIN_TOKEN}"
 assert_in "PATCH /users/me vacation honors approval guard" "$R_CODE" "FR-VACX-001" 200 422
+# Audit bd5c6af ROOT CAUSE of the recurring mealcheck "Q21 422 VACATION_ACTIVE":
+# a 200 above REALLY enables vacation on the standing account and leaked it
+# into every later module — fixtures runs BEFORE srs, so its vacation-clear
+# could never help. Restore immediately through the always-allowed Return-Early
+# path (also ends any request the toggle may cover). A 422 means the approval
+# guard fired and nothing was changed, so there is nothing to restore.
+if [ "$R_CODE" = "200" ]; then
+  req PATCH /users/me '{"isVacationMode":false}' "${STUDENT_TOKEN:-$ADMIN_TOKEN}"
+  assert_code "vacation probe restored (account left vacation-free)" 200 "$R_CODE" "FR-VACX-001"
+fi
 
 sec "MODULE — BILLING (FR-BILL, FR-BILLX)"
 req GET "/attendance/billing-summary?groupId=$GROUP_ID&fromDate=$FROM&toDate=$TO" "" "$ADMIN_TOKEN"

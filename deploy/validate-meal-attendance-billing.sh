@@ -442,20 +442,39 @@ if [ -n "$Q17_MEAL" ] && [ "$Q17_MEAL" != "null" ]; then
   # Q21: the member can deliberately mark ABSENT while the window is open.
   req POST /attendance "$(jq -nc --arg m "$Q17_MEAL" --arg d "$IST_D" '{mealId:$m,attendanceDate:$d,status:"absent"}')" "$STUDENT_TOKEN"
   ACODE1="$(j '.code // .data.code // empty')"
+  # Live-Test-9 recurrence guard: manual phone vacation testing can re-set
+  # vacation on the standing student AFTER the fixtures module cleaned it
+  # (audit 7682e5f: Q21 422 VACATION_ACTIVE). Self-heal through the REAL
+  # product path — Return Early (always allowed) ends the covering approved
+  # request and clears the flag — then re-mark once. The retry doubles as a
+  # live proof of the Live-Test-8 rule that an early return unblocks marking
+  # immediately (no sweep wait).
+  Q21_HEALED=""
+  if [ "$R_CODE" = "422" ] && [ "$ACODE1" = "VACATION_ACTIVE" ]; then
+    req PATCH /users/me/vacation-mode '{"enabled":false}' "$STUDENT_TOKEN"
+    { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; } && Q21_HEALED="1"
+    req POST /attendance "$(jq -nc --arg m "$Q17_MEAL" --arg d "$IST_D" '{mealId:$m,attendanceDate:$d,status:"absent"}')" "$STUDENT_TOKEN"
+    ACODE1="$(j '.code // .data.code // empty')"
+  fi
   if [ "$R_CODE" = "403" ] && [ "$ACODE1" = "EMAIL_VERIFICATION_REQUIRED" ]; then
     skip "Q21 member Absent mark" "student unverified — run deploy/ensure-test-fixtures.sh, then re-run"
     skip "Q17 member Skip rejection" "student unverified (same gate)"
   else
     { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; } \
-      && ok "Q21 member can mark ABSENT (deliberate not-eating)" "($R_CODE)" \
-      || no "Q21 Absent mark" "$R_CODE code=$(j '.code // .data.code // empty') $(j '.message // empty' | cut -c1-70)"
+      && ok "Q21 member can mark ABSENT (deliberate not-eating)" "($R_CODE${Q21_HEALED:+ — after Return-Early cleared leftover vacation})" \
+      || no "Q21 Absent mark" "$R_CODE code=$(j '.code // .data.code // empty') $(j '.message // empty' | cut -c1-70)${Q21_HEALED:+ (persists after Return-Early — check vacation coverage util)}"
     # Q17: Skip is INTERNAL-ONLY. A member-submitted skip must never produce a
     # member-generated Skip row: the server either rejects it (4xx) or — for
     # old APKs whose Skip button still posts it — coerces it to ABSENT (the
     # declared intent), so Bill-Skip can never bill an explicit decliner.
     req POST /attendance "$(jq -nc --arg m "$Q17_MEAL" --arg d "$IST_D" '{mealId:$m,attendanceDate:$d,status:"skipped"}')" "$STUDENT_TOKEN"
     Q17_ST="$(j '.status // .data.status // empty')"
-    if [ "$R_CODE" = "400" ] || [ "$R_CODE" = "422" ] || [ "$R_CODE" = "403" ]; then
+    Q17_ERRC="$(j '.code // .data.code // empty')"
+    # A vacation 422 here would be the fixture guard firing, NOT the Skip
+    # status rule — never let it count as the Q17 rejection under test.
+    if [ "$Q17_ERRC" = "VACATION_ACTIVE" ]; then
+      no "Q17 Skip probe hit the vacation guard, not the status rule" "$R_CODE — leftover vacation on the test student"
+    elif [ "$R_CODE" = "400" ] || [ "$R_CODE" = "422" ] || [ "$R_CODE" = "403" ]; then
       ok "Q17 member-submitted Skip rejected (internal-only status)" "($R_CODE)"
     elif { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; } && [ "$Q17_ST" != "skipped" ]; then
       ok "Q17 member Skip coerced to '$Q17_ST' (no member-generated Skip row; old-APK compat)" "($R_CODE)"
