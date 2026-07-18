@@ -10,7 +10,14 @@
 # Read-only by default. After cleaning the printed duplicates, re-apply the
 # guarded blocks (idempotent) with:  bash deploy/uni-index-doctor.sh --fix
 #
-# Usage (on the VPS):   bash deploy/uni-index-doctor.sh [--fix]
+# --fix-safe (used by ensure-test-fixtures.sh / the audit's fixtures module):
+# re-applies the guarded blocks ONLY when every missing index has ZERO
+# duplicate rows blocking it (e.g. the dirty rows were since deleted). Pure
+# DDL on clean data — never deletes or modifies rows. If dirty rows remain it
+# still applies the guarded migration (which skips the dirty rule), prints the
+# duplicates, and exits 1 so the manual merge stays a deliberate operation.
+#
+# Usage (on the VPS):   bash deploy/uni-index-doctor.sh [--fix|--fix-safe]
 
 set -euo pipefail
 
@@ -33,7 +40,7 @@ declare -A DUP_QUERY=(
   [billing_periods_group_span_finalized_uniq]="SELECT \"groupId\", \"periodStart\", \"periodEnd\", count(*), string_agg(id, ', ') FROM billing_periods WHERE status = 'finalized' GROUP BY 1,2,3 HAVING count(*) > 1"
 )
 
-MISSING=0
+MISSING=0; DIRTY=0
 for idx in users_email_global_uniq users_phone_global_uniq \
            groups_org_type_name_active_uniq meals_group_name_active_uniq \
            billing_periods_group_span_finalized_uniq; do
@@ -46,8 +53,9 @@ for idx in users_email_global_uniq users_phone_global_uniq \
   echo "  MISS  $idx — duplicate rows blocking it:"
   rows="$(psql_ro "${DUP_QUERY[$idx]}")"
   if [ -z "$rows" ]; then
-    echo "        (no duplicates found NOW — safe to re-apply: --fix)"
+    echo "        (no duplicates found NOW — safe to re-apply: --fix / --fix-safe)"
   else
+    DIRTY=$((DIRTY + 1))
     echo "$rows" | sed 's/^/        /'
   fi
 done
@@ -55,6 +63,26 @@ done
 if [ "$MISSING" -eq 0 ]; then
   echo "All 5 race-proof indexes present — nothing to do."
   exit 0
+fi
+
+# --fix-safe: pure-DDL repair for CLEAN data. Applies the guarded migration
+# (idempotent; it self-skips any rule with dirty rows) and succeeds only when
+# all 5 indexes exist afterwards. Never touches rows.
+if [ "${1:-}" = "--fix-safe" ]; then
+  if [ "$DIRTY" -gt 0 ]; then
+    echo "── $DIRTY missing index(es) are blocked by LIVE duplicate rows (printed above)."
+    echo "── --fix-safe never deletes data: applying the guarded blocks for the clean rules only."
+  else
+    echo "── No duplicates block any missing index — re-applying guarded blocks (pure DDL) ──"
+  fi
+  docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -X -q < "$MIGRATION"
+  STILL="$(psql_ro "SELECT 5 - count(*) FROM pg_indexes WHERE indexname IN ('users_email_global_uniq','users_phone_global_uniq','groups_org_type_name_active_uniq','meals_group_name_active_uniq','billing_periods_group_span_finalized_uniq')")"
+  if [ "$STILL" = "0" ]; then
+    echo "── FIXED — all 5 race-proof indexes present ──"
+    exit 0
+  fi
+  echo "── $STILL index(es) still blocked by dirty rows — merge/rename/archive the duplicates above, then: --fix ──"
+  exit 1
 fi
 
 if [ "${1:-}" = "--fix" ]; then

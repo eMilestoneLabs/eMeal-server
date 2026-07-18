@@ -137,6 +137,16 @@ req GET /auth/me "$AT" - me
 check "B9 /auth/me with original access token still valid" $([ "$R_CODE" = "200" ] && echo 0 || echo 1) "code=$R_CODE user=$(jval .email 2>/dev/null)$(jval .user.email 2>/dev/null)"
 
 # ═════ C. SIGNUP → DELETE-ACCOUNT E2E (self-cleaning) ════════════════════════
+# RUN-ONCE DEDUP: under the master audit the identical signup→guard→delete→
+# re-login lifecycle already ran in the srs module's write-lifecycle section
+# this session — repeating it here would be the 2nd disposable signup of the
+# same audit. Standalone runs keep it (this script must stand alone as the
+# production gate).
+_amods=" ${AUDIT_MODULES:-} "
+if [ "${AUDIT_DEDUP:-0}" = "1" ] && [ "${AUDIT_WRITES:-0}" = "1" ] && case "$_amods" in *" srs "*) true;; *) false;; esac; then
+  hdr "C. SIGNUP + ACCOUNT DELETION E2E — deduplicated"
+  log "  ·  lifecycle ran once this session in the srs module (write lifecycle) — see srs.log"
+else
 hdr "C. SIGNUP + ACCOUNT DELETION E2E (throwaway, self-cleaning)"
 TS=$(date +%s)
 TP_EMAIL="validation.$TS@example.com"
@@ -154,6 +164,7 @@ if [ "$R_CODE" = "201" ] || [ "$R_CODE" = "200" ]; then
   check "C4 deleted account cannot re-login" $([ "$R_CODE" = "401" ] || [ "$R_CODE" = "403" ] || [ "$R_CODE" = "422" ] && echo 0 || echo 1) "code=$R_CODE"
 else
   check "C1 student signup" 1 "code=$R_CODE — signup failed; delete lifecycle skipped"
+fi
 fi
 
 # ═════ SUMMARY ═══════════════════════════════════════════════════════════════

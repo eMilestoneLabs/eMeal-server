@@ -59,7 +59,7 @@ done
 SELF_MEAL="${PRICED_MEAL:-$MEAL}"
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "DELIVERED FIX — vacation-members (per-date, RBAC, tenant isolation)"
+sec "VACATION-MEMBERS ENDPOINT — per-date, RBAC, tenant isolation"
 # ═════════════════════════════════════════════════════════════════════════════
 if [ -n "$GRP" ]; then
   req GET "/attendance/vacation-members?groupId=$GRP&date=$TODAY" "" "$ADMIN_TOKEN"
@@ -97,7 +97,7 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "DELIVERED FIX — admin self-attendance (ATT-004: member path; override of others removed)"
+sec "ADMIN SELF-ATTENDANCE (ATT-004) — member path; override of others removed"
 # ═════════════════════════════════════════════════════════════════════════════
 # RBAC (read-only): a student can never reach admin/override — the guard denies
 # BEFORE the body is processed, so this mutates nothing.
@@ -209,7 +209,7 @@ if [ -n "$_ZZ_SELF_GID" ] && [ "$_ZZ_SELF_GID" != "null" ]; then
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "DELIVERED FIX — notification center (linkType, targeting, no cross-user leak)"
+sec "NOTIFICATION CENTER — deep-links, per-member targeting, no cross-user leak"
 # ═════════════════════════════════════════════════════════════════════════════
 req GET "/notices?limit=25" "" "$ADMIN_TOKEN"
 assert_code "notices feed reachable" 200 "$R_CODE" "FR-NOT-001"
@@ -245,7 +245,7 @@ _check_no_leak "$STUDENT_TOKEN"  "$STUDENT_ID"  "student-1"
 _check_no_leak "$STUDENT2_TOKEN" "$STUDENT2_ID" "student-2"
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "DELIVERED FIX — regression: touched surfaces still healthy"
+sec "REGRESSION SWEEP — touched read surfaces still healthy"
 # ═════════════════════════════════════════════════════════════════════════════
 for _p in "/dashboard/admin" "/notices?limit=5" "/attendance/today" "/vacation-requests" "/groups"; do
   _tok="$ADMIN_TOKEN"; case "$_p" in /attendance/today|/vacation-requests) _tok="${STUDENT_TOKEN:-$ADMIN_TOKEN}";; esac
@@ -268,7 +268,7 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "DELIVERED FIX — signup conflict field-key contract (Live-Test-1 Issue 3)"
+sec "SIGNUP CONFLICT FIELD ROUTING — email vs mobileNumber (409 contract)"
 # ═════════════════════════════════════════════════════════════════════════════
 # READ-ONLY (zero writes): the duplicate-identifier check throws BEFORE any user
 # row is created, so these /auth/register attempts create NOTHING (self-cleaning
@@ -301,7 +301,7 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "DELIVERED FIX — org name mandatory + globally unique (Live-Test-1)"
+sec "ORGANIZATION NAME — mandatory + globally unique (signup contract)"
 # ═════════════════════════════════════════════════════════════════════════════
 # READ-ONLY: an empty name is rejected by DTO validation, and a duplicate name is
 # rejected BEFORE the organization/user rows are created — zero writes either way.
@@ -337,7 +337,7 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "DELIVERED FIX — Live-Test-5 batch (billing lines, guests join, UNI-002)"
+sec "BILLING LEDGER LINES · GUEST ROW JOINS · MOBILE LOGIN NORMALIZATION"
 # ═════════════════════════════════════════════════════════════════════════════
 # READ-ONLY. Validates the deployed contract additions of the 2026-07-16 batch.
 # Zero coupling with prod code: pure HTTP probes of additive response fields.
@@ -376,21 +376,64 @@ if [ -n "$ADMIN_GROUP" ]; then
     skip "billing-summary itemised totals" "returned $R_CODE" "FR-BILL-LT5-003"
   fi
 
-  # (3) ISSUE-2: guest list rows carry server-joined hostName/mealName.
-  req GET "/attendance/guests?groupId=$ADMIN_GROUP" "" "$ADMIN_TOKEN"
-  if [ "$R_CODE" = "200" ]; then
-    _N="$(jbody '.data | length')"
-    if [ "${_N:-0}" -gt 0 ]; then
-      _HAS="$(jbody '.data[0] | has("hostName") and has("mealName")')"
-      [ "$_HAS" = "true" ] \
-        && ok "guest rows carry hostName/mealName (server join)" "" "FR-GST-LT5-001" \
-        || no "guest rows missing hostName/mealName" "$R_BODY" "FR-GST-LT5-001"
+  # (3) Guest list rows carry server-joined hostName/mealName. When the real
+  # group has no bookings, WRITE mode self-provisions ONE throwaway group +
+  # always-open meal + a single admin-booked guest, asserts the join fields on
+  # it, and permanently deletes the group (booking cascades). Real data is
+  # never touched; read-only runs keep the skip.
+  _guest_rows_assert(){ # <groupId> → 0 asserted, 1 no rows, 2 list unreadable
+    req GET "/attendance/guests?groupId=$1" "" "$ADMIN_TOKEN"
+    _GR_LIST_CODE="$R_CODE"
+    [ "$R_CODE" != "200" ] && return 2
+    local _n; _n="$(jbody '.data | length')"
+    [ "${_n:-0}" -gt 0 ] 2>/dev/null || return 1
+    local _has; _has="$(jbody '.data[0] | has("hostName") and has("mealName")')"
+    if [ "$_has" = "true" ]; then
+      ok "guest rows carry hostName/mealName (server join)" "" "FR-GST-LT5-001"
     else
-      skip "guest rows hostName/mealName" "no guest bookings to inspect" "FR-GST-LT5-001"
+      no "guest rows missing hostName/mealName" "$R_BODY" "FR-GST-LT5-001"
     fi
-  else
-    skip "guest rows hostName/mealName" "guests list returned $R_CODE" "FR-GST-LT5-001"
+    return 0
+  }
+  _guest_rows_assert "$ADMIN_GROUP"; _GR_RC=$?
+  if [ "$_GR_RC" != "0" ] && [ "${WRITE_TESTS:-0}" = "1" ]; then
+    _ZZ_GST_GID=""
+    _GST_SFX="$(date +%s)"
+    # Meals MUST stay enabled: hosted guests are Meal-Mode only (403
+    # GUESTS_REQUIRE_MEALS in attendance-only groups), and a PUBLISHED entry
+    # for today makes the meal day-effective under every planner mode.
+    req POST /groups "$(jq -nc --arg n "ZZ_SRS_GUESTROWS_$_GST_SFX" '{name:$n,type:"hostel",maxMembers:5,joinApprovalRequired:false,mealConfig:{mealsEnabled:true}}')" "$ADMIN_TOKEN"
+    _ZZ_GST_GID="$(jbody '.id // .data.id // empty')"
+    if [ -n "$_ZZ_GST_GID" ] && [ "$_ZZ_GST_GID" != "null" ]; then
+      req PATCH "/groups/$_ZZ_GST_GID" "$(jq -nc '{mealConfig:{guestConfig:{guestAttendanceEnabled:true,allowGuestWithoutHost:true}}}')" "$ADMIN_TOKEN"
+      req POST /meals "$(jq -nc --arg g "$_ZZ_GST_GID" '{groupId:$g,slotKey:"zz_guestrows",name:"ZZ Guest Rows",attendanceEnabled:true,attendanceWindow:{openTime:"00:00",closeTime:"23:59"}}')" "$ADMIN_TOKEN"
+      _GST_MID="$(jbody '.id // .data.id // empty')"
+      if [ -n "$_GST_MID" ] && [ "$_GST_MID" != "null" ]; then
+        _GST_DATE="$(TZ='Asia/Kolkata' date +%F)"
+        _GST_DOW="$(TZ='Asia/Kolkata' date +%u)"
+        _GST_MON="$(TZ='Asia/Kolkata' date -d "$_GST_DATE -$(( _GST_DOW - 1 )) days" +%F 2>/dev/null || echo "$_GST_DATE")"
+        req POST /schedules "$(jq -nc --arg g "$_ZZ_GST_GID" --arg w "$_GST_MON" --arg m "$_GST_MID" --arg d "$_GST_DATE" \
+          '{groupId:$g,weekStartDate:$w,entries:[{mealId:$m,date:$d}]}')" "$ADMIN_TOKEN"
+        _GST_SID="$(jbody '.id // .data.id // empty')"
+        [ -n "$_GST_SID" ] && [ "$_GST_SID" != "null" ] && req POST "/schedules/$_GST_SID/publish" '{}' "$ADMIN_TOKEN"
+        req POST "/attendance/$_GST_MID/guests" "$(jq -nc --arg d "$_GST_DATE" '{attendanceDate:$d,guests:[{isAdult:true,name:"ZZ Probe Guest"}]}')" "$ADMIN_TOKEN"
+        if [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; then
+          echo "  ·     seeded 1 throwaway guest booking for the join-field assertion"
+          _guest_rows_assert "$_ZZ_GST_GID"; _GR_RC=$?
+        else
+          echo "  ·     guest fixture booking rejected ($R_CODE $(jbody '.code // empty')) — keeping skip"
+        fi
+      fi
+      req DELETE "/groups/$_ZZ_GST_GID/permanent" "" "$ADMIN_TOKEN"
+      { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "204" ]; } \
+        && ok "cleanup: guest fixture group deleted" "($R_CODE)" "FR-GST-LT5-001" \
+        || no "cleanup: guest fixture group NOT deleted" "$R_CODE — delete ZZ_SRS_GUESTROWS manually" "FR-GST-LT5-001"
+    fi
   fi
+  case "$_GR_RC" in
+    1) skip "guest rows hostName/mealName" "no guest bookings to inspect (fixture seed unavailable)" "FR-GST-LT5-001" ;;
+    2) skip "guest rows hostName/mealName" "guests list returned ${_GR_LIST_CODE:-?}" "FR-GST-LT5-001" ;;
+  esac
 else
   skip "billing-summary + guest join checks" "admin has no groups" "FR-BILL-LT5-003,FR-GST-LT5-001"
 fi

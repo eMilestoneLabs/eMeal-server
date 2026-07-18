@@ -53,7 +53,13 @@ reg diagnose    RO    "Box-contention snapshot — CPU steal vs local hogs vs ap
 reg benchmark   RO    "Endpoint speed battery — admin+student p95 vs SLO budgets (benchmark-full.sh)"
 reg certificate RO    "Graded production certificate — speed+stability+memory+db+redis+security+disk (generate-certificate.sh)"
 reg db          RO    "Database deep parameters — cache-hit, connections, index usage, bloat, autovacuum"
-reg unidoctor   RO    "UNI race-proof index doctor — names missing UNIQUE indexes + the exact duplicate rows blocking them (uni-index-doctor.sh; diagnosis-only — the --fix repair stays a manual operational step)"
+# fixtures runs BEFORE every validator: it repairs the STANDING TEST ACCOUNTS
+# (email-verification stamp, group membership) and re-applies clean-data UNIQUE
+# indexes, so validators reach the real validation paths instead of the
+# account gate (the 403/SKIP class audit 8295988 exposed). Test-fixture scope
+# only — real member data is never touched.
+reg fixtures    WRITE "Test-fixture doctor — verifies standing test accounts (ACC-005), ensures student group membership, re-applies clean-data UNI indexes (ensure-test-fixtures.sh)"
+reg unidoctor   RO    "UNI race-proof index doctor — names missing UNIQUE indexes + the exact duplicate rows blocking them (uni-index-doctor.sh; diagnosis-only — row-level dedupe stays a manual operational step; clean-data DDL re-apply is automated via the fixtures module)"
 reg system      RO    "System health — CPU, RAM, disk, PM2, docker, logs, TLS, uptime"
 reg recovery    RO    "Auto-recovery configuration audit (verify-auto-recovery.sh)"
 reg security    RO    "Security / pen-test probes — auth, isolation, injection, headers (srs/security.sh)"
@@ -200,6 +206,7 @@ run_module() { # $1 = name
     certificate) bash deploy/generate-certificate.sh "${CERT_ARGS[@]+"${CERT_ARGS[@]}"}" 2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     srs)         ( WRITE_TESTS=$WRITES bash deploy/srs/run.sh )  2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     security)    ( cd deploy/srs && bash security.sh )          2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
+    fixtures)    bash deploy/ensure-test-fixtures.sh            2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     db)          mod_db                                         2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     unidoctor)   bash deploy/uni-index-doctor.sh                2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     system)      mod_system                                     2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
@@ -227,7 +234,27 @@ CERT_ARGS=()
 # throttle window before each such module (skip before the very first module,
 # and skip entirely with COOLDOWN=0).
 COOLDOWN="${COOLDOWN:-65}"
-declare -A NEEDS_COLD=( [security]=1 [srs]=1 [e2e]=1 [mealcheck]=1 [production]=1 )
+declare -A NEEDS_COLD=( [security]=1 [srs]=1 [e2e]=1 [mealcheck]=1 [production]=1 [fixtures]=1 )
+
+# ── RUN-ONCE DEDUP CONTRACT ─────────────────────────────────────────────────
+# Several validators historically re-ran the SAME battery (the SEC-A..G suite
+# appeared verbatim in both the security module and inside srs; e2e repeated
+# srs's read-contract probes, the signup→delete lifecycle ran 3×, perf sweeps
+# 4×). Under this orchestrator every battery now runs EXACTLY ONCE per audit
+# session: run.sh advertises the selected module list + a SHARED results dir,
+# and each script skips (with a printed pointer) any battery a sibling module
+# owns this session. Standalone script runs are unaffected — they still cover
+# everything themselves.
+export AUDIT_DEDUP=1
+export AUDIT_MODULES="${SELECTED[*]}"
+# Write-mode flag for dedup decisions: sections that defer to the srs WRITE
+# lifecycle (e2e §12, production §C) must only defer when srs actually runs
+# its write flows — otherwise (srs read-only) they keep their own copy.
+export AUDIT_WRITES="$WRITES"
+# Shared traceability sink: security + srs append to ONE requirements.tsv, so
+# the srs certificate reconciles security's FR-SECX tags without re-running.
+export RESULTS_DIR="/tmp/emeal-srs-$TS"
+
 FIRST=1
 for m in "${SELECTED[@]}"; do
   [ -n "$m" ] || continue

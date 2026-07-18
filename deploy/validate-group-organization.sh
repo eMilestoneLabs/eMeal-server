@@ -166,7 +166,7 @@ if [ "$CAN_CREATE" = "true" ]; then
   [ "$(j '.country // .data.country')" = "India" ] && ok "GRP-003 country persisted+returned" || no "GRP-003 country"
   [ "$(j '.currency // .data.currency')" = "INR" ] && ok "GRP-003 currency persisted+returned" || no "GRP-003 currency"
   # Issue 8 (command_3): the new PIN code round-trips through create → read.
-  [ "$(j '.pin // .data.pin')" = "721301" ] && ok "Issue8 PIN code persisted+returned" || no "Issue8 PIN code" "$(j '.pin // .data.pin')"
+  [ "$(j '.pin // .data.pin')" = "721301" ] && ok "GRP-011 PIN code persisted+returned" || no "GRP-011 PIN code" "$(j '.pin // .data.pin')"
 else
   skip "Create group w/ metadata" "org at group limit (CFG-012) — read-only checks on existing group; archive a group to run create+PIN checks"
   G_META="$EXIST_GID"
@@ -215,8 +215,8 @@ if [ "$CAN_CREATE" = "true" ] && [ -n "$STUDENT_TOKEN" ]; then
   JR_N="$(echo "$R_BODY" | jq -r '[(.data // .)[] | select(.linkType=="groupJoinRequests")] | length')"
   [ "${JR_N:-0}" -ge 1 ] && ok "NTF-001 join request appears in admin bell" "n=$JR_N" \
     || no "NTF-001 join-request bell notice MISSING" "n=$JR_N (expected >=1)"
-  [ "${JR_N:-0}" -le 1 ] && ok "PRIORITY-1 single join-request notification (no duplicate)" "n=$JR_N" \
-    || no "PRIORITY-1 DUPLICATE join-request notifications" "n=$JR_N (expected 1)"
+  [ "${JR_N:-0}" -le 1 ] && ok "NTF-002 single join-request notification (no duplicate)" "n=$JR_N" \
+    || no "NTF-002 DUPLICATE join-request notifications" "n=$JR_N (expected 1)"
   req GET "/notices/unread-count" "" "$ADMIN_TOKEN"
   JR_U="$(echo "$R_BODY" | jq -r '.count // .data.count // 0')"
   [ "${JR_U:-0}" -ge 1 ] && ok "NTF-001 unread badge reflects join request" "unread=$JR_U" \
@@ -242,8 +242,8 @@ if [ "$CAN_CREATE" = "true" ] && [ -n "$STUDENT_TOKEN" ]; then
   # must NOT return the pending student.
   req GET "/groups/$G_APR/members" "" "$ADMIN_TOKEN"
   RPEND="$(echo "$R_BODY" | jq -r '[((.data // .))[] | select(.status=="pending")] | length')"
-  [ "${RPEND:-0}" = "0" ] && ok "Issue3 roster excludes PENDING members" "pending_in_roster=$RPEND" \
-    || no "Issue3 roster LEAKS pending members" "pending_in_roster=$RPEND (expected 0)"
+  [ "${RPEND:-0}" = "0" ] && ok "MEM-007 roster excludes PENDING members" "pending_in_roster=$RPEND" \
+    || no "MEM-007 roster LEAKS pending members" "pending_in_roster=$RPEND (expected 0)"
   # Approve → active
   req PATCH "/groups/$G_APR/join-requests/$SUID/approve" "" "$ADMIN_TOKEN"
   { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; } && ok "MEM-006 approve → active" "($R_CODE)" || no "MEM-006 approve" "$R_CODE"
@@ -279,7 +279,7 @@ if [ "$CAN_CREATE" = "true" ]; then
 else skip "lifecycle (archive/restore/delete)" "group limit reached (archive a group to free a slot)"; fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "4b. BATCH-3 LIVE FIXES (Factory type + duplicate-name guard)"
+sec "4b. GROUP TYPE NORMALIZATION (factory_) + DUPLICATE-NAME GUARD"
 if [ "$CAN_CREATE" = "true" ]; then
   # Batch-3 fix (Issue 3, prev): selecting the Factory type sends "factory_"
   # (Dart reserves `factory`); the DTO now normalizes it → create must succeed.

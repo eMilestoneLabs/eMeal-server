@@ -64,7 +64,7 @@ for _g in $_GIDS; do
 done
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "LIVE-TEST-6 ISSUE-2 — per-guest preference groups (contract + validation)"
+sec "GUEST PREFERENCE SNAPSHOTS — per-guest groups (contract + validation)"
 # ═════════════════════════════════════════════════════════════════════════════
 req GET "/attendance/guests?date=$TODAY${GRP:+&groupId=$GRP}" "" "$ADMIN_TOKEN"
 assert_code "guest list readable (admin)" 200 "$R_CODE" "LT6-ISSUE2"
@@ -119,16 +119,17 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "LIVE-TEST-6 ISSUE-3 — day entries always serialize the MASTER meal name"
+sec "SCHEDULE ENTRIES INHERIT THE MASTER MEAL NAME (day-entry immutability)"
 # ═════════════════════════════════════════════════════════════════════════════
+# One shared checker: builds "entryName|slotKey" pairs from a group's schedule
+# weeks and compares each against the master meal catalogue by slotKey.
 _CHECKED=0; _MISMATCH=""
-for _g in $_GIDS; do
+_parity_scan_group(){ # <groupId> — accumulates into _CHECKED/_MISMATCH
+  local _g="$1" _PAIRS _CATALOG _p
   req GET "/schedules?groupId=$_g" "" "$ADMIN_TOKEN"
-  [ "$R_CODE" != "200" ] && continue
-  # Build "entryName|slotKey" pairs from every schedule week, then compare
-  # each entry name against the group's master meal catalogue by slotKey.
+  [ "$R_CODE" != "200" ] && return 0
   _PAIRS="$(jbody '(.data // .)[]?.days[]?.meals[]? | "\(.name)|\(.slotKey)"' | sort -u)"
-  [ -z "$_PAIRS" ] && continue
+  [ -z "$_PAIRS" ] && return 0
   req GET "/meals?groupId=$_g" "" "$ADMIN_TOKEN"
   _CATALOG="$(jbody '(.data // .)[]? | "\(.displayName // .name)|\(.slotKey)"' | sort -u)"
   while IFS= read -r _p; do
@@ -136,17 +137,57 @@ for _g in $_GIDS; do
     _CHECKED=$((_CHECKED+1))
     printf '%s\n' "$_CATALOG" | grep -Fqx "$_p" || _MISMATCH="$_MISMATCH [$_g:$_p]"
   done <<< "$_PAIRS"
-done
+}
+for _g in $_GIDS; do _parity_scan_group "$_g"; done
+
+# No real group has a published schedule → in WRITE mode, self-provision one
+# throwaway group + meal + PUBLISHED week (the real publish API), assert the
+# parity on it, then permanently delete the group (schedule cascades). Real
+# groups untouched; read-only runs keep the skip.
+_ZZ_PAR_GID=""
+if [ "$_CHECKED" -eq 0 ] && [ "${WRITE_TESTS:-0}" = "1" ]; then
+  _PAR_SFX="$(date +%s)"
+  req POST /groups "$(jq -nc --arg n "ZZ_SRS_SCHEDPARITY_$_PAR_SFX" '{name:$n,type:"hostel",maxMembers:5,joinApprovalRequired:false,mealConfig:{mealsEnabled:true}}')" "$ADMIN_TOKEN"
+  _ZZ_PAR_GID="$(jbody '.id // .data.id // empty')"
+  if [ -n "$_ZZ_PAR_GID" ] && [ "$_ZZ_PAR_GID" != "null" ]; then
+    req POST /meals "$(jq -nc --arg g "$_ZZ_PAR_GID" '{groupId:$g,slotKey:"zz_parity",name:"ZZ Parity Meal",attendanceEnabled:true,attendanceWindow:{openTime:"00:00",closeTime:"23:59"}}')" "$ADMIN_TOKEN"
+    _PAR_MID="$(jbody '.id // .data.id // empty')"
+    # weekStartDate must be the MONDAY of the org week (IST business day).
+    _IST_TODAY="$(TZ='Asia/Kolkata' date +%F)"
+    _IST_DOW="$(TZ='Asia/Kolkata' date +%u)"
+    _WEEK_MON="$(TZ='Asia/Kolkata' date -d "$_IST_TODAY -$(( _IST_DOW - 1 )) days" +%F 2>/dev/null || echo "$_IST_TODAY")"
+    if [ -n "$_PAR_MID" ] && [ "$_PAR_MID" != "null" ]; then
+      req POST /schedules "$(jq -nc --arg g "$_ZZ_PAR_GID" --arg w "$_WEEK_MON" --arg m "$_PAR_MID" --arg d "$_IST_TODAY" \
+        '{groupId:$g,weekStartDate:$w,entries:[{mealId:$m,date:$d}]}')" "$ADMIN_TOKEN"
+      _PAR_SID="$(jbody '.id // .data.id // empty')"
+      if [ -n "$_PAR_SID" ] && [ "$_PAR_SID" != "null" ]; then
+        req POST "/schedules/$_PAR_SID/publish" '{}' "$ADMIN_TOKEN"
+        [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ] \
+          && echo "  ·     seeded throwaway published schedule ($_PAR_SID) for the parity assertion" \
+          || echo "  ·     publish returned $R_CODE — parity may still skip"
+        _parity_scan_group "$_ZZ_PAR_GID"
+      fi
+    fi
+  else
+    _ZZ_PAR_GID=""
+  fi
+fi
 if [ "$_CHECKED" -eq 0 ]; then
-  skip "schedule-vs-master name parity" "no published schedules found" "LT6-ISSUE3,MMT-002"
+  skip "schedule-vs-master name parity" "no published schedules (fixture seed unavailable — WRITE_TESTS=1 on the VPS asserts this)" "LT6-ISSUE3,MMT-002"
 elif [ -z "$_MISMATCH" ]; then
   ok "all $_CHECKED schedule entries carry the master meal name" "" "LT6-ISSUE3,MMT-002"
 else
   no "schedule entries with overridden names" "$_MISMATCH" "LT6-ISSUE3,MMT-002"
 fi
+if [ -n "$_ZZ_PAR_GID" ]; then
+  req DELETE "/groups/$_ZZ_PAR_GID/permanent" "" "$ADMIN_TOKEN"
+  { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "204" ]; } \
+    && ok "cleanup: parity fixture group deleted" "($R_CODE)" "LT6-ISSUE3" \
+    || no "cleanup: parity fixture group NOT deleted" "$R_CODE — delete ZZ_SRS_SCHEDPARITY manually" "LT6-ISSUE3"
+fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "LIVE-TEST-6 ISSUE-4 — billing engine invariant every screen now displays"
+sec "BILLING INVARIANT — netBill ≡ opening + meals + guests + adjustments"
 # ═════════════════════════════════════════════════════════════════════════════
 if [ -n "$GRP" ]; then
   req GET "/attendance/billing-summary?groupId=$GRP" "" "$ADMIN_TOKEN"
@@ -178,7 +219,7 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "LIVE-TEST-6 ISSUE-6 — default-attendance toggle persists server-side"
+sec "DEFAULT-ATTENDANCE PERSISTENCE — toggle round-trips server-side"
 # ═════════════════════════════════════════════════════════════════════════════
 if [ "$WRITE_TESTS" = "1" ] && [ -n "$STUDENT_TOKEN" ]; then
   req GET /auth/me "" "$STUDENT_TOKEN"
@@ -223,7 +264,7 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "LIVE-TEST-7 — org-less reads never 500 + split billing toggles"
+sec "ORG-LESS SAFETY — student reads never 500 + billing policy flags exposed"
 # ═════════════════════════════════════════════════════════════════════════════
 # LT7-P0: a student with no group/organization must receive empty contracts,
 # never a 500 (Prisma null-filter crash class). These reads are cheap and safe

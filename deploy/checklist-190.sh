@@ -349,7 +349,7 @@ item 142 STATIC "File handles closed"                            "streams piped 
 if [ -z "$SECRET_LOGS" ]; then item 145 SKIP "No secrets logged" "pm2 logs not present here — run on the VPS"
 elif [ "$SECRET_LOGS" = "0" ]; then item 145 PASS "No secrets logged" "same probe as 129"
 else item 145 WARN "No secrets logged" "review flagged files"; fi
-e="$(ev e2e 'rejects wrong confirm phrase|Delete w/o DELETE phrase')"; [ -n "$e" ] && item 146 PASS "Actionable error messages" "4xx errors carry message+field map (verified in e2e)" || item 146 SKIP "Actionable error messages" "run --e2e"
+e="$(ev srs 'Delete requires DELETE phrase')"; [ -n "$e" ] && item 146 PASS "Actionable error messages" "4xx errors carry message+field map (verified in srs write-lifecycle)" || item 146 SKIP "Actionable error messages" "run --srs --writes"
 if [ "$DOCKER_OK" = 1 ]; then
   [ "$mon_up" = 1 ] && item 147 PASS "Monitoring and debugging supported" "grafana/prometheus/loki/uptime-kuma up" || item 147 FAIL "Monitoring and debugging" "monitoring stack not fully up"
 else item 147 SKIP "Monitoring and debugging supported" "docker unavailable here — run on the VPS"; fi

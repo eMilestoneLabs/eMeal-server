@@ -105,17 +105,31 @@ if echo "$codes" | grep -q 429; then ok "Login flood throttled (429 seen)" "" "F
 else skip "Login flood throttle" "no 429 in 40 tries (limit may be higher)" "FR-LIM-001"; fi
 
 sec "SEC-G — SECURITY HEADERS / TLS (needs EDGE=https://domain) FR-SECX-070"
-# EDGE auto-discovery: on the VPS the public domain is already declared in the
-# nginx vhost (server_name), so read it instead of skipping this section until
-# someone remembers to export EDGE. An explicit EDGE env still wins; discovery
-# is silently skipped off-box (no nginx) or when the host doesn't answer TLS.
+# EDGE auto-discovery: on the VPS the public domain is already on disk, so
+# derive it instead of skipping this section until someone exports EDGE.
+# An explicit EDGE env still wins. Candidates, most→least authoritative:
+#   1. every nginx server_name (all conf locations, not just sites-enabled)
+#   2. certbot live cert directories (/etc/letsencrypt/live/<domain>)
+#   3. the CN/SAN of whatever certificate answers on localhost:443
+# Each candidate is verified with a real GET (audit 8295988: the old single-
+# source HEAD + curl -f probe failed even though the domain serves TLS fine —
+# -f treats any 4xx as unreachable and some edges reject HEAD).
 if [ -z "$EDGE" ]; then
-  _EDGE_HOST="$(grep -rhoE 'server_name[[:space:]]+[^;]+' /etc/nginx/sites-enabled/ /etc/nginx/conf.d/ 2>/dev/null \
-    | awk '{print $2}' | grep -Ev '^(_$|localhost|127\.)' | head -1)"
-  if [ -n "$_EDGE_HOST" ] && curl -fsSI --max-time 5 "https://$_EDGE_HOST/api/v1/health" >/dev/null 2>&1; then
-    EDGE="https://$_EDGE_HOST"
-    echo "  ·     EDGE auto-discovered from nginx server_name: $EDGE"
-  fi
+  _EDGE_CANDS="$( {
+    grep -rhoE 'server_name[[:space:]]+[^;]+' /etc/nginx/ 2>/dev/null | sed 's/server_name//' | tr ' \t' '\n\n'
+    ls /etc/letsencrypt/live/ 2>/dev/null
+    echo | timeout 6 openssl s_client -connect 127.0.0.1:443 2>/dev/null \
+      | openssl x509 -noout -subject -ext subjectAltName 2>/dev/null \
+      | grep -oE '(CN *= *|DNS:)[A-Za-z0-9.-]+' | sed 's/^CN *= *//; s/^DNS://'
+  } | grep -E '^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}$' \
+    | grep -Ev '^(localhost|127\.)' | awk '!seen[$0]++' )"
+  for _h in $_EDGE_CANDS; do
+    _ec="$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "https://$_h/api/v1/health" 2>/dev/null)"
+    case "$_ec" in ""|000) continue ;; esac
+    EDGE="https://$_h"
+    echo "  ·     EDGE auto-discovered: $EDGE (health answered $_ec)"
+    break
+  done
 fi
 if [ -n "$EDGE" ]; then
   H="$(curl -sI "$EDGE/api/v1/health" 2>/dev/null | tr -d '\r')"
@@ -125,7 +139,7 @@ if [ -n "$EDGE" ]; then
   chk "x-frame-options"           "FR-SECX-072"
   chk "referrer-policy"           "FR-SECX-073"
   echo "$H" | grep -qi '^content-security-policy:' && ok "CSP present" "" "FR-SECX-074" || skip "CSP header" "not set" "FR-SECX-074"
-else skip "Security headers" "set EDGE=https://domain" "FR-SECX-070,FR-SECX-071,FR-SECX-072,FR-SECX-073,FR-SECX-074"; fi
+else skip "Security headers" "no public domain reachable (auto-discovery found none) — export EDGE=https://domain" "FR-SECX-070,FR-SECX-071,FR-SECX-072,FR-SECX-073,FR-SECX-074"; fi
 
 # Standalone: print the summary AND make the exit code reflect real failures
 # (2 = fail) so deploy/run.sh's master certificate marks this module honestly —

@@ -418,6 +418,19 @@ if [ "$CAN_CREATE" = "true" ] && [ -n "$STUDENT_TOKEN" ]; then
   G_Q17="$(j '.id // .data.id')"; CLEANUP_GROUPS+=("$G_Q17")
   req POST /meals "$(jq -nc --arg g "$G_Q17" '{groupId:$g,slotKey:"zz_q17_open",name:"ZZ Q17 Open",attendanceEnabled:true,attendanceWindow:{openTime:"00:00",closeTime:"23:59"}}')" "$ADMIN_TOKEN"
   Q17_MEAL="$(j '.id // .data.id')"
+  # A meals-ON group defaults to Weekly Meal Mode, where an UNSCHEDULED meal
+  # is a no-meal day (FR-MODE-032 → 422 NO_MEAL_TODAY). Publish today's entry
+  # so the member marks below exercise the STATUS rules, not the planner gate.
+  # (This gap was masked while the test student was gated at ACC-005.)
+  if [ -n "$Q17_MEAL" ] && [ "$Q17_MEAL" != "null" ]; then
+    Q17_D="$(TZ='Asia/Kolkata' date +%F)"
+    Q17_DOW="$(TZ='Asia/Kolkata' date +%u)"
+    Q17_MON="$(TZ='Asia/Kolkata' date -d "$Q17_D -$(( Q17_DOW - 1 )) days" +%F 2>/dev/null || echo "$Q17_D")"
+    req POST /schedules "$(jq -nc --arg g "$G_Q17" --arg w "$Q17_MON" --arg m "$Q17_MEAL" --arg d "$Q17_D" \
+      '{groupId:$g,weekStartDate:$w,entries:[{mealId:$m,date:$d}]}')" "$ADMIN_TOKEN"
+    Q17_SID="$(j '.id // .data.id')"
+    [ -n "$Q17_SID" ] && [ "$Q17_SID" != "null" ] && req POST "/schedules/$Q17_SID/publish" '{}' "$ADMIN_TOKEN"
+  fi
   req GET "/groups/$G_Q17/qr-token" "" "$ADMIN_TOKEN"; Q17_CODE="$(j '.joinCode // .data.joinCode')"
   req POST /groups/join "$(jq -nc --arg c "$Q17_CODE" '{joinCode:$c}')" "$STUDENT_TOKEN"
 fi
@@ -430,7 +443,7 @@ if [ -n "$Q17_MEAL" ] && [ "$Q17_MEAL" != "null" ]; then
   req POST /attendance "$(jq -nc --arg m "$Q17_MEAL" --arg d "$IST_D" '{mealId:$m,attendanceDate:$d,status:"absent"}')" "$STUDENT_TOKEN"
   ACODE1="$(j '.code // .data.code // empty')"
   if [ "$R_CODE" = "403" ] && [ "$ACODE1" = "EMAIL_VERIFICATION_REQUIRED" ]; then
-    skip "Q21 member Absent mark" "student unverified — run deploy/backfill-email-verified.sh, then re-run"
+    skip "Q21 member Absent mark" "student unverified — run deploy/ensure-test-fixtures.sh, then re-run"
     skip "Q17 member Skip rejection" "student unverified (same gate)"
   else
     { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; } \
@@ -474,7 +487,7 @@ if [ -n "$Q17_MEAL" ] && [ "$Q17_MEAL" != "null" ] && [ -n "$STUDENT_TOKEN" ]; t
   req POST /attendance/correction-requests "$(jq -nc --arg m "$Q17_MEAL" --arg d "$YDAY" '{mealId:$m,attendanceDate:$d,requestType:"claim_present"}')" "$STUDENT_TOKEN"
   CCODE="$(j '.code // .data.code // empty')"
   if [ "$R_CODE" = "403" ] && [ "$CCODE" = "EMAIL_VERIFICATION_REQUIRED" ]; then
-    skip "COR-005 previous-day correction rejected" "student unverified — run the backfill, then re-run"
+    skip "COR-005 previous-day correction rejected" "student unverified — run deploy/ensure-test-fixtures.sh, then re-run"
   else
     { [ "$R_CODE" = "400" ] || [ "$R_CODE" = "422" ]; } \
       && ok "COR-005 previous-day correction rejected (same-day 11:59 PM IST lock)" "($R_CODE)" \
