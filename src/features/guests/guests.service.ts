@@ -144,7 +144,9 @@ export class GuestsService {
       | 'confirmed'
       | 'rejected'
       | 'declined'
-      | 'auto_cancelled';
+      | 'auto_cancelled'
+      // Live-Test-11 ISSUE-002: host returned to Present — guests restored.
+      | 'auto_restored';
     count?: number;
     guestId?: string;
   }): void {
@@ -296,7 +298,9 @@ export class GuestsService {
       organizationId,
       groupId: group.id,
       dateUtc,
-      mealOpenTime: meal.attendanceWindowOpen,
+      // Live-Test-11 ISSUE-005: boundary math on the EFFECTIVE (published)
+      // open time — same clock the member sees, master as fallback.
+      mealOpenTime: effective.openTime ?? meal.attendanceWindowOpen,
       candidates: [
         { userId: hostUserId, isVacationMode: hostUser?.isVacationMode === true },
       ],
@@ -396,7 +400,12 @@ export class GuestsService {
 
     // Admin-on-behalf (FR-HG-062) and approval workflow (FR-HG-042) both park
     // the booking as pendingApproval — cleared by host-confirm or admin-approve.
-    const pendingApproval = adminOnBehalf || group.guestRequiresApproval === true;
+    // Live-Test-11 ISSUE-003: an admin booking guests for THEMSELVES is the
+    // approver — their own booking never parks pending nor raises an approval
+    // request back to the admin bell. Member bookings are unchanged.
+    const adminSelf = this.isAdmin(callerRole) && !adminOnBehalf;
+    const pendingApproval =
+      adminOnBehalf || (!adminSelf && group.guestRequiresApproval === true);
 
     const capPerMeal = group.maxGuestsPerMemberPerMeal ?? 5;
     const capPerDay = group.maxGuestsPerMemberPerDay ?? null;
@@ -939,7 +948,11 @@ export class GuestsService {
     requestId?: string;
   }): Promise<number> {
     try {
-      if (params.newStatus === 'present') return 0;
+      // Live-Test-11 ISSUE-002: the host RETURNING to Present (unlimited
+      // window toggling) restores the guests the previous flip auto-cancelled.
+      if (params.newStatus === 'present') {
+        return this.restoreAutoCancelledGuests(params);
+      }
       const group = await this.prisma.group.findUnique({
         where: { id: params.groupId },
         select: { allowGuestWithoutHost: true, guestAttendanceEnabled: true },
@@ -959,6 +972,9 @@ export class GuestsService {
             status: 'cancelled',
             cancelledBy: params.actorId,
             cancelledAt: new Date(),
+            // ISSUE-002: marked so a return-to-Present can restore exactly
+            // this set — manual cancels never carry the flag.
+            autoCancelledWithHost: true,
           },
         });
         if (result.count > 0) {
@@ -1011,6 +1027,83 @@ export class GuestsService {
       );
       return 0;
     }
+  }
+
+  /**
+   * Live-Test-11 ISSUE-002: the host returned to Present inside the window —
+   * re-book exactly the guests FR-HG-035 auto-cancelled with them (flagged
+   * autoCancelledWithHost). Manual cancels stay cancelled. Same counter /
+   * cache / realtime / audit discipline as the cancel path. Never throws.
+   */
+  private async restoreAutoCancelledGuests(params: {
+    organizationId: string;
+    groupId: string;
+    hostUserId: string;
+    mealId: string;
+    attendanceDate: Date;
+    actorId: string;
+    requestId?: string;
+  }): Promise<number> {
+    const restored = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.mealGuest.updateMany({
+        where: {
+          organizationId: params.organizationId,
+          hostUserId: params.hostUserId,
+          mealId: params.mealId,
+          attendanceDate: params.attendanceDate,
+          status: 'cancelled',
+          autoCancelledWithHost: true,
+        },
+        data: {
+          status: 'booked',
+          cancelledBy: null,
+          cancelledAt: null,
+          autoCancelledWithHost: false,
+        },
+      });
+      if (result.count > 0) {
+        await this.recomputeHostCounters(
+          tx,
+          params.organizationId,
+          params.hostUserId,
+          params.mealId,
+          params.attendanceDate,
+        );
+      }
+      return result.count;
+    });
+
+    if (restored > 0) {
+      await this.invalidateKitchenCache(
+        params.organizationId,
+        params.groupId,
+        params.mealId,
+        params.attendanceDate,
+      );
+      this.audit.log({
+        organizationId: params.organizationId,
+        actorId: params.actorId,
+        targetId: params.mealId,
+        targetType: 'MealGuest',
+        action: AuditAction.update,
+        metadata: {
+          decision: 'auto-restored-with-host',
+          hostUserId: params.hostUserId,
+          count: restored,
+        },
+        requestId: params.requestId,
+      });
+      this.emitGuestEvent({
+        organizationId: params.organizationId,
+        groupId: params.groupId,
+        mealId: params.mealId,
+        date: params.attendanceDate.toISOString().slice(0, 10),
+        hostUserId: params.hostUserId,
+        action: 'auto_restored',
+        count: restored,
+      });
+    }
+    return restored;
   }
 
   // ── Aggregations for kitchen & billing (FR-HG-050/060/061) ────────────────
@@ -1190,7 +1283,11 @@ export class GuestsService {
     },
     dateStr: string,
     organizationId: string,
-  ): Promise<{ closeTime: string | null; price: number | null }> {
+  ): Promise<{
+    openTime: string | null;
+    closeTime: string | null;
+    price: number | null;
+  }> {
     // Live-Test-9 ISSUE-003: PUBLISHED-day resolver (frozen snapshot,
     // publishedAt-gated, recurring fallback) — same close/price the member
     // sees on /meals/today; also now org-scoped like every other read.
@@ -1201,6 +1298,9 @@ export class GuestsService {
     });
     const entry = dayEntries.get(meal.id);
     return {
+      // Live-Test-11 ISSUE-005: effective open time rides along so vacation
+      // boundary math runs on the same clock the member sees.
+      openTime: entry?.openTime ? entry.openTime : meal.attendanceWindowOpen,
       closeTime: entry?.openTime ? entry.closeTime : meal.attendanceWindowClose,
       price: entry?.price != null ? entry.price : meal.price,
     };

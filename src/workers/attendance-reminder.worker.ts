@@ -37,6 +37,7 @@ import { QUEUE_NAMES, JOB_TYPES } from '../queue/constants/queue.constants';
 import type { ScheduleReminderPayload } from '../queue/interfaces/job-payload.interface';
 import { getTodayInTimezone, toUtcMidnight } from '../common/utils/date.utils';
 import { getVacationCoveredUserIds } from '../common/utils/vacation-coverage.util';
+import { resolvePublishedDayEntries } from '../common/utils/published-day.util';
 
 const REMINDER_DEDUP_TTL = 4 * 60 * 60; // 4 hours
 
@@ -126,11 +127,24 @@ export class AttendanceReminderWorker extends WorkerHost {
     // governs, exactly like the sweeps and the marking guard. Slot-aware:
     // boundary days only suppress meals inside the covered range.
     const tz = mealRow?.organization?.timezone ?? 'Asia/Kolkata';
+    // Live-Test-11 ISSUE-005: boundary math on the EFFECTIVE (published-day)
+    // open time — the same clock every other vacation surface now uses.
+    let effOpen = mealRow?.attendanceWindowOpen ?? null;
+    try {
+      const dayEntries = await resolvePublishedDayEntries(this.prisma as any, {
+        groupId,
+        organizationId,
+        dateStr: getTodayInTimezone(tz),
+      });
+      effOpen = dayEntries.get(mealId)?.openTime ?? effOpen;
+    } catch {
+      /* master fallback */
+    }
     const onVacation = await getVacationCoveredUserIds(this.prisma as any, {
       organizationId,
       groupId,
       dateUtc: toUtcMidnight(getTodayInTimezone(tz)),
-      mealOpenTime: mealRow?.attendanceWindowOpen ?? null,
+      mealOpenTime: effOpen,
       candidates: membersWithToken.map((m) => ({
         userId: m.userId,
         isVacationMode: false, // flag=true members were already filtered out

@@ -37,14 +37,24 @@ echo "════════════════════════�
 . "$HERE/functional.sh"
 . "$HERE/delivered-fixes.sh"  # admin self-attendance + vacation-members + notif center
 . "$HERE/consistency.sh"      # server-truth consistency: guest pref-groups, day-name immutability, billing parity, default-attendance
+# RUN-ONCE DEDUP helper (shared by the policy-contracts and security blocks):
+# under the master audit (deploy/run.sh) a module selected standalone already
+# appended its tags to the SHARED requirements log — never re-run it here.
+_audit_has(){ case " ${AUDIT_MODULES:-} " in *" $1 "*) return 0;; *) return 1;; esac; }
+if [ "${AUDIT_DEDUP:-0}" = "1" ] && _audit_has policy-contracts; then
+  sec "POLICY & CONTRACT PROBES (LT-11) — ran once as the 'policy-contracts' module this session"
+  echo "  ·     probes + verdicts: see policy-contracts.log; LT11 tags reconciled via the shared requirements log"
+else
+  . "$HERE/policy-contracts.sh" # LT-11: Bill-Absent snapshot flags, pick counts, group-scoped alerts, slotKey/dup/veg-only probes
+fi
 . "$HERE/uniqueness.sh"       # UNI-001..036 duplicate-rejection sweep (read-only)
 . "$HERE/performance.sh"
 # RUN-ONCE DEDUP: under the master audit (run.sh) the full SEC-A..G battery
 # already ran as the standalone `security` module in THIS session, appending
 # its FR-SECX tags to the SHARED requirements log this certificate reconciles.
 # Re-sourcing it here would repeat all ~55 probes (and a second SEC-F login
-# flood). Standalone srs runs still execute it in full.
-_audit_has(){ case " ${AUDIT_MODULES:-} " in *" $1 "*) return 0;; *) return 1;; esac; }
+# flood). Standalone srs runs still execute it in full. (_audit_has is defined
+# once, above the policy-contracts block.)
 if [ "${AUDIT_DEDUP:-0}" = "1" ] && _audit_has security; then
   sec "SECURITY BATTERY (SEC-A..G) — ran once as the 'security' module this session"
   echo "  ·     probes + verdicts: see security.log; FR-SECX tags reconciled via the shared requirements log"

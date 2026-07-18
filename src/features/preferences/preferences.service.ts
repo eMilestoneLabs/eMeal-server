@@ -8,6 +8,7 @@ import {
   NotFoundException,
   Inject,
   Optional,
+  UnprocessableEntityException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -464,6 +465,11 @@ export class PreferencesService {
       this.validateGroupRules(dto);
       // Live-Test-7 ISSUE-2: creation-time floor — 2..5 options per group.
       this.validateOptionList(dto.options ?? [], true);
+      // Live-Test-11 ISSUE-014: Veg-Only is the PARENT policy — every option
+      // inside a veg-only group is automatically veg.
+      if (dto.vegOnly === true) {
+        for (const o of dto.options ?? []) o.isVeg = true;
+      }
       const created = await this.repo.createGroup({
         organizationId,
         groupId: meal.groupId,
@@ -533,6 +539,15 @@ export class PreferencesService {
       });
     }
 
+    // Live-Test-11 ISSUE-014: turning Veg-Only ON cascades — every option in
+    // the group becomes veg (the group is the parent policy). Runs BEFORE the
+    // group update so the returned payload reflects the cascaded options.
+    if (dto.vegOnly === true && existing.vegOnly !== true) {
+      await this.prisma.preferenceOption.updateMany({
+        where: { preferenceGroupId: id },
+        data: { isVeg: true },
+      });
+    }
     const updated = await this.repo.updateGroup(id, organizationId, {
       ...dto,
       visibleWhen: dto.visibleWhen === undefined ? undefined : dto.visibleWhen,
@@ -595,10 +610,21 @@ export class PreferencesService {
       });
     }
     this.validateOptionList([dto]);
-    if (group.options.some((o) => o.key === dto.key)) {
+    // Live-Test-11 ISSUE-013: duplicate detection is CASE- and whitespace-
+    // insensitive across keys AND display labels ("Ruti" vs "RUTI").
+    const normKey = dto.key.trim().toLowerCase();
+    const normLabel = (dto.label ?? dto.key).trim().toLowerCase();
+    if (
+      group.options.some(
+        (o) =>
+          o.isActive !== false &&
+          (o.key.trim().toLowerCase() === normKey ||
+            (o.label ?? o.key).trim().toLowerCase() === normLabel),
+      )
+    ) {
       throw new BadRequestException({
-        message: `Option key "${dto.key}" already exists in this group`,
-        errors: { key: 'Duplicate key' },
+        message: `Option "${(dto.label ?? dto.key).trim()}" already exists in this group`,
+        errors: { key: 'Duplicate option' },
       });
     }
     const option = await this.repo.createOption({
@@ -622,6 +648,16 @@ export class PreferencesService {
     const option = await this.repo.findOptionById(id);
     if (!option || option.group.organizationId !== organizationId) {
       throw new NotFoundException('Preference option not found');
+    }
+    // Live-Test-11 ISSUE-014: inside a veg-only group the per-option veg flag
+    // is locked ON — change the group's policy to change the options.
+    if (dto.isVeg === false && option.group.vegOnly === true) {
+      throw new UnprocessableEntityException({
+        message: 'This group is Veg-Only — every option stays veg',
+        errors: {
+          isVeg: 'Turn off Veg-Only on the group to allow non-veg options',
+        },
+      });
     }
     if (dto.minQty !== undefined || dto.maxQty !== undefined) {
       const minQty = dto.minQty ?? option.minQty;
@@ -698,6 +734,30 @@ export class PreferencesService {
     this.validateGroupRules(dto);
     // Live-Test-7 ISSUE-2: creation-time floor — 2..5 options per group.
     this.validateOptionList(dto.options ?? [], true);
+    // Live-Test-11 ISSUE-014: Veg-Only is the PARENT policy — every option
+    // inside a veg-only group is automatically veg.
+    if (dto.vegOnly === true) {
+      for (const o of dto.options ?? []) o.isVeg = true;
+    }
+    // Live-Test-11 ISSUE-013: template (Preference Group) names are unique
+    // within the Master Meal Template's group — case/whitespace-insensitive.
+    const norm = dto.label.trim().toLowerCase();
+    const templates = await this.repo.listTemplates(organizationId, groupId);
+    if (
+      templates.some(
+        (t) =>
+          t.scope !== 'meal' &&
+          t.isActive !== false &&
+          t.label.trim().toLowerCase() === norm,
+      )
+    ) {
+      throw new ConflictException({
+        message: 'Validation failed',
+        errors: {
+          label: `A preference group named "${dto.label.trim()}" already exists`,
+        },
+      });
+    }
     const created = await this.repo.createGroup({
       organizationId,
       groupId,
@@ -857,14 +917,26 @@ export class PreferencesService {
         errors: { options: 'Option limit reached' },
       });
     }
+    // Live-Test-11 ISSUE-013: duplicates are CASE- and whitespace-insensitive
+    // ("Ruti" vs "RUTI " is the same tag) — keys and display labels both.
+    const labels = new Set<string>();
     for (const o of options) {
-      if (keys.has(o.key)) {
+      const normKey = o.key.trim().toLowerCase();
+      if (keys.has(normKey)) {
         throw new BadRequestException({
           message: `Duplicate option key "${o.key}"`,
           errors: { key: 'Keys must be unique within a group' },
         });
       }
-      keys.add(o.key);
+      keys.add(normKey);
+      const normLabel = (o.label ?? o.key).trim().toLowerCase();
+      if (labels.has(normLabel)) {
+        throw new BadRequestException({
+          message: `Duplicate option "${(o.label ?? o.key).trim()}"`,
+          errors: { options: 'Option names must be unique within a group' },
+        });
+      }
+      labels.add(normLabel);
       const minQty = o.minQty ?? 1;
       const maxQty = o.maxQty ?? 1;
       if (minQty > maxQty || maxQty > maxQtyCap) {

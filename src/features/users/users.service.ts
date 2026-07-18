@@ -14,7 +14,11 @@ import { UpdateUserDto } from './dto/update-user.dto';
 import { StorageService } from '../../storage/storage.service';
 import { AuditService } from '../../audit/audit.service';
 import { QueueService } from '../../queue/queue.service';
+import { PrismaService } from '../../prisma/prisma.service';
+import { RedisService } from '../../redis/redis.service';
 import { normalizePhone } from '../../common/utils/phone.util';
+import { getTodayInTimezone } from '../../common/utils/date.utils';
+import { resumeAutoAttendanceForUser } from '../../common/utils/auto-attendance-resume.util';
 
 @Injectable()
 export class UsersService {
@@ -32,7 +36,49 @@ export class UsersService {
     @Optional()
     @Inject(QueueService)
     private readonly queue: QueueService | null = null,
+    // Live-Test-11 ISSUE-004: same-day auto-attendance resumption on vacation
+    // end. Optional (global modules in the app) so tests run unchanged.
+    @Optional()
+    @Inject(PrismaService)
+    private readonly prisma: PrismaService | null = null,
+    @Optional()
+    @Inject(RedisService)
+    private readonly redis: RedisService | null = null,
   ) {}
+
+  /**
+   * Live-Test-11 ISSUE-004: vacation ended — clear today's auto-attendance
+   * once-keys so the next sweep tick re-marks the member for still-open
+   * windows ("toggle off in the morning → from the next meal, attendance is
+   * on"). Fire-and-forget; the member's previous Auto-Attendance setting was
+   * never touched by vacation, so resuming needs nothing else.
+   */
+  private resumeAutoAttendance(userId: string): void {
+    if (!this.prisma || !this.redis) return;
+    void (async () => {
+      try {
+        const u = await this.prisma!.user.findUnique({
+          where: { id: userId },
+          select: {
+            organizationId: true,
+            organization: { select: { timezone: true } },
+          },
+        });
+        if (!u?.organizationId) return;
+        await resumeAutoAttendanceForUser(this.prisma!, this.redis!, {
+          userId,
+          organizationId: u.organizationId,
+          dateStr: getTodayInTimezone(
+            u.organization?.timezone ?? 'Asia/Kolkata',
+          ),
+        });
+      } catch (err) {
+        this.logger.warn(
+          `auto-attendance resume failed (retries next day): ${(err as Error).message}`,
+        );
+      }
+    })();
+  }
 
   /**
    * Additive: when an avatar arrives as a base64 data URI, upload it to object
@@ -220,6 +266,9 @@ export class UsersService {
     }
 
     const user = await this.usersRepo.update(userId, { isVacationMode: enabled });
+
+    // ISSUE-004: vacation OFF → auto-attendance resumes the SAME day.
+    if (!enabled) this.resumeAutoAttendance(userId);
 
     // VAC-013: every return-early that ended an approved vacation is audited.
     if (endedRequestIds.length > 0 && actor?.organizationId) {

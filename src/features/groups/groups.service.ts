@@ -1942,9 +1942,9 @@ export class GroupsService {
       mealPricingEnabled: group.mealPricingEnabled,
       // SRS Module 03 (survey Q17/Q22): Bill-Skip policy (default OFF).
       billSkippedMeals: (group as any).billSkippedMeals ?? false,
-      // Live-Test-8 ISSUE-005: Absent is always FREE — Bill-Absent removed.
-      // Inert field (always false) kept for client-contract compatibility.
-      billAbsentMeals: false,
+      // Live-Test-11 ISSUE-017 (survey-locked): independent Bill-Absent
+      // toggle reinstated — default OFF (null/false = absent is free).
+      billAbsentMeals: (group as any).billAbsentMeals === true,
       // SRS FR-TIME-005: per-group late-marking grace (minutes, 0 = none).
       attendanceGraceMinutes: group.attendanceGraceMinutes ?? 0,
       // SRS FR-TRUST-001/003: trust model (opt-in default) + fair floor.

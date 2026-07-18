@@ -26,6 +26,10 @@ export class AttendanceEntity {
   markedBy: string | null; // userId of admin who performed manual override
   // Additive: ₹ price snapshot at mark time (per-day override or master meal price).
   price: number | null;
+  // Live-Test-11 ISSUE-017 (additive): Bill-Absent policy snapshot taken when
+  // the record was written as `absent`. True = this absent bills at its price
+  // snapshot; null/false = free. Clients use it for per-row billed labels.
+  billAbsent?: boolean | null;
 
   // Module 33 consent trail — how this record came to exist:
   // self | default | system_default | admin | request | verified
@@ -122,6 +126,11 @@ export class MealAttendanceSummaryEntity {
   // keyed by snapshotted labels: { "Roti/Rice": { "Roti": 4, "Rice": 2 } }.
   // Empty for groups using only the legacy flat preference (additive).
   preferenceGroupBreakdown?: Record<string, Record<string, number>>;
+
+  // Live-Test-11 ISSUE-016 (additive): pick-ROW count per group label —
+  // headcount validation stays correct when per-option quantities inflate the
+  // breakdown totals ("Ruti ×3" = 1 pick, 3 plates).
+  preferenceGroupPickCounts?: Record<string, number>;
 
   constructor(data: Partial<MealAttendanceSummaryEntity>) {
     Object.assign(this, data);

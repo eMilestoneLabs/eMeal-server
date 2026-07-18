@@ -441,6 +441,9 @@ describe('AttendanceService', () => {
           status: 'present',
         }),
         undefined,
+        // Live-Test-11 ISSUE-010: 5th arg = same-day self-correction opts —
+        // undefined here because this call is a normal (non-correction) mark.
+        undefined,
       );
       markSpy.mockRestore();
     });

@@ -2,6 +2,7 @@ import {
   ArrayMaxSize,
   ArrayNotEmpty,
   IsArray,
+  IsBoolean,
   IsString,
   IsNotEmpty,
   IsOptional,
@@ -65,6 +66,16 @@ export class AdminOverrideDto {
   @ValidateNested({ each: true })
   @Type(() => PreferenceSelectionDto)
   selections?: PreferenceSelectionDto[];
+
+  /**
+   * Live-Test-11 ISSUE-010: admin SAME-DAY self-correction. When true (and
+   * userId === the admin's own id), the closed-window gate is relaxed for
+   * TODAY only — no approval flow, directly applied, always audited. Any
+   * other date or an upcoming window still returns 423.
+   */
+  @IsOptional()
+  @IsBoolean()
+  correction?: boolean;
 }
 
 /**

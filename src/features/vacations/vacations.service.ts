@@ -21,6 +21,9 @@ import {
 import { CreateVacationRequestDto } from './dto/create-vacation-request.dto';
 import { QueryVacationRequestDto } from './dto/query-vacation-request.dto';
 import { ReviewVacationRequestDto } from './dto/review-vacation-request.dto';
+import { PrismaService } from '../../prisma/prisma.service';
+import { RedisService } from '../../redis/redis.service';
+import { resumeAutoAttendanceForUser } from '../../common/utils/auto-attendance-resume.util';
 
 function parseDate(value: string): Date {
   // Accept YYYY-MM-DD (UTC midnight) or full ISO-8601.
@@ -58,6 +61,13 @@ export class VacationsService {
     @Optional()
     @Inject(NoticesService)
     private readonly notices: NoticesService | null = null,
+    // Live-Test-11 ISSUE-004: same-day auto-attendance resume on vacation end.
+    @Optional()
+    @Inject(PrismaService)
+    private readonly prisma: PrismaService | null = null,
+    @Optional()
+    @Inject(RedisService)
+    private readonly redis: RedisService | null = null,
   ) {}
 
   private isAdmin(role: string): boolean {
@@ -209,9 +219,19 @@ export class VacationsService {
         dto.startDate === dto.endDate
           ? dto.startDate
           : `${dto.startDate} – ${dto.endDate}`;
+      // Live-Test-11 ISSUE-008: a vacation request belongs to the member's
+      // GROUP — resolve it when the request itself is org-level so the admin
+      // bell never shows it as an "Organisation" notification. Best-effort:
+      // resolution failure falls back to the previous org-wide behaviour.
+      let alertGroupId = dto.groupId ?? null;
+      if (!alertGroupId) {
+        alertGroupId = await this.repo
+          .getUserActiveGroupId(userId, organizationId)
+          .catch(() => null);
+      }
       void this.notices.createRequestAlert({
         organizationId,
-        groupId: dto.groupId ?? null,
+        groupId: alertGroupId,
         actorId: userId,
         title: 'New vacation request',
         body: `${userName} requested vacation for ${range}. Tap to review.`,
@@ -417,6 +437,21 @@ export class VacationsService {
       );
       if (!stillCovered) {
         await this.repo.setUserVacation(existing.userId, organizationId, false);
+        // Live-Test-11 ISSUE-004: vacation ended mid-day — clear today's
+        // auto-attendance once-keys so the sweep re-marks the member for
+        // still-open windows. Fire-and-forget, never blocks the cancel.
+        if (this.prisma && this.redis) {
+          const tz = await this.repo.getOrgTimezone(organizationId);
+          void resumeAutoAttendanceForUser(this.prisma as any, this.redis, {
+            userId: existing.userId,
+            organizationId,
+            dateStr: getTodayInTimezone(tz),
+          }).catch((err) =>
+            this.logger.warn(
+              `auto-attendance resume failed: ${(err as Error).message}`,
+            ),
+          );
+        }
       }
     }
 

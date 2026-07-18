@@ -39,6 +39,27 @@ export class VacationRequestsRepository {
     return u?.name ?? null;
   }
 
+  /**
+   * Live-Test-11 ISSUE-008: the member's active group (first membership) so
+   * request alerts land in the admin bell GROUP-scoped, never "Organisation".
+   * Tenant-isolated via the group's organizationId.
+   */
+  async getUserActiveGroupId(
+    userId: string,
+    organizationId: string,
+  ): Promise<string | null> {
+    const m = await this.prisma.groupMember.findFirst({
+      where: {
+        userId,
+        status: 'active',
+        group: { organizationId, isActive: true },
+      },
+      orderBy: { joinedAt: 'asc' },
+      select: { groupId: true },
+    });
+    return m?.groupId ?? null;
+  }
+
   async create(data: {
     organizationId: string;
     groupId: string | null;

@@ -743,16 +743,36 @@ export class BillingService {
    *     touches prior bills, and survives arbitrary ON/OFF flips. This is why
    *     the current flag is NOT consulted here (turning Bill-Skip off must not
    *     retroactively un-bill skips that were policy-billed when they closed).
-   *   • absent   → NEVER bills. Absent is always FREE (Bill-Absent removed).
-   * Policy arg kept for call-site compatibility; the list is policy-independent
-   * by design. Every engine (summary, exports, refund cap, carry-forward,
-   * finalize snapshot) MUST use this — never inline the list.
+   *   • absent   → bills ONLY when its per-record `billAbsent` snapshot is
+   *     TRUE (Live-Test-11 ISSUE-017, survey-locked): the independent
+   *     Bill-Absent toggle is snapshotted onto each absent row at write time,
+   *     so — exactly like Bill-Skip — the row itself carries the date-forward
+   *     gate and later toggle flips never touch prior bills. Null/false
+   *     (every pre-fix record) = free.
+   * Policy arg kept for call-site compatibility; the filter is
+   * policy-independent by design. Every engine (summary, exports, refund cap,
+   * carry-forward, finalize snapshot) MUST use this — never inline the list.
    */
   static billedStatuses(_policy?: {
     billSkippedMeals?: boolean;
     billAbsentMeals?: boolean | null;
   }): string[] {
     return ['present', 'skipped'];
+  }
+
+  /**
+   * Live-Test-11 ISSUE-017: the ONE attendance where-fragment for "this row
+   * bills" — present/skipped as before, plus absent rows whose write-time
+   * Bill-Absent snapshot is TRUE. Spread into a where clause alongside the
+   * tenant/date keys (`...BillingService.billedAttendanceFilter()`).
+   */
+  static billedAttendanceFilter(): { OR: Array<Record<string, unknown>> } {
+    return {
+      OR: [
+        { status: { in: BillingService.billedStatuses() } },
+        { status: 'absent', billAbsent: true },
+      ],
+    };
   }
 
   private async computeMemberNetBalance(
@@ -767,14 +787,15 @@ export class BillingService {
       billNoShowGuests: boolean;
     },
   ): Promise<number> {
-    const billedStatuses = BillingService.billedStatuses(policy);
     const [meal, guest, ledger] = await Promise.all([
       tx.attendanceRecord.aggregate({
         where: {
           organizationId,
           groupId,
           userId,
-          status: { in: billedStatuses },
+          // ISSUE-017: shared billed-row filter (present/skipped + snapshotted
+          // billed absents) — refund cap stays in lockstep with the summary.
+          ...BillingService.billedAttendanceFilter(),
         },
         _sum: { price: true },
       }),
@@ -1076,7 +1097,8 @@ export class BillingService {
     const cutoff = lastFinal.periodEnd;
 
     // Live-Test-7 ISSUE-4: shared resolver — Skip/Absent bill independently.
-    const billedStatuses = BillingService.billedStatuses(policy);
+    // Live-Test-11 ISSUE-017: snapshot-aware billed-row filter keeps the
+    // carry-forward identical to the period summaries it carries.
     const [meals, guests, ledger] = await Promise.all([
       this.prisma.attendanceRecord.groupBy({
         by: ['userId'],
@@ -1084,7 +1106,7 @@ export class BillingService {
           organizationId,
           groupId,
           attendanceDate: { lte: cutoff },
-          status: { in: billedStatuses as any },
+          ...BillingService.billedAttendanceFilter(),
         },
         _sum: { price: true },
       }),
@@ -1220,9 +1242,8 @@ export class BillingService {
       guestAttendanceEnabled: policyRow?.guestAttendanceEnabled === true,
       billNoShowGuests: policyRow?.billNoShowGuests !== false,
     };
-    // Live-Test-7 ISSUE-4: shared resolver — Skip/Absent bill independently.
-    const billedStatuses = BillingService.billedStatuses(policy);
-
+    // Live-Test-7 ISSUE-4 / Live-Test-11 ISSUE-017: the shared snapshot-aware
+    // billed-row filter is spread inline below — Skip/Absent bill independently.
     const [perMember, billedPerMember, guests, adjustments, opening] =
       await Promise.all([
         this.prisma.attendanceRecord.groupBy({
@@ -1242,7 +1263,8 @@ export class BillingService {
             organizationId,
             groupId,
             attendanceDate: { gte: start, lte: end },
-            status: { in: billedStatuses as any },
+            // ISSUE-017: snapshot-aware billed rows in the finalize snapshot.
+            ...BillingService.billedAttendanceFilter(),
           },
           _sum: { price: true },
         }),

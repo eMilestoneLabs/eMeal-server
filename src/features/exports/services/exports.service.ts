@@ -263,7 +263,10 @@ export class ExportsService {
         },
       }),
       this.prisma.attendanceRecord.groupBy({
-        by: ['userId', 'status'],
+        // Live-Test-11 ISSUE-017: the per-record Bill-Absent snapshot joins
+        // the aggregate key so billed and free absents split cleanly (present/
+        // skipped rows always carry NULL — their rows never fan out).
+        by: ['userId', 'status', 'billAbsent'] as any,
         where: recordWhere,
         _count: { _all: true },
         _sum: { price: true },
@@ -327,20 +330,27 @@ export class ExportsService {
     };
     for (const s of statusAgg) {
       const v = agg(s.userId);
+      // ISSUE-017: absent rows may fan out by their billAbsent snapshot —
+      // every count therefore ACCUMULATES (all counters start at 0).
       if (s.status === 'present') {
-        v.present = s._count._all;
+        v.present += s._count._all;
         v.mealAmount += s._sum.price ?? 0;
       } else if (s.status === 'skipped') {
-        v.skipped = s._count._all;
+        v.skipped += s._count._all;
         // Live-Test-8 ISSUE-005 (date-forward Bill-Skip): a `skipped` record
         // exists only for a date whose policy was ON at close, so bill it
         // unconditionally — identical rule to BillingService.billedStatuses()
         // and the meal-summary engine (FR-BILLX-043 parity).
         v.mealAmount += s._sum.price ?? 0;
       } else if (s.status === 'absent') {
-        v.absent = s._count._all;
-        // Live-Test-8 ISSUE-005: Absent is always FREE — count only, no amount.
-      } else if (s.status === 'onVacation') v.vacation = s._count._all;
+        v.absent += s._count._all;
+        // Live-Test-11 ISSUE-017 (survey-locked): an absent bills ONLY when
+        // its write-time snapshot flagged it — same date-forward rule as the
+        // summary engine, so the export reconciles line by line.
+        if ((s as any).billAbsent === true) {
+          v.mealAmount += s._sum.price ?? 0;
+        }
+      } else if (s.status === 'onVacation') v.vacation += s._count._all;
     }
     for (const g of guestAgg) {
       const v = agg(g.hostUserId);

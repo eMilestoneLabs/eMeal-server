@@ -293,6 +293,10 @@ export class AttendanceService {
     organizationId: string,
     dto: MarkAttendanceDto,
     requestId?: string,
+    // Live-Test-11 ISSUE-010: admin SAME-DAY self-correction — the ONLY rule
+    // relaxed is the closed-window gate (today only, org timezone); vacation,
+    // preference validation, billing-period and pricing rules stay identical.
+    opts?: { allowClosedWindowToday?: boolean },
   ) {
     // 1. Load meal with org isolation — timezone comes from Organization, not Group
     const meal = await this.prisma.meal.findFirst({
@@ -310,6 +314,9 @@ export class AttendanceService {
             // Pass 10 (FR-MEMX-006/SC-006): archived-group state re-checked
             // at write time — rides the same query, no extra round-trip.
             isActive: true,
+            // Live-Test-11 ISSUE-017: Bill-Absent policy snapshotted onto
+            // every absent write — rides the same query, no extra round-trip.
+            billAbsentMeals: true,
           },
         },
         organization: { select: { timezone: true } },
@@ -383,6 +390,25 @@ export class AttendanceService {
       );
     }
 
+    // Per-day window override (Weekly / Day-Wise Meal Mode): a published
+    // schedule entry for THIS meal today takes precedence over the master meal
+    // window, so enforcement matches exactly what the student sees on
+    // GET /meals/today. Falls back to the master window when no schedule applies.
+    // Live-Test-11 ISSUE-005: resolved BEFORE the vacation gate so boundary
+    // math (start/end meal) runs on the effective (published) open time — the
+    // same clock the member sees — never the stale master window.
+    const effective = await this.resolveEffectiveWindow(
+      meal.id,
+      meal.groupId,
+      organizationId,
+      todayInTz,
+      {
+        openTime: meal.attendanceWindowOpen,
+        closeTime: meal.attendanceWindowClose,
+        price: meal.price ?? null,
+      },
+    );
+
     // Live-Test-8 ISSUE-007 (locked rule 1): attendance is BLOCKED during
     // vacation — the old path only logged and let the mark through. The
     // shared Pass-11 coverage util governs: an APPROVED request covering
@@ -395,7 +421,8 @@ export class AttendanceService {
         organizationId,
         groupId: meal.groupId,
         dateUtc: toUtcMidnight(attendanceDate),
-        mealOpenTime: meal.attendanceWindowOpen ?? null,
+        mealOpenTime:
+          effective.openTime ?? meal.attendanceWindowOpen ?? null,
         candidates: [
           { userId, isVacationMode: user?.isVacationMode === true },
         ],
@@ -447,21 +474,7 @@ export class AttendanceService {
       }
     }
 
-    // Per-day window override (Weekly / Day-Wise Meal Mode): a published
-    // schedule entry for THIS meal today takes precedence over the master meal
-    // window, so enforcement matches exactly what the student sees on
-    // GET /meals/today. Falls back to the master window when no schedule applies.
-    const effective = await this.resolveEffectiveWindow(
-      meal.id,
-      meal.groupId,
-      organizationId,
-      todayInTz,
-      {
-        openTime: meal.attendanceWindowOpen,
-        closeTime: meal.attendanceWindowClose,
-        price: meal.price ?? null,
-      },
-    );
+    // (effective window resolved above, before the vacation gate — ISSUE-005)
     const effectivePrice = effective.price;
     const effectiveOpen = effective.openTime;
     const effectiveClose = effective.closeTime;
@@ -505,6 +518,9 @@ export class AttendanceService {
       meal.group?.attendanceGraceMinutes ?? 0,
     );
     let windowState: AttendanceWindowState = 'open';
+    // ISSUE-010: true only for an admin same-day self-correction that passed
+    // a closed window — audited below.
+    let selfCorrection = false;
     if (effectiveOpen && effectiveClose) {
       const currentTime = getCurrentTimeInTimezone(orgTimezone);
       windowState = getWindowState(
@@ -514,7 +530,16 @@ export class AttendanceService {
         graceMinutes,
       );
 
-      if (windowState === 'upcoming' || windowState === 'closed') {
+      // ISSUE-010: an admin self-correction may pass a CLOSED window — but
+      // only for TODAY's records (org business date). Upcoming stays locked.
+      selfCorrection =
+        opts?.allowClosedWindowToday === true &&
+        windowState === 'closed' &&
+        attendanceDate === todayInTz;
+      if (
+        (windowState === 'upcoming' || windowState === 'closed') &&
+        !selfCorrection
+      ) {
         // GAP-ATT-1 (RESOLVED): source-of-truth requires HTTP 423 (Locked) for
         // out-of-window marks. Flat error contract (LAW-12), same message text.
         // SRS FR-TIME-011/012 (LOOP-091/092): machine-readable code, close
@@ -564,9 +589,41 @@ export class AttendanceService {
         );
       }
       if (pgGroups.length > 0) {
+        // Live-Test-11 ISSUE-002: unlimited Present↔Absent toggling inside the
+        // window must PRESERVE the member's earlier picks. A re-mark to
+        // Present that carries no selections (the "Change → Mark Present"
+        // sheet) reuses the selection snapshot already stored on this record
+        // (it survives the Absent flip untouched) instead of 422-ing. A mark
+        // that DOES carry selections still replaces them — the member may
+        // modify before returning to Present.
+        let effectiveSelections = dto.selections ?? [];
+        if (effectiveSelections.length === 0) {
+          const prior = await this.prisma.attendanceRecord.findUnique({
+            where: {
+              userId_mealId_attendanceDate: {
+                userId,
+                mealId: dto.mealId,
+                attendanceDate: toUtcMidnight(attendanceDate),
+              },
+            },
+            select: { preferences: true },
+          });
+          const snap = prior?.preferences;
+          if (Array.isArray(snap) && snap.length > 0) {
+            effectiveSelections = (snap as Array<Record<string, unknown>>)
+              .filter((s) => s.groupId && s.optionKey)
+              .map((s) => ({
+                groupId: String(s.groupId),
+                optionKey: String(s.optionKey),
+                ...(s.quantity != null
+                  ? { quantity: Number(s.quantity) }
+                  : {}),
+              }));
+          }
+        }
         const validated = this.preferencesService.validateSelections(
           pgGroups,
-          dto.selections ?? [],
+          effectiveSelections,
         );
         // Option deltas bill only when meal pricing is active (base price set);
         // without a base price, selections are recorded but never billed.
@@ -601,6 +658,14 @@ export class AttendanceService {
       markedAt: new Date(),
       markedBy: null, // student marks own attendance
       price: markPrice,
+      // Live-Test-11 ISSUE-017 (survey-locked): the Bill-Absent policy is
+      // SNAPSHOTTED at write time — date-forward by construction (later
+      // toggle flips never rewrite this). Non-absent writes clear the flag so
+      // an Absent→Present re-mark never carries a stale snapshot.
+      billAbsent:
+        status === 'absent' && (meal.group as any)?.billAbsentMeals === true
+          ? true
+          : null,
       source: 'self', // Module 33 consent trail
       ...(selectionRows !== undefined
         ? { preferences: selectionSnapshot, selectionRows }
@@ -650,6 +715,8 @@ export class AttendanceService {
         ...(windowState === 'grace'
           ? { markedInGrace: true, graceMinutes, windowClose: effectiveClose }
           : {}),
+        // ISSUE-010: an admin same-day self-correction is always auditable.
+        ...(selfCorrection ? { selfCorrection: true } : {}),
         ...(dto.clientActionAt ? { clientActionAt: dto.clientActionAt } : {}),
       },
       requestId,
@@ -800,6 +867,10 @@ export class AttendanceService {
     // FR-PG parity: preference-group selections travel through to the member
     // path unchanged, so the admin's Present follows the exact same
     // validation/billing rules as every member's.
+    // Live-Test-11 ISSUE-010: `correction: true` = the admin's SAME-DAY
+    // self-correction — no approval needed (the admin IS the approver), the
+    // closed-window gate alone is relaxed for today, everything else (window
+    // for other days, vacation, preferences, billing period) is identical.
     return this.markAttendance(
       adminId,
       organizationId,
@@ -812,6 +883,7 @@ export class AttendanceService {
         selections: dto.selections ?? undefined,
       } as any,
       requestId,
+      dto.correction === true ? { allowClosedWindowToday: true } : undefined,
     );
   }
 
@@ -1001,6 +1073,8 @@ export class AttendanceService {
             mealsEnabled: true,
             weeklyMenuEnabled: true,
             dayWiseMealsEnabled: true,
+            // ISSUE-017: policy snapshot for consented absent writes too.
+            billAbsentMeals: true,
           },
         },
       },
@@ -1070,6 +1144,14 @@ export class AttendanceService {
       markedAt: new Date(),
       markedBy: params.markedBy ?? null,
       price: finalPrice,
+      // ISSUE-017: same write-time policy snapshot as markAttendance — an
+      // approved correct_to_absent under Bill-Absent bills; any status change
+      // away from absent clears the flag.
+      billAbsent:
+        params.status === 'absent' &&
+        (meal?.group as any)?.billAbsentMeals === true
+          ? true
+          : null,
       source: params.source,
       sourceRequestId: params.sourceRequestId ?? null,
       ...(selectionRows !== undefined
@@ -1435,6 +1517,7 @@ export class AttendanceService {
       snapshotPrice: counts.snapshotPrice,
       preferenceBreakdown: counts.preferenceBreakdown,
       preferenceGroupBreakdown: counts.preferenceGroupBreakdown,
+      preferenceGroupPickCounts: counts.preferenceGroupPickCounts,
     });
 
     // Module 22 (FR-HG-060/061): kitchen counts include booked+approved
@@ -1693,8 +1776,17 @@ export class AttendanceService {
       } else if (r.status === 'absent') {
         u.absent += 1;
         absentMeals += 1;
-        // Live-Test-8 ISSUE-005: Absent is ALWAYS FREE (Bill-Absent removed) —
-        // no bill component, only the count for display.
+        // Live-Test-11 ISSUE-017 (survey-locked): an absent bills ONLY when
+        // its per-record snapshot says the independent Bill-Absent toggle was
+        // ON at mark time — date-forward by construction (null/false = every
+        // pre-fix and policy-OFF record stays free; the current flag is NOT
+        // consulted, matching the Bill-Skip date-forward discipline). Kitchen
+        // counts (byMeal/bySlot presentCount) stay Present-only.
+        if ((r as any).billAbsent === true) {
+          const p = r.price ?? 0;
+          u.totalBill += p;
+          revenue += p;
+        }
       } else if (r.status === 'onVacation') {
         u.vacation += 1;
         vacationDays += 1;
@@ -1835,9 +1927,9 @@ export class AttendanceService {
       // SRS Module 03 (survey Q17/Q22): whether skipped meals are billed —
       // additive, lets clients label the policy.
       billSkippedMeals: (groupPolicy as any)?.billSkippedMeals ?? false,
-      // Live-Test-8 ISSUE-005: Absent is always FREE now — kept as an inert
-      // display field (always false) for client-contract compatibility.
-      billAbsentMeals: false,
+      // Live-Test-11 ISSUE-017 (survey-locked): independent Bill-Absent
+      // toggle reinstated — real policy flag so clients can label the rows.
+      billAbsentMeals: (groupPolicy as any)?.billAbsentMeals === true,
       summary: {
         revenue,
         memberCount,
@@ -1959,9 +2051,9 @@ export class AttendanceService {
       // Group policy flag so the client can label billed skipped rows
       // ("Billed" vs "Not Billed") without a second request.
       billSkippedMeals: summary.billSkippedMeals ?? false,
-      // Live-Test-8 ISSUE-005: Absent is always FREE — inert display field
-      // kept for client-contract compatibility.
-      billAbsentMeals: false,
+      // Live-Test-11 ISSUE-017: real Bill-Absent policy flag (member view
+      // reuses the admin summary engine, so the flag rides through).
+      billAbsentMeals: summary.billAbsentMeals ?? false,
       openingBalance: mine?.openingBalance ?? 0,
       totalBill,
       netBill: mine?.netBill ?? totalBill,

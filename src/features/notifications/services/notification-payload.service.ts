@@ -164,7 +164,9 @@ export class NotificationPayloadService {
       body:
         `${params.requesterName} requests "${params.typeLabel}" for ` +
         `${params.mealName} (${params.dateStr}).`,
-      route: '/admin/attendance',
+      // Live-Test-11 ISSUE-001: land INSIDE the Correction Requests queue.
+      // Older APKs resolve unknown routes to the dashboard (never 404).
+      route: '/admin/attendance?open=corrections',
       data: { type: 'correction_requested' },
     };
   }

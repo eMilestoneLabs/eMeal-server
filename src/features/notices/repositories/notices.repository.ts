@@ -131,6 +131,58 @@ export class NoticesRepository {
     return this.toEntity(raw, false, 0);
   }
 
+  /**
+   * Live-Test-11 P1 (single-notification rule): the still-active alert this
+   * new request would duplicate — same actor, workflow deep-link, scope and
+   * title within the collapse window. Indexed on organizationId.
+   */
+  async findCollapsibleAlert(params: {
+    organizationId: string;
+    groupId: string | null;
+    createdBy: string;
+    linkType: string | null;
+    audience: string;
+    targetUserId: string | null;
+    title: string;
+    since: Date;
+  }): Promise<{ id: string } | null> {
+    return this.prisma.notice.findFirst({
+      where: {
+        organizationId: params.organizationId,
+        groupId: params.groupId,
+        createdBy: params.createdBy,
+        linkType: params.linkType,
+        audience: params.audience,
+        targetUserId: params.targetUserId,
+        title: params.title,
+        isActive: true,
+        deletedAt: null,
+        publishedAt: { gte: params.since },
+      },
+      select: { id: true },
+    });
+  }
+
+  /**
+   * Refresh a collapsed alert: newest body, bumped publishedAt, and reads
+   * cleared so it re-surfaces as UNREAD in every recipient's bell (a repeat
+   * request must alert again — as one card, never a duplicate).
+   */
+  async refreshAlert(
+    noticeId: string,
+    body: string,
+  ): Promise<{ publishedAt: Date }> {
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.notice.update({
+        where: { id: noticeId },
+        data: { body, publishedAt: new Date() },
+        select: { publishedAt: true },
+      }),
+      this.prisma.noticeRead.deleteMany({ where: { noticeId } }),
+    ]);
+    return updated;
+  }
+
   async findById(id: string, organizationId: string): Promise<NoticeEntity | null> {
     const raw = await this.prisma.notice.findFirst({
       where: { id, organizationId },

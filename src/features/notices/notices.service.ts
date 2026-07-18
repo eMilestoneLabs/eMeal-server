@@ -211,6 +211,44 @@ export class NoticesService {
   }): Promise<void> {
     const audience = params.audience ?? 'admins';
     try {
+      // Live-Test-11 P1 (single-notification rule): collapse a repeat of the
+      // SAME logical alert (same actor + workflow + scope + title) inside the
+      // collapse window into ONE bell card — the existing notice is refreshed
+      // (body + publishedAt) and re-surfaced as unread instead of stacking a
+      // duplicate. Window is config-driven; 0 disables collapsing.
+      const collapseHours = Number(
+        this.config.get<number>('NOTICE_REQUEST_ALERT_COLLAPSE_HOURS', 12),
+      );
+      if (collapseHours > 0) {
+        const existing = await this.repo.findCollapsibleAlert({
+          organizationId: params.organizationId,
+          groupId: params.groupId ?? null,
+          createdBy: params.actorId,
+          linkType: params.linkType ?? null,
+          audience,
+          targetUserId: params.targetUserId ?? null,
+          title: params.title,
+          since: new Date(Date.now() - collapseHours * 60 * 60 * 1000),
+        });
+        if (existing) {
+          const refreshed = await this.repo.refreshAlert(existing.id, params.body);
+          this.realtime?.emitNoticeCreated(
+            params.organizationId,
+            params.groupId ?? null,
+            {
+              organizationId: params.organizationId,
+              groupId: params.groupId ?? null,
+              noticeId: existing.id,
+              title: params.title,
+              priority: params.priority ?? 'high',
+              pinned: false,
+              publishedAt: refreshed.publishedAt.toISOString(),
+              audience,
+            },
+          );
+          return;
+        }
+      }
       const notice = await this.repo.create({
         organizationId: params.organizationId,
         groupId: params.groupId ?? null,

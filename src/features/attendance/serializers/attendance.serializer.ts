@@ -73,6 +73,9 @@ export class AttendanceSerializer {
       markedAt: record.markedAt ? record.markedAt.toISOString() : null,
       markedBy: record.markedBy ?? null,
       price: record.price ?? null,
+      // Live-Test-11 ISSUE-017 (additive): per-record Bill-Absent snapshot so
+      // clients label billed absents exactly like the server engine bills them.
+      billAbsent: record.billAbsent ?? null,
 
       // M-10 fix: mealName always present as flat field
       mealName,
@@ -104,6 +107,8 @@ export class AttendanceSerializer {
       // Module 36 (FR-PG-013): multi-group selection snapshot (null = legacy).
       preferences: record.preferences ?? null,
       price: record.price ?? null,
+      // ISSUE-017 (additive): per-record Bill-Absent snapshot.
+      billAbsent: record.billAbsent ?? null,
       markedAt: record.markedAt ? record.markedAt.toISOString() : null,
       // Module 33 consent trail (additive — FR-TRUST-010 groundwork).
       source: record.source ?? null,
@@ -167,6 +172,8 @@ export class MealAttendanceSummarySerializer {
       snapshotPrice: summary.snapshotPrice ?? null,
       preferenceBreakdown: summary.preferenceBreakdown ?? {},
       preferenceGroupBreakdown: summary.preferenceGroupBreakdown ?? {},
+      // ISSUE-016 (additive): headcount validation source for qty groups.
+      preferenceGroupPickCounts: summary.preferenceGroupPickCounts ?? {},
     };
   }
 

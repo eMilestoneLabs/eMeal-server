@@ -10,8 +10,8 @@ import {
   Matches,
   ValidateNested,
 } from 'class-validator';
-import { Type } from 'class-transformer';
-import { AttendanceWindowDto } from './create-meal.dto';
+import { Transform, Type } from 'class-transformer';
+import { AttendanceWindowDto, normalizeSlotKey } from './create-meal.dto';
 
 /**
  * UpdateMealDto — request body for PATCH /api/v1/meals/:id
@@ -22,6 +22,8 @@ export class UpdateMealDto {
    * Free-form slot key — can be changed post-creation.
    * NEVER an enum. Dynamic rendering architecture requires this to remain string.
    */
+  // ISSUE-015: auto-normalized (trim + whitespace-collapse + lowercase).
+  @Transform(({ value }) => normalizeSlotKey(value))
   @IsOptional()
   @IsString()
   @MaxLength(64)

@@ -63,6 +63,7 @@ reg unidoctor   RO    "UNI race-proof index doctor — names missing UNIQUE inde
 reg system      RO    "System health — CPU, RAM, disk, PM2, docker, logs, TLS, uptime"
 reg recovery    RO    "Auto-recovery configuration audit (verify-auto-recovery.sh)"
 reg security    RO    "Security / pen-test probes — auth, isolation, injection, headers (srs/security.sh)"
+reg policy-contracts RO "Policy & contract probes (LT-11) — Bill-Absent snapshot flags, pick counts, group-scoped alerts; slotKey/dup/veg-only/toggle WRITE probes self-clean behind --writes (srs/policy-contracts.sh)"
 reg srs         RO    "SRS requirement validation — functional+security+performance vs the 664-req manifest (srs/run.sh; read-only unless --writes)"
 reg e2e         WRITE "Full feature end-to-end with SELF-CLEANING test writes (validate-e2e.sh)"
 reg mealcheck   WRITE "MODULE-03 Meal/Attendance/Billing SRS validation, self-cleaning (validate-meal-attendance-billing.sh)"
@@ -206,6 +207,7 @@ run_module() { # $1 = name
     certificate) bash deploy/generate-certificate.sh "${CERT_ARGS[@]+"${CERT_ARGS[@]}"}" 2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     srs)         ( WRITE_TESTS=$WRITES bash deploy/srs/run.sh )  2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     security)    ( cd deploy/srs && bash security.sh )          2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
+    policy-contracts) ( WRITE_TESTS=$WRITES bash deploy/srs/policy-contracts.sh ) 2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     fixtures)    bash deploy/ensure-test-fixtures.sh            2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     db)          mod_db                                         2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     unidoctor)   bash deploy/uni-index-doctor.sh                2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
@@ -288,6 +290,7 @@ FAILED=0
       benchmark)   grep -E '^  rows=' "$REPORT_DIR/$m.log" | tail -1;;
       certificate) grep -E 'Verdict|CERTIFIED' "$REPORT_DIR/$m.log" | tail -1;;
       srs)         grep -iE 'manifest|requirements|coverage|PASS.*FAIL' "$REPORT_DIR/$m.log" | tail -1;;
+      policy-contracts) grep -E 'PASS=|FAIL=' "$REPORT_DIR/$m.log" | tail -1;;
       load)        grep -E 'http_req_duration|checks' "$REPORT_DIR/$m.log" | head -2 | tr '\n' ' ';;
       db)          grep -E 'cache_hit_pct' "$REPORT_DIR/$m.log" | tail -1;;
       system)      grep -E 'unstable=' "$REPORT_DIR/$m.log" | head -1;;

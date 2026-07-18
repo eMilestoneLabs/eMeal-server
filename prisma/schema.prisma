@@ -633,6 +633,12 @@ model AttendanceRecord {
   markedBy String?    // userId of admin who performed manual override (nullable)
   // Additive: ₹ price snapshot at mark time (per-day override or master). Null = pre-pricing record.
   price    Int?
+  // Live-Test-11 ISSUE-017 (survey-locked): Bill-Absent policy SNAPSHOT taken
+  // when the record is written as `absent`. TRUE = the group's independent
+  // Bill Absent Meals toggle was ON, so this absent bills at its price
+  // snapshot. Null/false (incl. every pre-fix record) = absent stays free.
+  // Date-forward by construction: later toggle flips never rewrite this.
+  billAbsent Boolean?
 
   // Module 33 (MIG-010) consent trail — how this record came to exist:
   // self | default | system_default | admin | request | verified
@@ -953,6 +959,10 @@ model MealGuest {
   approvedAt  DateTime?
   cancelledBy String?
   cancelledAt DateTime?
+  // Live-Test-11 ISSUE-002: TRUE only when FR-HG-035 auto-cancelled this guest
+  // because the host flipped away from Present. The host returning to Present
+  // inside the window restores exactly these; manual cancels never come back.
+  autoCancelledWithHost Boolean @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

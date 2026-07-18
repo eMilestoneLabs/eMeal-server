@@ -37,6 +37,7 @@ export class AttendanceRepository {
       markedAt: record.markedAt ?? null,
       markedBy: record.markedBy ?? null,
       price: record.price ?? null,
+      billAbsent: record.billAbsent ?? null,
       source: record.source ?? null,
       sourceRequestId: record.sourceRequestId ?? null,
       createdAt: record.createdAt,
@@ -98,6 +99,9 @@ export class AttendanceRepository {
     markedAt?: Date | null;
     markedBy?: string | null;
     price?: number | null;
+    // Live-Test-11 ISSUE-017: Bill-Absent policy snapshot (absent writes only;
+    // omitted = leave existing value untouched).
+    billAbsent?: boolean | null;
     // Module 33 consent trail — omitted = leave existing / default 'self'.
     source?: string | null;
     sourceRequestId?: string | null;
@@ -139,6 +143,7 @@ export class AttendanceRepository {
         markedAt: data.markedAt ?? new Date(),
         markedBy: data.markedBy ?? null,
         price: data.price ?? null,
+        ...(data.billAbsent !== undefined ? { billAbsent: data.billAbsent } : {}),
         ...(data.source !== undefined ? { source: data.source } : {}),
         ...(data.sourceRequestId !== undefined
           ? { sourceRequestId: data.sourceRequestId }
@@ -157,6 +162,7 @@ export class AttendanceRepository {
         markedAt: data.markedAt ?? new Date(),
         markedBy: data.markedBy ?? null,
         price: data.price ?? null,
+        ...(data.billAbsent !== undefined ? { billAbsent: data.billAbsent } : {}),
         ...(data.source !== undefined ? { source: data.source } : {}),
         ...(data.sourceRequestId !== undefined
           ? { sourceRequestId: data.sourceRequestId }
@@ -185,6 +191,7 @@ export class AttendanceRepository {
     markedAt?: Date | null;
     markedBy?: string | null;
     price?: number | null;
+    billAbsent?: boolean | null;
     source?: string | null;
     sourceRequestId?: string | null;
     preferences?: Array<Record<string, unknown>> | null;
@@ -225,6 +232,9 @@ export class AttendanceRepository {
           markedAt: data.markedAt ?? new Date(),
           markedBy: data.markedBy ?? null,
           price: data.price ?? null,
+          ...(data.billAbsent !== undefined
+            ? { billAbsent: data.billAbsent }
+            : {}),
           ...(data.source !== undefined ? { source: data.source } : {}),
           ...(data.sourceRequestId !== undefined
             ? { sourceRequestId: data.sourceRequestId }
@@ -239,6 +249,9 @@ export class AttendanceRepository {
           markedAt: data.markedAt ?? new Date(),
           markedBy: data.markedBy ?? null,
           price: data.price ?? null,
+          ...(data.billAbsent !== undefined
+            ? { billAbsent: data.billAbsent }
+            : {}),
           ...(data.source !== undefined ? { source: data.source } : {}),
           ...(data.sourceRequestId !== undefined
             ? { sourceRequestId: data.sourceRequestId }
@@ -483,6 +496,7 @@ export class AttendanceRepository {
     snapshotPrice: number | null;
     preferenceBreakdown: Record<string, number>;
     preferenceGroupBreakdown: Record<string, Record<string, number>>;
+    preferenceGroupPickCounts: Record<string, number>;
   }> {
     const [statusGroups, prefGroups, priceGroups, selectionGroups] = await Promise.all([
       this.prisma.attendanceRecord.groupBy({
@@ -525,6 +539,10 @@ export class AttendanceRepository {
           record: { mealId, organizationId, attendanceDate, status: 'present' },
         },
         _sum: { quantity: true },
+        // Live-Test-11 ISSUE-016: pick-row counts ride the same query so the
+        // Kitchen Summary can validate HEADCOUNT (who picked) separately from
+        // the quantity totals it serves ("Ruti ×3" = 1 member, 3 plates).
+        _count: { _all: true },
       }),
     ]);
 
@@ -560,6 +578,10 @@ export class AttendanceRepository {
     // Nested { groupLabel: { optionLabel: totalQuantity } } — empty for groups
     // that only use the legacy flat preference (additive, never breaks old UI).
     const preferenceGroupBreakdown: Record<string, Record<string, number>> = {};
+    // ISSUE-016 (additive): { groupLabel: pickRowCount } — how many member
+    // picks the group received, independent of quantities. The Kitchen
+    // Summary validates THIS against headcount while serving qty totals.
+    const preferenceGroupPickCounts: Record<string, number> = {};
     for (const row of selectionGroups) {
       const qty = row._sum.quantity ?? 0;
       if (qty <= 0) continue;
@@ -567,6 +589,9 @@ export class AttendanceRepository {
       preferenceGroupBreakdown[groupLabel] ??= {};
       preferenceGroupBreakdown[groupLabel][row.optionLabelSnapshot] =
         (preferenceGroupBreakdown[groupLabel][row.optionLabelSnapshot] ?? 0) + qty;
+      preferenceGroupPickCounts[groupLabel] =
+        (preferenceGroupPickCounts[groupLabel] ?? 0) +
+        ((row as any)._count?._all ?? 0);
     }
 
     return {
@@ -576,6 +601,7 @@ export class AttendanceRepository {
       snapshotPrice,
       preferenceBreakdown,
       preferenceGroupBreakdown,
+      preferenceGroupPickCounts,
     };
   }
 
@@ -670,6 +696,8 @@ export class AttendanceRepository {
       slotKey: string;
       status: string;
       price: number | null;
+      // Live-Test-11 ISSUE-017: Bill-Absent policy snapshot (absent rows).
+      billAbsent: boolean | null;
       markedAt: Date | null;
       attendanceDate: Date;
     }>;
@@ -700,6 +728,8 @@ export class AttendanceRepository {
           mealId: true,
           status: true,
           price: true,
+          // ISSUE-017: per-record Bill-Absent snapshot rides the same query.
+          billAbsent: true,
           markedAt: true,
           attendanceDate: true,
           meal: { select: { name: true, displayName: true, slotKey: true } },
@@ -722,6 +752,7 @@ export class AttendanceRepository {
         slotKey: (r.meal as any)?.slotKey ?? 'general',
         status: r.status as string,
         price: r.price ?? null,
+        billAbsent: (r as any).billAbsent ?? null,
         markedAt: r.markedAt ?? null,
         attendanceDate: r.attendanceDate,
       })),

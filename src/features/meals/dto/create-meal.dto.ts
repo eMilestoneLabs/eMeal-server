@@ -12,7 +12,15 @@ import {
   ValidateNested,
   IsIn,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
+
+/**
+ * Live-Test-11 ISSUE-015: canonical slotKey form — trimmed, internal
+ * whitespace collapsed to single spaces, lowercase. "Breakfast", "BREAKFAST"
+ * and " breakfast " all store as "breakfast". Stays free-form (never an enum).
+ */
+export const normalizeSlotKey = (v: unknown): unknown =>
+  typeof v === 'string' ? v.trim().replace(/\s+/g, ' ').toLowerCase() : v;
 
 /**
  * AttendanceWindowDto — nested object for attendanceWindow field.
@@ -62,7 +70,9 @@ export class CreateMealDto {
    * Free-form slot identifier — admin-controlled.
    * Examples: "breakfast", "lunch", "dinner", "iftar", "sehri", "high-tea"
    * NEVER validated against an enum.
+   * ISSUE-015: auto-normalized (trim + whitespace-collapse + lowercase).
    */
+  @Transform(({ value }) => normalizeSlotKey(value))
   @IsString()
   @IsNotEmpty()
   @MaxLength(64)

@@ -22,6 +22,8 @@
  * callers (services, workers) adopt it without constructor changes.
  */
 
+import { resolvePublishedDayEntries } from './published-day.util';
+
 export interface VacationRangeLite {
   groupId: string | null; // null = org-level request (applies to all groups)
   startDate: Date;
@@ -135,13 +137,32 @@ export async function getVacationCoveredUserIds(
   }
   const slotOpens = new Map<string, number | null>();
   if (boundarySlotKeys.size > 0) {
-    const slotMeals: Array<{ slotKey: string; attendanceWindowOpen: string | null }> =
-      await prisma.meal.findMany({
-        where: { groupId, slotKey: { in: [...boundarySlotKeys] } },
-        select: { slotKey: true, attendanceWindowOpen: true },
-      });
+    const slotMeals: Array<{
+      id: string;
+      slotKey: string;
+      attendanceWindowOpen: string | null;
+    }> = await prisma.meal.findMany({
+      where: { groupId, slotKey: { in: [...boundarySlotKeys] } },
+      select: { id: true, slotKey: true, attendanceWindowOpen: true },
+    });
+    // Live-Test-11 ISSUE-005: boundary math must run on the SAME clock the
+    // member sees — the published day's window overrides (single source of
+    // truth, LT-9) win over the master window. Master remains the fallback
+    // for non-planner groups / unscheduled meals; failures keep the master
+    // path (fail-safe direction unchanged).
+    let dayEntries: Map<string, { openTime: string | null }> = new Map();
+    try {
+      dayEntries = (await resolvePublishedDayEntries(prisma as any, {
+        groupId,
+        organizationId,
+        dateStr: dateUtc.toISOString().slice(0, 10),
+      })) as unknown as Map<string, { openTime: string | null }>;
+    } catch {
+      /* master fallback */
+    }
     for (const m of slotMeals) {
-      slotOpens.set(m.slotKey, hhmmToMinutes(m.attendanceWindowOpen));
+      const effOpen = dayEntries.get(m.id)?.openTime ?? m.attendanceWindowOpen;
+      slotOpens.set(m.slotKey, hhmmToMinutes(effOpen));
     }
   }
 
