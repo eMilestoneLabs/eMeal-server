@@ -1451,6 +1451,10 @@ export class AttendanceService {
           guestChildren: 0,
           guestPreferenceBreakdown: {},
           guestPreferenceGroupBreakdown: {},
+          guestPendingApproval: 0,
+          guestCancelled: 0,
+          guestNoShow: 0,
+          guestTotalRequests: 0,
         };
 
     const response = {

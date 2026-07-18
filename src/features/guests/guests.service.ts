@@ -1021,16 +1021,28 @@ export class GuestsService {
     mealId: string,
     dateUtc: Date,
   ) {
-    const rows = await this.prisma.mealGuest.findMany({
+    // Live-Test-10 (Kitchen Summary, additive): fetch ALL guest requests for
+    // the meal/date in the same single query — status + pendingApproval ride
+    // along so the dashboard can show Approved / Awaiting / Cancelled /
+    // No-show administrative rows. Kitchen math (guestCount, preference
+    // aggregation) still uses ONLY approved bookings, exactly as before.
+    const allRows = await this.prisma.mealGuest.findMany({
       where: {
         organizationId,
         mealId,
         attendanceDate: dateUtc,
-        status: 'booked',
-        pendingApproval: false,
       },
-      select: { isAdult: true, mealPreference: true, preferences: true },
+      select: {
+        isAdult: true,
+        mealPreference: true,
+        preferences: true,
+        status: true,
+        pendingApproval: true,
+      },
     });
+    const rows = allRows.filter(
+      (g) => g.status === 'booked' && !g.pendingApproval,
+    );
     const byPreference: Record<string, number> = {};
     // Live-Test-9 ISSUE-4.3: EVERY preference-group selection counts — the
     // flat mealPreference is only the derived primary (FIRST required group's
@@ -1062,6 +1074,15 @@ export class GuestsService {
       // Additive (Live-Test-9 ISSUE-4.2/4.3): per-group guest plate counts —
       // { groupLabel: { optionLabel: totalQuantity } }.
       guestPreferenceGroupBreakdown: byGroup,
+      // Additive (Live-Test-10 Kitchen Summary): administrative guest-request
+      // statuses. Only guestCount (approved) feeds kitchen/billing/attendance
+      // totals — these rows are dashboard visibility only.
+      guestPendingApproval: allRows.filter(
+        (g) => g.status === 'booked' && g.pendingApproval,
+      ).length,
+      guestCancelled: allRows.filter((g) => g.status === 'cancelled').length,
+      guestNoShow: allRows.filter((g) => g.status === 'no_show').length,
+      guestTotalRequests: allRows.length,
     };
   }
 
