@@ -102,6 +102,26 @@ else
   no "postgres container '$PG_CONTAINER' not reachable" "run this on the VPS"
 fi
 
+# ── 1b. Clear vacation state left behind by live vacation testing ────────────
+# Live-Test-9 (audit 7682e5f): Q21 "member can mark ABSENT" failed with 422 —
+# the standing student still carried an active vacation state from the manual
+# vacation live-tests, and the (correct) Live-Test-8 VACATION_ACTIVE guard now
+# blocks ALL marking during vacation. Test accounts must always start each
+# audit vacation-free: flag off + any approved/pending request covering today
+# or later is ended (yesterday) so the coverage util stops matching. Scoped
+# STRICTLY to the named test accounts; real member vacations are untouched.
+if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${PG_CONTAINER}\$" && [ -n "${_IN_LIST:-}" ]; then
+  _VFLAG="$(printf '%s' "UPDATE users SET \"isVacationMode\" = false WHERE lower(email) IN ($_IN_LIST) AND \"isVacationMode\" = true AND \"deletedAt\" IS NULL RETURNING lower(email);" | pgexec)"
+  _NVF="$(printf '%s\n' "$_VFLAG" | grep -c . || true)"
+  _VREQ="$(printf '%s' "UPDATE vacation_requests SET \"endDate\" = date_trunc('day', now() - interval '1 day'), status = CASE WHEN status = 'pending' THEN 'cancelled' ELSE status END WHERE \"userId\" IN (SELECT id FROM users WHERE lower(email) IN ($_IN_LIST)) AND status IN ('approved','pending') AND \"endDate\" >= date_trunc('day', now()) RETURNING id;" | pgexec)"
+  _NVR="$(printf '%s\n' "$_VREQ" | grep -c . || true)"
+  if [ "${_NVF:-0}" -eq 0 ] && [ "${_NVR:-0}" -eq 0 ]; then
+    ok "test accounts vacation-free (marking not blocked)" "nothing to clear"
+  else
+    ok "cleared vacation state on test accounts" "flags=$_NVF requests-ended=$_NVR"
+  fi
+fi
+
 # ── 2. Primary test student must be an ACTIVE member of the admin's group ────
 ADMIN_TOKEN="$(login "${ADMIN_EMAIL:-}" "${ADMIN_PASS:-}")"
 STUDENT_TOKEN="$(login "${STUDENT_EMAIL:-}" "${STUDENT_PASS:-}")"

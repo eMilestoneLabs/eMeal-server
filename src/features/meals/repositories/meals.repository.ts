@@ -146,6 +146,34 @@ export class MealsRepository {
   }
 
   /**
+   * Live-Test-9 ISSUE-002: batch lookup that INCLUDES archived meals.
+   * Used by GET /meals/today to keep rendering meals that were soft-deleted
+   * AFTER the current schedule was published — the frozen snapshot still
+   * carries them, and members keep the last published week fully operational
+   * until the admin republishes. Group + org scoped (tenant isolation).
+   */
+  async findByIdsAnyState(
+    ids: string[],
+    groupId: string,
+    organizationId: string,
+  ): Promise<MealEntity[]> {
+    if (ids.length === 0) return [];
+    const meals = await this.prisma.meal.findMany({
+      where: {
+        id: { in: ids },
+        groupId,
+        organizationId, // CRITICAL: tenant isolation
+      },
+      orderBy: [
+        { attendanceWindowOpen: { sort: 'asc', nulls: 'last' } },
+        { order: 'asc' },
+        { createdAt: 'asc' },
+      ],
+    });
+    return meals.map((m) => this.buildEntity(m));
+  }
+
+  /**
    * SRS Module 03 MMT-001/MMT-014: active meals currently in the group,
    * excluding the implicit general-attendance slot — the cap governs the
    * admin-visible Master Meal Template, not the hidden AO-mode slot.

@@ -124,10 +124,29 @@ describe('Pass 15 — attendance reminder scheduling sweep', () => {
       },
       meal: {
         findMany: jest.fn().mockResolvedValue([
-          { id: 'm1', slotKey: 'lunch', attendanceWindowClose: opts.close },
+          {
+            id: 'm1',
+            slotKey: 'lunch',
+            isActive: true,
+            attendanceWindowClose: opts.close,
+          },
         ]),
       },
-      scheduleEntry: { findMany: jest.fn().mockResolvedValue(opts.entries ?? []) },
+      // Live-Test-9 ISSUE-003: sweeps now read the PUBLISHED-day snapshot via
+      // mealSchedule (published-day.util), not live scheduleEntry rows. The
+      // mocked row carries today's entries in its frozen publishedSnapshot.
+      mealSchedule: {
+        findFirst: jest.fn().mockResolvedValue(
+          (opts.entries ?? []).length > 0
+            ? {
+                publishedSnapshot: (opts.entries ?? []).map((e) => ({
+                  ...e,
+                  date: `${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`,
+                })),
+              }
+            : null,
+        ),
+      },
     };
     const queue: any = {
       scheduleAttendanceReminder: jest.fn().mockResolvedValue('j1'),

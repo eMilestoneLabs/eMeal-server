@@ -41,6 +41,7 @@ import {
   getWindowState,
 } from '../common/utils/date.utils';
 import { getVacationCoveredUserIds } from '../common/utils/vacation-coverage.util';
+import { resolvePublishedDayEntries } from '../common/utils/published-day.util';
 import { GroupsRepository } from '../features/groups/repositories/groups.repository';
 import { RetentionService } from '../features/retention/retention.service';
 
@@ -275,9 +276,14 @@ export class SystemDefaultWorker extends WorkerHost {
     const tz = group.organization?.timezone ?? 'Asia/Kolkata';
     const todayStr = todayInTimezone(tz);
     const nowTime = getCurrentTimeInTimezone(tz);
-    const dateUtc = toUtcMidnight(todayStr);
 
-    const [meals, entries] = await Promise.all([
+    // Live-Test-9 ISSUE-003: day entries come from the shared PUBLISHED-day
+    // resolver (frozen snapshot, publishedAt-gated, recurring-weekday
+    // fallback) — the same source /meals/today renders and marking enforces.
+    // The old live-entry read (isPublished:true, exact date only) went blind
+    // the moment an admin edit reverted the week to draft AND never saw
+    // recurring continuation weeks — reminders silently stopped.
+    const [meals, entryMap] = await Promise.all([
       this.prisma.meal.findMany({
         where: {
           groupId: group.id,
@@ -287,24 +293,18 @@ export class SystemDefaultWorker extends WorkerHost {
         select: {
           id: true,
           slotKey: true,
+          isActive: true,
           attendanceWindowClose: true,
         },
       }),
-      this.prisma.scheduleEntry.findMany({
-        where: {
-          date: dateUtc,
-          schedule: {
-            groupId: group.id,
-            organizationId: group.organizationId,
-            isPublished: true,
-          },
-        },
-        select: { mealId: true, openTime: true, closeTime: true },
+      resolvePublishedDayEntries(this.prisma, {
+        groupId: group.id,
+        organizationId: group.organizationId,
+        dateStr: todayStr,
       }),
     ]);
     if (!meals.length) return;
 
-    const entryMap = new Map(entries.map((e) => [e.mealId, e]));
     const plannerActive =
       group.mealsEnabled !== false &&
       (group.weeklyMenuEnabled === true || group.dayWiseMealsEnabled === true);
@@ -314,6 +314,10 @@ export class SystemDefaultWorker extends WorkerHost {
 
     for (const meal of meals) {
       const entry = entryMap.get(meal.id);
+      // Live-Test-9 ISSUE-002: an archived meal is remindable ONLY while the
+      // published snapshot still carries it (planner mode); in master mode
+      // the archive takes effect immediately.
+      if (meal.isActive === false && !plannerActive) continue;
       // FR-MODE-032: holiday / no-meal day in planner mode → no reminder.
       if (plannerActive && !entry) continue;
 
@@ -698,41 +702,35 @@ export class SystemDefaultWorker extends WorkerHost {
     const dateUtc = toUtcMidnight(todayStr);
     const grace = Math.max(0, group.attendanceGraceMinutes ?? 0);
 
-    const [meals, entries] = await Promise.all([
+    // Live-Test-9 ISSUE-003: day entries via the shared PUBLISHED-day resolver
+    // (frozen snapshot, publishedAt-gated, recurring-weekday fallback) — the
+    // exact set /meals/today renders. The old live-entry read (isPublished:
+    // true, exact date only) skipped every meal while an admin edit held the
+    // week in draft AND on recurring continuation weeks — auto-attendance
+    // "not firing at all". The meal list now includes archived meals: an
+    // archived-but-still-published meal keeps auto-marking until republish
+    // (ISSUE-002), gated below.
+    const [meals, entryMap] = await Promise.all([
       this.prisma.meal.findMany({
         where: {
           groupId: group.id,
           organizationId: group.organizationId,
-          isActive: true,
           attendanceEnabled: true,
         },
         select: {
           id: true,
           name: true,
+          isActive: true,
           preferencesEnabled: true,
           attendanceWindowOpen: true,
           attendanceWindowClose: true,
           price: true,
         },
       }),
-      this.prisma.scheduleEntry.findMany({
-        where: {
-          date: dateUtc,
-          schedule: {
-            groupId: group.id,
-            organizationId: group.organizationId,
-            isPublished: true,
-          },
-        },
-        select: {
-          mealId: true,
-          openTime: true,
-          closeTime: true,
-          price: true,
-          // Live-Test-6 follow-up: a day entry can ENABLE preferences on a
-          // meal whose master flag is off — that day must stay manual too.
-          preferencesEnabled: true,
-        },
+      resolvePublishedDayEntries(this.prisma, {
+        groupId: group.id,
+        organizationId: group.organizationId,
+        dateStr: todayStr,
       }),
     ]);
     if (!meals.length) return;
@@ -747,7 +745,6 @@ export class SystemDefaultWorker extends WorkerHost {
     });
     const hasGroups = new Set(boundGroups.map((b) => b.mealId));
 
-    const entryMap = new Map(entries.map((e) => [e.mealId, e]));
     // mealsEnabled === false already early-returned above, so planner mode is
     // decided by the two planner flags alone here.
     const plannerActive =
@@ -755,6 +752,10 @@ export class SystemDefaultWorker extends WorkerHost {
 
     for (const meal of meals) {
       const entry = entryMap.get(meal.id);
+      // Live-Test-9 ISSUE-002: archived meals stay eligible ONLY while the
+      // published snapshot carries them (planner mode); master-mode archives
+      // take effect immediately.
+      if (meal.isActive === false && !plannerActive) continue;
       // FR-MODE-032: holiday / no-meal day in planner mode → nothing to mark.
       if (plannerActive && !entry) continue;
       // ATT-011: preference-required meals stay manual — auto-attendance
@@ -1003,7 +1004,13 @@ export class SystemDefaultWorker extends WorkerHost {
     const grace = Math.max(0, group.attendanceGraceMinutes ?? 0);
     const floor = group.minOptOutMinutes ?? defaultFloor;
 
-    const [meals, entries] = await Promise.all([
+    // Live-Test-9 ISSUE-003: day entries via the shared PUBLISHED-day resolver
+    // (frozen snapshot, publishedAt-gated, recurring-weekday fallback) — the
+    // exact set /meals/today renders and marking enforces. The old live-entry
+    // read (isPublished:true, exact date only) made the close sweep skip every
+    // planner meal while an admin edit held the week in draft — no system
+    // Skip/Present materialization, so non-responders were never recorded.
+    const [meals, entryMap] = await Promise.all([
       this.prisma.meal.findMany({
         where: {
           groupId: group.id,
@@ -1013,28 +1020,17 @@ export class SystemDefaultWorker extends WorkerHost {
         select: {
           id: true,
           name: true,
+          isActive: true,
           preferencesEnabled: true,
           attendanceWindowOpen: true,
           attendanceWindowClose: true,
           price: true,
         },
       }),
-      this.prisma.scheduleEntry.findMany({
-        where: {
-          date: dateUtc,
-          schedule: {
-            groupId: group.id,
-            organizationId: group.organizationId,
-            isPublished: true,
-          },
-        },
-        select: {
-          mealId: true,
-          openTime: true,
-          closeTime: true,
-          price: true,
-          preferencesEnabled: true,
-        },
+      resolvePublishedDayEntries(this.prisma, {
+        groupId: group.id,
+        organizationId: group.organizationId,
+        dateStr: todayStr,
       }),
     ]);
     if (!meals.length) return;
@@ -1058,7 +1054,6 @@ export class SystemDefaultWorker extends WorkerHost {
       hasGroups = new Set(boundGroups.map((b) => b.mealId));
     }
 
-    const entryMap = new Map(entries.map((e) => [e.mealId, e]));
     // mealsEnabled === false already early-returned above, so planner mode is
     // decided by the two planner flags alone here.
     const plannerActive =
@@ -1066,6 +1061,10 @@ export class SystemDefaultWorker extends WorkerHost {
 
     for (const meal of meals) {
       const entry = entryMap.get(meal.id);
+      // Live-Test-9 ISSUE-002: archived meals stay in the close sweep ONLY
+      // while the published snapshot carries them (planner mode); master-mode
+      // archives take effect immediately (never billed after delete).
+      if (meal.isActive === false && !plannerActive) continue;
       // FR-MODE-032: holiday / no-meal day in planner mode → never auto-bill.
       if (plannerActive && !entry) continue;
 

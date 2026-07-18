@@ -528,62 +528,47 @@ export class MealsService {
           overlay.size > 0
             ? result.data
                 .filter((m: any) => overlay.has(m.id))
-                .map((m: any) => {
-                  const o = overlay.get(m.id)!;
-                  const next: any = { ...m };
-                  if (o.openTime) {
-                    next.attendanceWindow = {
-                      openTime: o.openTime,
-                      closeTime: o.closeTime ?? null,
-                    };
-                  }
-                  if (o.preferencesEnabled !== null) {
-                    next.preferencesEnabled = o.preferencesEnabled;
-                    if (o.enabledPreferences.length > 0) {
-                      next.enabledPreferences = o.enabledPreferences;
-                    }
-                    // #3: per-day control of MULTI-preference groups. When the
-                    // admin turns preferences OFF for this day in the weekly
-                    // planner, hide the meal's master preference groups too (not
-                    // just the flat tags) so members pick nothing that day. The
-                    // master meal config is untouched — this is a per-day
-                    // presentation overlay only (no schema change).
-                    if (o.preferencesEnabled === false) {
-                      next.preferenceGroups = [];
-                    }
-                  }
-                  // #3: per-day SUBSET of master preference groups. A non-empty
-                  // list narrows the meal's groups to just those IDs for this
-                  // day; empty = inherit ALL master groups (unchanged behaviour).
-                  if (
-                    o.enabledPreferenceGroupIds &&
-                    o.enabledPreferenceGroupIds.length > 0 &&
-                    Array.isArray(next.preferenceGroups)
-                  ) {
-                    const allow = new Set(o.enabledPreferenceGroupIds);
-                    next.preferenceGroups = next.preferenceGroups.filter(
-                      (g: any) => allow.has(g.id),
-                    );
-                  }
-                  // Issue 3: per-day menu shown on the meal card + detail screen.
-                  if (o.menuItems && o.menuItems.length > 0) {
-                    next.menuItems = o.menuItems;
-                  }
-                  // Additive: per-day description override (null = inherit master).
-                  if (o.description != null && o.description !== '') {
-                    next.description = o.description;
-                  }
-                  // Additive: per-day image override (null = inherit master image).
-                  if (o.imageUrl != null && o.imageUrl !== '') {
-                    next.imageUrl = o.imageUrl;
-                  }
-                  // Additive: per-day price override (null = inherit master).
-                  if (o.price != null) {
-                    next.price = o.price;
-                  }
-                  return next;
-                })
+                .map((m: any) =>
+                  MealsService.applyDayEntryToMeal(m, overlay.get(m.id)!),
+                )
             : [];
+
+        // Live-Test-9 ISSUE-002: meals ARCHIVED after the schedule was
+        // published are still carried by the frozen snapshot — members keep
+        // the last published week fully operational (visible, markable,
+        // billable) until the admin republishes. The live meal list above
+        // filters archived rows out, so snapshot entries without a live meal
+        // are re-hydrated here. Zero extra queries in the normal case (the
+        // set is empty unless a published meal was just deleted).
+        if (overlay.size > 0) {
+          const liveIds = new Set(result.data.map((m: any) => m.id));
+          const archivedIds = [...overlay.keys()].filter(
+            (id) => !liveIds.has(id),
+          );
+          if (archivedIds.length > 0) {
+            const [archivedMeals, archivedPrefs] = await Promise.all([
+              this.mealsRepo.findByIdsAnyState(
+                archivedIds,
+                groupId,
+                organizationId,
+              ),
+              this.preferencesService.getEffectiveGroupsForMeals(
+                archivedIds,
+                organizationId,
+              ),
+            ]);
+            for (const entity of archivedMeals) {
+              const card: any = MealSerializer.toResponse(entity);
+              card.preferenceGroups = archivedPrefs.get(entity.id) ?? [];
+              // The card represents the PUBLISHED snapshot state, which is
+              // operational until republish — clients must treat it as live.
+              card.isActive = true;
+              overlaid.push(
+                MealsService.applyDayEntryToMeal(card, overlay.get(entity.id)!),
+              );
+            }
+          }
+        }
         // FR-MEAL-007 (ISSUE-18): a per-day window override can move a meal
         // earlier/later than its template slot — re-sort so the list stays
         // chronological by the EFFECTIVE open time shown to the student.
@@ -685,6 +670,67 @@ export class MealsService {
    */
   private static windowOpenMinutes(m: any): number {
     return hhmmToMinutes(m?.attendanceWindow?.openTime);
+  }
+
+  /**
+   * Apply one published day entry onto a serialized meal card (window,
+   * preference narrowing, menu/description/image/price overrides). Extracted
+   * from the getTodayMeals inline overlay (Live-Test-9 ISSUE-002) so live and
+   * archived-but-published meals go through the IDENTICAL mapping.
+   */
+  private static applyDayEntryToMeal(m: any, o: any): any {
+    const next: any = { ...m };
+    if (o.openTime) {
+      next.attendanceWindow = {
+        openTime: o.openTime,
+        closeTime: o.closeTime ?? null,
+      };
+    }
+    if (o.preferencesEnabled !== null) {
+      next.preferencesEnabled = o.preferencesEnabled;
+      if (o.enabledPreferences.length > 0) {
+        next.enabledPreferences = o.enabledPreferences;
+      }
+      // #3: per-day control of MULTI-preference groups. When the
+      // admin turns preferences OFF for this day in the weekly
+      // planner, hide the meal's master preference groups too (not
+      // just the flat tags) so members pick nothing that day. The
+      // master meal config is untouched — this is a per-day
+      // presentation overlay only (no schema change).
+      if (o.preferencesEnabled === false) {
+        next.preferenceGroups = [];
+      }
+    }
+    // #3: per-day SUBSET of master preference groups. A non-empty
+    // list narrows the meal's groups to just those IDs for this
+    // day; empty = inherit ALL master groups (unchanged behaviour).
+    if (
+      o.enabledPreferenceGroupIds &&
+      o.enabledPreferenceGroupIds.length > 0 &&
+      Array.isArray(next.preferenceGroups)
+    ) {
+      const allow = new Set(o.enabledPreferenceGroupIds);
+      next.preferenceGroups = next.preferenceGroups.filter((g: any) =>
+        allow.has(g.id),
+      );
+    }
+    // Issue 3: per-day menu shown on the meal card + detail screen.
+    if (o.menuItems && o.menuItems.length > 0) {
+      next.menuItems = o.menuItems;
+    }
+    // Additive: per-day description override (null = inherit master).
+    if (o.description != null && o.description !== '') {
+      next.description = o.description;
+    }
+    // Additive: per-day image override (null = inherit master image).
+    if (o.imageUrl != null && o.imageUrl !== '') {
+      next.imageUrl = o.imageUrl;
+    }
+    // Additive: per-day price override (null = inherit master).
+    if (o.price != null) {
+      next.price = o.price;
+    }
+    return next;
   }
 
   /**
@@ -952,13 +998,22 @@ export class MealsService {
       organizationId,
     );
 
+    // Live-Test-9 ISSUE-002: every published planner still carrying this meal
+    // auto-flips to DRAFT (snapshot intact — members keep the last published
+    // week until republish). The admin sees the unpublished-changes state
+    // immediately instead of a schedule that silently claims to be published.
+    const revertedSchedules = await this.schedulesRepo.revertPublishedForMeal(
+      id,
+      organizationId,
+    );
+
     this.audit.log({
       organizationId,
       actorId: adminId,
       targetId: id,
       targetType: 'Meal',
       action: 'delete',
-      metadata: { soft: true, purgedDraftEntries },
+      metadata: { soft: true, purgedDraftEntries, revertedSchedules },
       requestId,
     });
 

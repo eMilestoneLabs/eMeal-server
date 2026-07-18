@@ -448,7 +448,7 @@ if [ -n "$Q17_MEAL" ] && [ "$Q17_MEAL" != "null" ]; then
   else
     { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; } \
       && ok "Q21 member can mark ABSENT (deliberate not-eating)" "($R_CODE)" \
-      || no "Q21 Absent mark" "$R_CODE"
+      || no "Q21 Absent mark" "$R_CODE code=$(j '.code // .data.code // empty') $(j '.message // empty' | cut -c1-70)"
     # Q17: Skip is INTERNAL-ONLY. A member-submitted skip must never produce a
     # member-generated Skip row: the server either rejects it (4xx) or — for
     # old APKs whose Skip button still posts it — coerces it to ABSENT (the

@@ -26,6 +26,7 @@ import {
   getCurrentTimeInTimezone,
 } from '../../common/utils/date.utils';
 import { getVacationCoveredUserIds } from '../../common/utils/vacation-coverage.util';
+import { resolvePublishedDayEntries } from '../../common/utils/published-day.util';
 import {
   BookGuestsDto,
   UpdateGuestDto,
@@ -270,7 +271,11 @@ export class GuestsService {
     // Cutoff window for same-day bookings (FR-HG-040/072). Members only —
     // an admin-on-behalf booking still needs host confirmation, which is the
     // stronger control.
-    const effective = await this.resolveEffectiveWindow(meal, dateStr);
+    const effective = await this.resolveEffectiveWindow(
+      meal,
+      dateStr,
+      organizationId,
+    );
     if (dateStr === todayStr && !adminOnBehalf) {
       this.assertBeforeCutoff(group, effective.closeTime, tz);
     }
@@ -624,7 +629,11 @@ export class GuestsService {
     }
     // Members respect the cutoff; admins may fix names/prefs anytime.
     if (!this.isAdmin(callerRole)) {
-      await this.assertGuestWindowOpenForDate(meal, guest.attendanceDate);
+      await this.assertGuestWindowOpenForDate(
+        meal,
+        guest.attendanceDate,
+        organizationId,
+      );
     }
     if (dto.mealPreference !== undefined && dto.mealPreference !== null) {
       const allowed = (meal.group?.enabledPreferences ?? []) as string[];
@@ -742,7 +751,11 @@ export class GuestsService {
     // Hosts respect the cutoff; admins may cancel any time (a cancellation
     // only DECREASES the host's liability — FR-FAIR-001 permits it).
     if (!admin) {
-      await this.assertGuestWindowOpenForDate(meal, guest.attendanceDate);
+      await this.assertGuestWindowOpenForDate(
+        meal,
+        guest.attendanceDate,
+        organizationId,
+      );
     }
 
     const updated = await this.prisma.$transaction(async (tx) => {
@@ -1016,18 +1029,39 @@ export class GuestsService {
         status: 'booked',
         pendingApproval: false,
       },
-      select: { isAdult: true, mealPreference: true },
+      select: { isAdult: true, mealPreference: true, preferences: true },
     });
     const byPreference: Record<string, number> = {};
+    // Live-Test-9 ISSUE-4.3: EVERY preference-group selection counts — the
+    // flat mealPreference is only the derived primary (FIRST required group's
+    // pick), so a guest choosing Roti + Milk used to surface as "Roti" alone.
+    // The immutable booking snapshot (same shape as AttendanceRecord
+    // .preferences) is aggregated per group, mirroring the member-side
+    // preferenceGroupBreakdown exactly.
+    const byGroup: Record<string, Record<string, number>> = {};
     for (const g of rows) {
       const key = g.mealPreference ?? 'unspecified';
       byPreference[key] = (byPreference[key] ?? 0) + 1;
+      const selections = Array.isArray(g.preferences) ? g.preferences : [];
+      for (const s of selections as Array<Record<string, unknown>>) {
+        const groupLabel = typeof s.groupLabel === 'string' ? s.groupLabel : null;
+        const optionLabel =
+          typeof s.optionLabel === 'string' ? s.optionLabel : null;
+        const qty = typeof s.quantity === 'number' ? s.quantity : 1;
+        if (!groupLabel || !optionLabel || qty <= 0) continue;
+        byGroup[groupLabel] ??= {};
+        byGroup[groupLabel][optionLabel] =
+          (byGroup[groupLabel][optionLabel] ?? 0) + qty;
+      }
     }
     return {
       guestCount: rows.length,
       guestAdults: rows.filter((g) => g.isAdult).length,
       guestChildren: rows.filter((g) => !g.isAdult).length,
       guestPreferenceBreakdown: byPreference,
+      // Additive (Live-Test-9 ISSUE-4.2/4.3): per-group guest plate counts —
+      // { groupLabel: { optionLabel: totalQuantity } }.
+      guestPreferenceGroupBreakdown: byGroup,
     };
   }
 
@@ -1110,32 +1144,16 @@ export class GuestsService {
     const plannerOn =
       group?.weeklyMenuEnabled === true || group?.dayWiseMealsEnabled === true;
     if (!plannerOn) return pgGroups;
-    const dateUtc = toUtcMidnight(dateStr);
-    const dow = (dateUtc.getUTCDay() + 6) % 7;
-    const entrySelect = {
-      preferencesEnabled: true,
-      enabledPreferenceGroupIds: true,
-    } as const;
-    // Both lookups are group+org scoped — never another tenant's schedule.
-    let entry = await this.prisma.scheduleEntry.findFirst({
-      where: {
-        mealId,
-        date: dateUtc,
-        schedule: { groupId, organizationId, isPublished: true },
-      },
-      select: entrySelect,
+    // Live-Test-9 ISSUE-003: the PUBLISHED-day resolver (frozen snapshot,
+    // publishedAt-gated) — the same source /meals/today rendered the booking
+    // sheet from, so guest validation can never demand a draft's group set.
+    // Group + org scoped — never another tenant's schedule.
+    const dayEntries = await resolvePublishedDayEntries(this.prisma, {
+      groupId,
+      organizationId,
+      dateStr,
     });
-    if (!entry) {
-      entry = await this.prisma.scheduleEntry.findFirst({
-        where: {
-          mealId,
-          dayOfWeek: dow,
-          schedule: { groupId, organizationId, isPublished: true },
-        },
-        orderBy: { schedule: { weekStart: 'desc' } },
-        select: entrySelect,
-      });
-    }
+    const entry = dayEntries.get(mealId);
     if (!entry) return pgGroups;
     return this.preferences.applyDayOverride(pgGroups, entry);
   }
@@ -1144,20 +1162,23 @@ export class GuestsService {
     meal: {
       id: string;
       groupId: string;
+      organizationId?: string;
       price: number | null;
       attendanceWindowOpen: string | null;
       attendanceWindowClose: string | null;
     },
     dateStr: string,
+    organizationId: string,
   ): Promise<{ closeTime: string | null; price: number | null }> {
-    const entry = await this.prisma.scheduleEntry.findFirst({
-      where: {
-        mealId: meal.id,
-        date: toUtcMidnight(dateStr),
-        schedule: { groupId: meal.groupId, isPublished: true },
-      },
-      select: { openTime: true, closeTime: true, price: true },
+    // Live-Test-9 ISSUE-003: PUBLISHED-day resolver (frozen snapshot,
+    // publishedAt-gated, recurring fallback) — same close/price the member
+    // sees on /meals/today; also now org-scoped like every other read.
+    const dayEntries = await resolvePublishedDayEntries(this.prisma, {
+      groupId: meal.groupId,
+      organizationId,
+      dateStr,
     });
+    const entry = dayEntries.get(meal.id);
     return {
       closeTime: entry?.openTime ? entry.closeTime : meal.attendanceWindowClose,
       price: entry?.price != null ? entry.price : meal.price,
@@ -1206,6 +1227,7 @@ export class GuestsService {
       organization: { timezone: string | null } | null;
     },
     attendanceDate: Date,
+    organizationId: string,
   ): Promise<void> {
     const tz = meal.organization?.timezone ?? 'Asia/Kolkata';
     const dateStr = attendanceDate.toISOString().slice(0, 10);
@@ -1223,7 +1245,11 @@ export class GuestsService {
         423,
       );
     }
-    const effective = await this.resolveEffectiveWindow(meal, dateStr);
+    const effective = await this.resolveEffectiveWindow(
+      meal,
+      dateStr,
+      organizationId,
+    );
     this.assertBeforeCutoff(
       meal.group ?? { guestCutoffMinutesBeforeClose: 0, attendanceGraceMinutes: 0 },
       effective.closeTime,

@@ -51,13 +51,16 @@ export class AttendanceRepository {
           }
         : null,
       user: record.user
-        ? {
+        ? ({
             id: record.user.id,
             name: record.user.name,
             email: record.user.email ?? null,
             phone: record.user.phone ?? null,
             avatarUrl: record.user.avatarUrl ?? null,
-          }
+            // Live-Test-9 ISSUE-4.5 (additive): rides only when the query
+            // selected it — admin roster ordering (Admin/Manager first).
+            role: record.user.role ?? null,
+          } as any)
         : null,
     });
   }
@@ -384,6 +387,9 @@ export class AttendanceRepository {
               email: true,
               phone: true,
               avatarUrl: true,
+              // Live-Test-9 ISSUE-4.5: admin roster ordering — Admin/Manager
+              // rows list first. Additive select; serializer emits userRole.
+              role: true,
             },
           },
         },

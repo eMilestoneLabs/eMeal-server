@@ -57,6 +57,10 @@ export class AttendanceSerializer {
       userName: record.user?.name ?? null,
       userEmail: record.user?.email ?? null,
       userPhone: record.user?.phone ?? null,
+      // Live-Test-9 ISSUE-4.5 (additive): role + mark source so admin rosters
+      // can order Admin/Manager first and auto-marked rows by name.
+      userRole: (record.user as any)?.role ?? null,
+      source: record.source ?? null,
 
       // M-10 fix: Flutter reads json['date'] — YYYY-MM-DD string
       date: toDateString(record.attendanceDate),

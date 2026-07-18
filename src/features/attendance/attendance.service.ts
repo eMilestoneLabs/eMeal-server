@@ -29,6 +29,7 @@ import {
   AttendanceWindowState,
 } from '../../common/utils/date.utils';
 import { getVacationCoveredUserIds } from '../../common/utils/vacation-coverage.util';
+import { resolvePublishedDayEntries } from '../../common/utils/published-day.util';
 import {
   AttendanceSerializer,
   AttendanceSummarySerializer,
@@ -262,34 +263,19 @@ export class AttendanceService {
     preferencesEnabled: boolean | null;
     enabledPreferenceGroupIds: string[];
   }> {
-    const dateUtc = toUtcMidnight(dateStr);
-    const dow = (dateUtc.getUTCDay() + 6) % 7;
-    const entrySelect = {
-      openTime: true,
-      closeTime: true,
-      price: true,
-      preferencesEnabled: true,
-      enabledPreferenceGroupIds: true,
-    } as const;
-    let entry = await this.prisma.scheduleEntry.findFirst({
-      where: {
-        mealId,
-        date: dateUtc,
-        schedule: { groupId, organizationId, isPublished: true },
-      },
-      select: entrySelect,
+    // Live-Test-9 ISSUE-003: resolve through the shared PUBLISHED-day helper
+    // (frozen publishedSnapshot, publishedAt-gated) — the exact same source
+    // /meals/today renders. The previous implementation read LIVE
+    // scheduleEntry rows gated on isPublished:true, so the moment an admin
+    // edit reverted a schedule to draft, enforcement silently fell back to
+    // stale weeks or the master meal config (preference UI demanded on days
+    // the published schedule had disabled it, and vice versa).
+    const dayEntries = await resolvePublishedDayEntries(this.prisma, {
+      groupId,
+      organizationId,
+      dateStr,
     });
-    if (!entry) {
-      entry = await this.prisma.scheduleEntry.findFirst({
-        where: {
-          mealId,
-          dayOfWeek: dow,
-          schedule: { groupId, organizationId, isPublished: true },
-        },
-        orderBy: { schedule: { weekStart: 'desc' } },
-        select: entrySelect,
-      });
-    }
+    const entry = dayEntries.get(mealId) ?? null;
     return {
       openTime: entry?.openTime ? entry.openTime : master.openTime,
       closeTime: entry?.openTime ? entry.closeTime : master.closeTime,
@@ -496,6 +482,18 @@ export class AttendanceService {
         code: 'NO_MEAL_TODAY',
         errors: { mealId: 'This meal is not scheduled for today' },
       });
+    }
+
+    // Live-Test-9 ISSUE-002: an ARCHIVED master meal stays fully markable while
+    // the last PUBLISHED schedule still carries it (members keep the frozen
+    // snapshot until the admin republishes). Outside that case — master mode,
+    // or a planner day the snapshot doesn't schedule — the archive takes
+    // effect immediately, matching what /meals/today shows.
+    if (
+      (meal as any).isActive === false &&
+      !(plannerActive && effective.scheduledToday)
+    ) {
+      throw new NotFoundException('Meal not found');
     }
 
     // Check within attendance window (effective = per-day override or master).
@@ -1447,7 +1445,13 @@ export class AttendanceService {
           query.mealId,
           attendanceDateUtc,
         )
-      : { guestCount: 0, guestAdults: 0, guestChildren: 0, guestPreferenceBreakdown: {} };
+      : {
+          guestCount: 0,
+          guestAdults: 0,
+          guestChildren: 0,
+          guestPreferenceBreakdown: {},
+          guestPreferenceGroupBreakdown: {},
+        };
 
     const response = {
       ...MealAttendanceSummarySerializer.toResponse(summaryEntity),
@@ -1456,6 +1460,18 @@ export class AttendanceService {
       // Pass 15 (FR-ANL-003): expected = active − vacationing (never counts
       // blocked/removed members — the membership status filter handles those).
       expectedParticipants,
+      // Live-Test-9 ISSUE-4.2 (additive): members covered by vacation for this
+      // meal/date, and the LIVE no-response count while the window is open
+      // (expected − responded; the close sweep materializes System Skip, so
+      // this naturally reaches 0 after close).
+      vacationCount: onVacation.size,
+      pendingCount: Math.max(
+        0,
+        expectedParticipants -
+          counts.presentCount -
+          counts.absentCount -
+          counts.skippedCount,
+      ),
       // Pass 15 (FR-ANL-022): freshness stamp — cache HITs keep the original.
       generatedAt: new Date().toISOString(),
     };

@@ -81,7 +81,9 @@ describe('GuestsService (Module 22)', () => {
       attendanceRecord: {
         findFirst: jest.fn().mockResolvedValue({ status: 'present' }),
       },
-      scheduleEntry: { findFirst: jest.fn().mockResolvedValue(null) },
+      // Live-Test-9 ISSUE-003: day resolution reads the published snapshot
+      // (mealSchedule) — no published schedule in these tests.
+      mealSchedule: { findFirst: jest.fn().mockResolvedValue(null) },
       // Pass 11 (FR-VACX-003): slot-aware vacation coverage — no approved
       // dated requests by default, so the isVacationMode flag governs.
       vacationRequest: { findMany: jest.fn().mockResolvedValue([]) },

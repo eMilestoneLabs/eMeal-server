@@ -9,6 +9,10 @@ import {
   ScheduleEntryEntity,
 } from '../entities/meal-schedule.entity';
 import { compareEntriesChronologically } from '../utils/entry-chrono.util';
+import {
+  resolvePublishedDayEntries,
+  PublishedDayEntry,
+} from '../../../common/utils/published-day.util';
 
 /**
  * SchedulesRepository — all DB queries for MealSchedule and ScheduleEntry models.
@@ -308,102 +312,40 @@ export class SchedulesRepository {
     groupId: string,
     organizationId: string,
     dateStr?: string,
-  ): Promise<
-    Map<
-      string,
-      {
-        openTime: string | null;
-        closeTime: string | null;
-        mealName: string | null;
-        description: string | null;
-        imageUrl: string | null;
-        preferencesEnabled: boolean | null;
-        enabledPreferences: string[];
-        enabledPreferenceGroupIds: string[];
-        menuItems: string[];
-        price: number | null;
-      }
-    >
-  > {
-    const overlay = new Map<
-      string,
-      {
-        openTime: string | null;
-        closeTime: string | null;
-        mealName: string | null;
-        description: string | null;
-        imageUrl: string | null;
-        preferencesEnabled: boolean | null;
-        enabledPreferences: string[];
-        enabledPreferenceGroupIds: string[];
-        menuItems: string[];
-        price: number | null;
-      }
-    >();
+  ): Promise<Map<string, PublishedDayEntry>> {
+    // Target calendar date: explicit [dateStr] (ISSUE-004) or today in org tz.
+    // The org lookup is skipped when the caller already supplies the date —
+    // one query less on the guest-sheet path, identical result.
+    let todayStr: string;
+    if (dateStr && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+      todayStr = dateStr;
+    } else {
+      // Resolve org timezone (same source the attendance engine uses).
+      const org = await this.prisma.organization.findUnique({
+        where: { id: organizationId },
+        select: { timezone: true },
+      });
+      const tz = org?.timezone ?? 'Asia/Kolkata';
+      todayStr = new Intl.DateTimeFormat('en-CA', {
+        timeZone: tz,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(new Date());
+    }
 
-    // Resolve org timezone (same source the attendance engine uses).
-    const org = await this.prisma.organization.findUnique({
-      where: { id: organizationId },
-      select: { timezone: true },
-    });
-    const tz = org?.timezone ?? 'Asia/Kolkata';
-
-    // Target calendar date: explicit [dateStr] (ISSUE-004) or today in org
-    // tz -> UTC midnight + dayOfWeek (0=Mon..6=Sun).
-    const todayStr =
-      dateStr && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)
-        ? dateStr
-        : new Intl.DateTimeFormat('en-CA', {
-            timeZone: tz,
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-          }).format(new Date());
-    const [yy, mm, dd] = todayStr.split('-').map(Number);
-    const todayUtc = new Date(Date.UTC(yy, mm - 1, dd));
-    const dow = (todayUtc.getUTCDay() + 6) % 7;
-    const weekStart = new Date(todayUtc.getTime() - dow * 86400000);
-
-    // 1) Exact published week (true date-based / Day-Wise).
-    const weekSchedule = await this.findPublishedForWeek(
+    // Live-Test-9 ISSUE-002/003: the shared published-day resolver is now the
+    // ONLY lookup — the same helper attendance marking, corrections, guests
+    // and the sweeps use, so display and enforcement can never diverge. The
+    // returned entries additionally carry the frozen master-meal snapshot
+    // (`meal`) so /meals/today can keep rendering a meal that was archived
+    // AFTER the schedule was published (ISSUE-002: published week stays fully
+    // operational until republish).
+    return resolvePublishedDayEntries(this.prisma, {
       groupId,
       organizationId,
-      weekStart,
-    );
-    let entries = weekSchedule
-      ? weekSchedule.entries.filter(
-          (e) => e.date.getTime() === todayUtc.getTime(),
-        )
-      : [];
-
-    // 2) Fallback: most recent published schedule matched by weekday (recurring).
-    if (entries.length === 0) {
-      const recent = await this.findByGroup(groupId, organizationId, {
-        page: 1,
-        limit: 1,
-        publishedOnly: true,
-      });
-      const latest = recent.data[0];
-      if (latest) {
-        entries = latest.entries.filter((e) => e.dayOfWeek === dow);
-      }
-    }
-
-    for (const e of entries) {
-      overlay.set(e.mealId, {
-        openTime: e.openTime ?? null,
-        closeTime: e.closeTime ?? null,
-        mealName: e.mealName ?? null,
-        description: e.description ?? null,
-        imageUrl: e.imageUrl ?? null,
-        preferencesEnabled: e.preferencesEnabled ?? null,
-        enabledPreferences: e.enabledPreferences ?? [],
-      enabledPreferenceGroupIds: e.enabledPreferenceGroupIds ?? [],
-        menuItems: e.menuItems ?? [],
-        price: e.price ?? null,
-      });
-    }
-    return overlay;
+      dateStr: todayStr,
+    });
   }
 
   async create(data: {
@@ -612,6 +554,30 @@ export class SchedulesRepository {
         mealId,
         schedule: { organizationId, isPublished: false },
       },
+    });
+    return result.count;
+  }
+
+  /**
+   * Live-Test-9 ISSUE-002: deleting a master meal flips every PUBLISHED
+   * schedule that still carries it into DRAFT (isPublished=false) — the admin
+   * planner immediately shows "unpublished changes" minus the deleted meal
+   * (buildScheduleEntity's read-time archive filter), while publishedAt +
+   * publishedSnapshot stay INTACT so members keep the last published week
+   * fully operational until the admin republishes. The publish self-heal then
+   * physically drops the stale entries and freezes the new snapshot.
+   */
+  async revertPublishedForMeal(
+    mealId: string,
+    organizationId: string,
+  ): Promise<number> {
+    const result = await this.prisma.mealSchedule.updateMany({
+      where: {
+        organizationId,
+        isPublished: true,
+        entries: { some: { mealId } },
+      },
+      data: { isPublished: false },
     });
     return result.count;
   }

@@ -75,7 +75,7 @@ describe('BillingService adjustments (Pass 12)', () => {
     // REF-001: the refund cap runs inside an interactive transaction under a
     // per-member advisory lock — the tx client reuses the same mocks.
     prisma.$transaction = jest.fn(async (fn: any) =>
-      fn({ ...prisma, $queryRaw: jest.fn().mockResolvedValue([]) }),
+      fn({ ...prisma, $executeRaw: jest.fn().mockResolvedValue(1) }),
     );
     audit = { log: jest.fn() };
     redis = { get: jest.fn().mockResolvedValue(null), set: jest.fn() };

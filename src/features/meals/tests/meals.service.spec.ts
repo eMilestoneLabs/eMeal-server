@@ -26,6 +26,7 @@ describe('MealsService', () => {
   let service: MealsService;
   let mealsRepo: jest.Mocked<MealsRepository>;
   let groupsRepo: jest.Mocked<GroupsRepository>;
+  let schedulesRepo: jest.Mocked<SchedulesRepository>;
   let auditService: jest.Mocked<AuditService>;
 
   const mockGroup = new GroupEntity({
@@ -113,6 +114,9 @@ describe('MealsService', () => {
             findTodayOverlay: jest.fn().mockResolvedValue(new Map()),
             // MMT-011: delete-time draft purge (no drafts in unit tests).
             deleteDraftEntriesForMeal: jest.fn().mockResolvedValue(0),
+            // Live-Test-9 ISSUE-002: published planners carrying a deleted
+            // meal auto-flip to draft (snapshot intact until republish).
+            revertPublishedForMeal: jest.fn().mockResolvedValue(0),
             deleteEntriesByIds: jest.fn().mockResolvedValue(0),
           },
         },
@@ -143,6 +147,7 @@ describe('MealsService', () => {
     service = module.get<MealsService>(MealsService);
     mealsRepo = module.get(MealsRepository);
     groupsRepo = module.get(GroupsRepository);
+    schedulesRepo = module.get(SchedulesRepository);
     auditService = module.get(AuditService);
   });
 
@@ -334,6 +339,17 @@ describe('MealsService', () => {
 
       expect(mealsRepo.softDelete).toHaveBeenCalledWith('meal_01', 'org_01');
       expect(result).toHaveProperty('message', 'Meal archived successfully');
+      // Live-Test-9 ISSUE-002: draft entries purged AND published planners
+      // carrying the meal reverted to draft — members keep the frozen
+      // published snapshot until the admin republishes.
+      expect(schedulesRepo.deleteDraftEntriesForMeal).toHaveBeenCalledWith(
+        'meal_01',
+        'org_01',
+      );
+      expect(schedulesRepo.revertPublishedForMeal).toHaveBeenCalledWith(
+        'meal_01',
+        'org_01',
+      );
     });
   });
 

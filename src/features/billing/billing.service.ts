@@ -453,7 +453,9 @@ export class BillingService {
     if (dto.type === 'refund') {
       const requestedRupees = Math.round(dto.amount / 100);
       entry = await (this.prisma as any).$transaction(async (tx: any) => {
-        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`bill:${dto.groupId}:${dto.userId}`}))`;
+        // $executeRaw (not $queryRaw): pg_advisory_xact_lock returns SQL type
+        // `void`, which Prisma cannot deserialize as a result row.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`bill:${dto.groupId}:${dto.userId}`}))`;
         const net = await this.computeMemberNetBalance(
           tx,
           organizationId,

@@ -108,7 +108,9 @@ describe('AttendanceService', () => {
             },
             // Planner per-day window overlay — null = no override (master
             // meal window applies), matching groups without a published plan.
-            scheduleEntry: {
+            // Live-Test-9 ISSUE-003: resolved via the published snapshot
+            // (mealSchedule) — no published schedule in these tests.
+            mealSchedule: {
               findFirst: jest.fn().mockResolvedValue(null),
             },
             // Approved-vacation exclusion in summaries — none by default.
