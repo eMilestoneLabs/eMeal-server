@@ -59,9 +59,21 @@ grade_row() { # $1 category  $2 grade  $3 value-text ; grade FAIL bumps FAILS, B
 echo "══ eMeal PRODUCTION CERTIFICATION RUN — $STAMP (UTC) ══"
 
 # ── 1. SPEED — full admin+student endpoint battery ───────────────────────────
-echo "── [1/7] Endpoint speed battery (benchmark-full.sh) ──"
-bash deploy/benchmark-full.sh >"$BENCH_LOG" 2>&1
-BENCH_EXIT=$?
+# RUN-ONCE DEDUP: under the master audit the `benchmark` module already ran
+# this exact battery moments earlier — grade from ITS log instead of hitting
+# every endpoint (and the login budget) a second time. Standalone runs (or a
+# certificate-only selection) still measure for themselves.
+if [ "${AUDIT_DEDUP:-0}" = "1" ] \
+   && case " ${AUDIT_MODULES:-} " in *" benchmark "*) true;; *) false;; esac \
+   && [ -s "${AUDIT_REPORT_DIR:-/nonexistent}/benchmark.log" ]; then
+  echo "── [1/7] Endpoint speed battery — reusing this session's benchmark log (run-once dedup) ──"
+  cp "${AUDIT_REPORT_DIR}/benchmark.log" "$BENCH_LOG"
+  BENCH_EXIT=0   # module-level failure would have surfaced in the benchmark verdict; grading below re-parses the rows line
+else
+  echo "── [1/7] Endpoint speed battery (benchmark-full.sh) ──"
+  bash deploy/benchmark-full.sh >"$BENCH_LOG" 2>&1
+  BENCH_EXIT=$?
+fi
 ROWS_LINE=$(grep -E '^  rows=' "$BENCH_LOG" || echo "rows=? non-2xx(CHECK!)=? slo-breaches(SLOW)=?")
 CHECKS=$(echo "$ROWS_LINE" | grep -oE 'CHECK!\)=[0-9]+' | grep -oE '[0-9]+' || echo 99)
 SLOWS=$(echo "$ROWS_LINE"  | grep -oE 'SLOW\)=[0-9]+'   | grep -oE '[0-9]+' || echo 99)

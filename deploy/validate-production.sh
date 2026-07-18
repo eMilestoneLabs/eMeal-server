@@ -115,16 +115,25 @@ if [ -n "${ADMIN2_EMAIL:-}" ]; then
   check "B3 secondary admin login" $([ "$R_CODE" = "200" ] && [ -n "$A2T" ] && [ "$A2T" != "null" ] && echo 0 || echo 1) "code=$R_CODE ${R_MS}ms"
 fi
 
-# case-insensitive login (deployed fix)
-UPPER_EMAIL=$(echo "$ADMIN_EMAIL" | tr '[:lower:]' '[:upper:]')
-req POST /auth/login - "{\"identifier\":\"$UPPER_EMAIL\",\"password\":\"$ADMIN_PASS\"}" admin-login-upper
-check "B4 case-insensitive login" $([ "$R_CODE" = "200" ] && echo 0 || echo 1) "code=$R_CODE (UPPERCASE identifier)"
+# Login negatives (case-insensitive / wrong password / no-token): under the
+# master audit these exact probes run once in the srs module (FR-AUTH tags) —
+# repeating them here also burned the shared 10/min login budget. Standalone
+# runs keep them (this script must stand alone as the production gate).
+_amods=" ${AUDIT_MODULES:-} "
+if [ "${AUDIT_DEDUP:-0}" = "1" ] && case "$_amods" in *" srs "*) true;; *) false;; esac; then
+  log "  ·  B4-B6 login negatives asserted once by the srs module this session (run-once dedup)"
+else
+  # case-insensitive login (deployed fix)
+  UPPER_EMAIL=$(echo "$ADMIN_EMAIL" | tr '[:lower:]' '[:upper:]')
+  req POST /auth/login - "{\"identifier\":\"$UPPER_EMAIL\",\"password\":\"$ADMIN_PASS\"}" admin-login-upper
+  check "B4 case-insensitive login" $([ "$R_CODE" = "200" ] && echo 0 || echo 1) "code=$R_CODE (UPPERCASE identifier)"
 
-req POST /auth/login - "{\"identifier\":\"$ADMIN_EMAIL\",\"password\":\"definitely-wrong-Pass1!\"}" bad-pass
-check "B5 wrong password rejected" $([ "$R_CODE" = "401" ] || [ "$R_CODE" = "422" ] && echo 0 || echo 1) "code=$R_CODE"
+  req POST /auth/login - "{\"identifier\":\"$ADMIN_EMAIL\",\"password\":\"definitely-wrong-Pass1!\"}" bad-pass
+  check "B5 wrong password rejected" $([ "$R_CODE" = "401" ] || [ "$R_CODE" = "422" ] && echo 0 || echo 1) "code=$R_CODE"
 
-req GET /dashboard/admin - - no-token
-check "B6 no-token rejected 401" $([ "$R_CODE" = "401" ] && echo 0 || echo 1) "code=$R_CODE ${R_MS}ms"
+  req GET /dashboard/admin - - no-token
+  check "B6 no-token rejected 401" $([ "$R_CODE" = "401" ] && echo 0 || echo 1) "code=$R_CODE ${R_MS}ms"
+fi
 
 # refresh rotation (mechanics behind "stay signed in ≥1 open per 7 days")
 req POST /auth/refresh - "{\"refreshToken\":\"$ART\"}" refresh1
@@ -141,8 +150,7 @@ check "B9 /auth/me with original access token still valid" $([ "$R_CODE" = "200"
 # re-login lifecycle already ran in the srs module's write-lifecycle section
 # this session — repeating it here would be the 2nd disposable signup of the
 # same audit. Standalone runs keep it (this script must stand alone as the
-# production gate).
-_amods=" ${AUDIT_MODULES:-} "
+# production gate). (_amods is set once in section B above.)
 if [ "${AUDIT_DEDUP:-0}" = "1" ] && [ "${AUDIT_WRITES:-0}" = "1" ] && case "$_amods" in *" srs "*) true;; *) false;; esac; then
   hdr "C. SIGNUP + ACCOUNT DELETION E2E — deduplicated"
   log "  ·  lifecycle ran once this session in the srs module (write lifecycle) — see srs.log"

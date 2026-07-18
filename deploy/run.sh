@@ -254,6 +254,9 @@ export AUDIT_WRITES="$WRITES"
 # Shared traceability sink: security + srs append to ONE requirements.tsv, so
 # the srs certificate reconciles security's FR-SECX tags without re-running.
 export RESULTS_DIR="/tmp/emeal-srs-$TS"
+# Session log dir for evidence reuse (e.g. certificate grades from the
+# benchmark module's log instead of re-running the whole endpoint battery).
+export AUDIT_REPORT_DIR="$REPORT_DIR"
 
 FIRST=1
 for m in "${SELECTED[@]}"; do
