@@ -48,22 +48,26 @@ export class CreateNoticeDto {
 
   /**
    * SRS Module 03 NTC-012: at most ONE image as a base64 data URI
-   * (JPG/JPEG/PNG/WEBP). The client auto-compresses; the server enforces the
-   * hard ≤100 KB decoded limit and stores a MinIO URL — never base64.
-   * ~140 KB base64 ceiling guards the transport (100 KB × 4/3 + headroom).
+   * (JPG/JPEG/PNG/WEBP). The client auto-compresses; ISSUE-001 (Live-Test-10):
+   * an oversized image is auto-compressed server-side to the ≤100 KB stored
+   * limit, so the transport ceiling admits up to ~2 MB decoded
+   * (2 MB × 4/3 + data-URI header headroom, still well under the 5 MB body
+   * cap). Stored as a MinIO URL — never base64.
    */
   @IsOptional()
   @IsString()
-  @MaxLength(160_000)
+  @MaxLength(2_900_000)
   imageData?: string;
 
   /**
    * SRS Module 03 NTC-013: at most ONE document as a base64 data URI
-   * (PDF/DOC/DOCX/TXT), decoded ≤50 KB. Stored as a MinIO URL.
+   * (PDF/DOC/DOCX/TXT), stored ≤50 KB. ISSUE-001: an oversized PDF gets
+   * best-effort server-side re-compression, so the transport ceiling admits
+   * up to ~1 MB decoded. Stored as a MinIO URL.
    */
   @IsOptional()
   @IsString()
-  @MaxLength(80_000)
+  @MaxLength(1_450_000)
   documentData?: string;
 
   /** Original filename shown to readers (extension decides the type). */

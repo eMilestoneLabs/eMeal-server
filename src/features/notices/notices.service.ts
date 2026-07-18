@@ -18,6 +18,10 @@ import { QueryNoticeDto } from './dto/query-notice.dto';
 import { NotificationsService } from '../notifications/notifications.service';
 import type { RealtimeEventsService } from '../../realtime/services/realtime-events.service';
 import { ConfigService } from '@nestjs/config';
+import {
+  compressImageToLimit,
+  compressPdfToLimit,
+} from './attachment-compression.util';
 
 /**
  * NoticesService — Phase B: in-app notice board + bell center (no FCM).
@@ -75,14 +79,16 @@ export class NoticesService {
   };
 
   /**
-   * NTC-012: validate the (client-compressed) image — JPG/JPEG/PNG/WEBP,
-   * decoded ≤100 KB — with the exact SRS rejection message.
+   * NTC-012: validate the (client-compressed) image — JPG/JPEG/PNG/WEBP.
+   * ISSUE-001 (Live-Test-10): an oversized image is AUTO-COMPRESSED server-side
+   * (sharp ladder) to fit the configured limit; rejection with the exact SRS
+   * message happens ONLY when even auto-compression cannot reach it.
    */
-  private validateImageAttachment(data: string): {
+  private async validateImageAttachment(data: string): Promise<{
     buffer: Buffer;
     mimeType: string;
     ext: string;
-  } {
+  }> {
     const decoded = NoticesService.decodeDataUri(data);
     const ext = decoded && NoticesService.IMAGE_TYPES[decoded.mimeType];
     if (!decoded || !ext) {
@@ -94,6 +100,13 @@ export class NoticesService {
     const maxBytes =
       this.config.get<number>('NOTICE_IMAGE_MAX_KB', 100) * 1024;
     if (decoded.buffer.length > maxBytes) {
+      const compressed = await compressImageToLimit(decoded.buffer, maxBytes);
+      if (compressed) {
+        this.logger.log(
+          `notice image auto-compressed ${decoded.buffer.length}B → ${compressed.buffer.length}B`,
+        );
+        return compressed;
+      }
       throw new BadRequestException({
         message:
           'Unable to upload image. Please select an image smaller than 100 KB.',
@@ -103,12 +116,18 @@ export class NoticesService {
     return { ...decoded, ext };
   }
 
-  /** NTC-013: validate the document — PDF/DOC/DOCX/TXT, decoded ≤50 KB. */
-  private validateDocumentAttachment(data: string): {
+  /**
+   * NTC-013: validate the document — PDF/DOC/DOCX/TXT.
+   * ISSUE-001 (Live-Test-10): an oversized PDF gets a best-effort structural
+   * re-compression (pdf-lib) before the size gate; DOC/DOCX/TXT cannot be
+   * recompressed losslessly, so they keep the strict limit. Rejection uses the
+   * exact SRS message only when auto-compression cannot fit the limit.
+   */
+  private async validateDocumentAttachment(data: string): Promise<{
     buffer: Buffer;
     mimeType: string;
     ext: string;
-  } {
+  }> {
     const decoded = NoticesService.decodeDataUri(data);
     const ext = decoded && NoticesService.DOC_TYPES[decoded.mimeType];
     if (!decoded || !ext) {
@@ -119,6 +138,15 @@ export class NoticesService {
     }
     const maxBytes = this.config.get<number>('NOTICE_DOC_MAX_KB', 50) * 1024;
     if (decoded.buffer.length > maxBytes) {
+      if (ext === 'pdf') {
+        const compressed = await compressPdfToLimit(decoded.buffer, maxBytes);
+        if (compressed) {
+          this.logger.log(
+            `notice pdf auto-compressed ${decoded.buffer.length}B → ${compressed.length}B`,
+          );
+          return { buffer: compressed, mimeType: decoded.mimeType, ext };
+        }
+      }
       throw new BadRequestException({
         message:
           'Unable to upload document. Please select a document smaller than 50 KB.',
@@ -244,13 +272,14 @@ export class NoticesService {
     dto: CreateNoticeDto,
     requestId?: string,
   ) {
-    // SRS Module 03 NTC-012/013: validate attachments BEFORE any write so a
-    // rejected file never leaves a half-created notice behind.
+    // SRS Module 03 NTC-012/013: validate (and, when oversized, auto-compress
+    // — ISSUE-001) attachments BEFORE any write so a rejected file never
+    // leaves a half-created notice behind.
     const image = dto.imageData
-      ? this.validateImageAttachment(dto.imageData)
+      ? await this.validateImageAttachment(dto.imageData)
       : null;
     const doc = dto.documentData
-      ? this.validateDocumentAttachment(dto.documentData)
+      ? await this.validateDocumentAttachment(dto.documentData)
       : null;
     if ((image || doc) && !this.storage) {
       throw new BadRequestException({

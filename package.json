@@ -52,6 +52,7 @@
     "nodemailer": "^9.0.1",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
+    "pdf-lib": "^1.17.1",
     "pdfkit": "^0.19.1",
     "pino": "^8.19.0",
     "pino-http": "^9.0.0",
