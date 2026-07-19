@@ -56,6 +56,13 @@ module.exports = {
         NODE_ENV: 'production',
         PORT: 3000,
         QUEUE_ROLE: 'web',       // HTTP tier — job processing lives in emeal-worker
+        // Perf (2026-07-19, log-pipe backpressure): app logs only errors +
+        // slow (>500ms) requests; routine 2xx lines live in nginx's access
+        // log. Kills the stdout→PM2-daemon→promtail→loki flood that blocked
+        // worker event loops under request bursts (see logging.interceptor).
+        // Revert instantly with HTTP_LOG_MODE: 'all'.
+        HTTP_LOG_MODE: 'slow',
+        HTTP_LOG_SLOW_MS: 500,
 
         // Database (override via .env — these are fallback reference values)
         // DATABASE_URL: 'postgresql://user:pass@localhost:5432/emeal_prod',
