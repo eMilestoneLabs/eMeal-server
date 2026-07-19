@@ -31,7 +31,11 @@ export function todayMealsCacheKey(
 }
 
 export function todayMealsCacheTtlSeconds(): number {
-  const raw = parseInt(process.env.MEALS_TODAY_CACHE_TTL_SECONDS ?? '45', 10);
+  // Perf (2026-07-19): 45→120s. All 16 mutation sites invalidate explicitly
+  // (meals/schedules/preferences/meal-config) and the group gate is live per
+  // request, so the TTL is a missed-invalidation safety net — the longer
+  // window nearly triples the hit rate at identical freshness.
+  const raw = parseInt(process.env.MEALS_TODAY_CACHE_TTL_SECONDS ?? '120', 10);
   return Number.isFinite(raw) && raw > 0 ? raw : 0;
 }
 

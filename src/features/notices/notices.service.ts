@@ -64,8 +64,13 @@ export class NoticesService {
   // The member-gate ALWAYS runs live even on cache hits: a removed/blocked
   // member loses access instantly, cache or no cache.
 
+  // Perf (2026-07-19): 45→180s. All 8 mutation paths invalidate explicitly
+  // and the member gate is live on every hit, so the TTL is purely a missed-
+  // invalidation safety net — a longer window means the expensive feed build
+  // (first-hit 440ms observed post-restart vs ~10ms warm) runs 4× less often
+  // at identical freshness.
   private static cacheTtlSeconds(): number {
-    return parseInt(process.env.NOTICE_CACHE_TTL_SECONDS ?? '45', 10);
+    return parseInt(process.env.NOTICE_CACHE_TTL_SECONDS ?? '180', 10);
   }
 
   private feedCacheKey(

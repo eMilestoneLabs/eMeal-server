@@ -54,8 +54,12 @@ export default registerAs('attendance', () => ({
   // Pass 12 (FR-BILLX-050): billing-summary read-cache TTL. Correctness is
   // version-guarded (any billing write orphans the cache instantly); the TTL
   // only bounds Redis memory for orphaned keys. 0 disables the read cache.
+  // Perf (2026-07-19): 60→300s. Coherence comes from the version key, NOT
+  // the TTL — a longer TTL cannot serve stale figures, it only means fewer
+  // cold recomputes (benchmark evidence: billing-summary first-hit 247ms vs
+  // 22ms warm; every hit within the TTL window is the 22ms path).
   billingSummaryCacheTtlSeconds: parseInt(
-    process.env.BILLING_SUMMARY_CACHE_TTL_SECONDS ?? '60',
+    process.env.BILLING_SUMMARY_CACHE_TTL_SECONDS ?? '300',
     10,
   ),
   // Pass 15 (FR-NOTX-010): weekly attendance summary digest. The sweep runs

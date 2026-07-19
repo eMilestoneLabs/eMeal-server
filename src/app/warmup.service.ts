@@ -6,6 +6,8 @@ import { OverviewService } from '../features/overview/overview.service';
 import { DashboardService } from '../features/dashboard/services/dashboard.service';
 import { NoticesService } from '../features/notices/notices.service';
 import { UsersService } from '../features/users/users.service';
+import { AttendanceService } from '../features/attendance/attendance.service';
+import { MealsService } from '../features/meals/meals.service';
 
 /**
  * Boot warmup — kills the post-reload cold-start latency spike.
@@ -33,7 +35,10 @@ import { UsersService } from '../features/users/users.service';
  * Fire-and-forget: warmup must never delay or block startup, and a failure
  * (e.g. DB briefly unavailable during boot, or an empty fresh install with no
  * accounts yet) is logged and ignored — the health check governs readiness,
- * not this. Strictly read-only: no writes, no audit rows, no notifications.
+ * not this. Read-path only: no direct writes, no audit rows, no
+ * notifications. (The warmed endpoints' own read-triggered self-healing —
+ * vacation-flag sync in getMe, general-slot ensure in meals/today — may fire
+ * exactly as it would on the user's first real request; that is the point.)
  *
  * WARMUP_ON_BOOT=0 disables (default on).
  */
@@ -122,10 +127,32 @@ export class WarmupService implements OnApplicationBootstrap {
       }
     };
 
+    // Perf (2026-07-19): the 15:05 post-restart benchmark showed the exact
+    // endpoints deep warmup did NOT cover paying 150-440ms first-hits
+    // (billing-summary 247, notices 440, meals admin 177) while every warmed
+    // path sat in golden band. Warm the group-scoped hot reads too — this
+    // also PRE-FILLS the SHARED Redis caches (billing version-keyed, notices
+    // per-user, meals/today bundle), so one worker's warmup benefits all.
+    const [adminGroup, studentGroup] = await Promise.all([
+      admin?.organizationId
+        ? this.prisma.group.findFirst({
+            where: { organizationId: admin.organizationId, isActive: true },
+            select: { id: true },
+          })
+        : Promise.resolve(null),
+      student?.id
+        ? this.prisma.groupMember.findFirst({
+            where: { userId: student.id, status: 'active' },
+            select: { groupId: true },
+          })
+        : Promise.resolve(null),
+    ]);
+
     if (admin?.organizationId) {
       const overview = resolve(OverviewService);
       const dashboard = resolve(DashboardService);
       const notices = resolve(NoticesService);
+      const attendance = resolve(AttendanceService);
       if (overview) {
         // One call warms the whole admin surface: groups list, per-group
         // meals/today, attendance history and per-meal summaries.
@@ -145,12 +172,32 @@ export class WarmupService implements OnApplicationBootstrap {
             limit: 20,
           } as never),
         );
+        tasks.push(
+          notices.getUnreadCount(admin.id, admin.role, admin.organizationId),
+        );
+      }
+      if (attendance && adminGroup) {
+        // Billing summary fans out to attendance rows + guest charges +
+        // ledger + opening balances — the heaviest admin read; series rides
+        // the same version-keyed cache family.
+        tasks.push(
+          attendance.getBillingSummary(admin.organizationId, {
+            groupId: adminGroup.id,
+          } as never),
+        );
+        tasks.push(
+          attendance.getBillingSeries(admin.organizationId, {
+            groupId: adminGroup.id,
+          } as never),
+        );
       }
     }
 
     if (student?.organizationId) {
       const dashboard = resolve(DashboardService);
       const users = resolve(UsersService);
+      const notices = resolve(NoticesService);
+      const meals = resolve(MealsService);
       if (dashboard) {
         tasks.push(
           dashboard.getStudentDashboard(
@@ -161,6 +208,34 @@ export class WarmupService implements OnApplicationBootstrap {
         );
       }
       if (users) tasks.push(users.getMe(student.id));
+      if (notices) {
+        tasks.push(
+          notices.listNotices(student.id, student.role, student.organizationId, {
+            page: 1,
+            limit: 20,
+          } as never),
+        );
+        tasks.push(
+          notices.getUnreadCount(
+            student.id,
+            student.role,
+            student.organizationId,
+            studentGroup?.groupId,
+          ),
+        );
+      }
+      if (meals && studentGroup) {
+        // Warms the shared meals/today bundle cache + the 3-level bindings
+        // query shape on this worker.
+        tasks.push(
+          meals.getTodayMeals(
+            student.id,
+            student.role,
+            student.organizationId,
+            studentGroup.groupId,
+          ),
+        );
+      }
     }
 
     if (tasks.length === 0) return 0; // fresh install — nothing to warm yet
