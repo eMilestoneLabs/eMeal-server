@@ -18,6 +18,8 @@ import { UpdateScheduleDto, CloneScheduleDto } from './dto/update-schedule.dto';
 import type { RealtimeEventsService } from '../../realtime/services/realtime-events.service';
 import { QuerySchedulesDto } from './dto/query-meals.dto';
 import { PaginatedResponseDto } from '../../common/dto/paginated-response.dto';
+import { RedisService } from '../../redis/redis.service';
+import { invalidateTodayMealsCache } from './utils/today-meals-cache.util';
 
 /**
  * Compute day of week (0=Monday...6=Sunday) from a Date object.
@@ -70,7 +72,21 @@ export class SchedulesService {
     private readonly audit: AuditService,
     @Optional() @Inject('REALTIME_GATEWAY')
     private readonly realtime: RealtimeEventsService | null = null,
+    // Perf (2026-07-19): GET /meals/today bundle cache — schedule mutations
+    // change the planner overlay students see, so they must drop it.
+    // @Optional keeps unit tests constructing the service unchanged.
+    @Optional()
+    @Inject(RedisService)
+    private readonly redis: RedisService | null = null,
   ) {}
+
+  /** Drop the group's cached today-bundles (fail-soft; org-wide if no group). */
+  private async invalidateTodayCache(
+    organizationId: string,
+    groupId?: string,
+  ): Promise<void> {
+    await invalidateTodayMealsCache(this.redis, organizationId, groupId);
+  }
 
   // ── CREATE ────────────────────────────────────────────────────────────────
 
@@ -283,6 +299,14 @@ export class SchedulesService {
       requestId,
     });
 
+    // Perf (2026-07-19): edits can land on a published week (auto-draft flows
+    // still snapshot-read, but per-day published edits exist) — drop the
+    // group's today-bundle so students never see a stale overlay.
+    await this.invalidateTodayCache(
+      organizationId,
+      (updated as any)?.groupId ?? (existing as any)?.groupId,
+    );
+
     return ScheduleSerializer.toResponse(updated);
   }
 
@@ -391,6 +415,13 @@ export class SchedulesService {
       isPublished: true,
     });
 
+    // Perf (2026-07-19): publish replaces the snapshot the today overlay
+    // reads — drop the group's cached today-bundle.
+    await this.invalidateTodayCache(
+      organizationId,
+      (schedule as any)?.groupId,
+    );
+
     return ScheduleSerializer.toResponse(schedule);
   }
 
@@ -436,6 +467,12 @@ export class SchedulesService {
       weekStart: schedule.weekStart.toISOString(),
       isPublished: false,
     });
+
+    // Perf (2026-07-19): hide=true unpublishes the week students see.
+    await this.invalidateTodayCache(
+      organizationId,
+      (schedule as any)?.groupId,
+    );
 
     return ScheduleSerializer.toResponse(schedule);
   }

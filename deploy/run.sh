@@ -251,9 +251,13 @@ declare -A NEEDS_COLD=( [security]=1 [srs]=1 [e2e]=1 [mealcheck]=1 [production]=
 # p95 SLO assertions, 30 samples each) starts mid-session after security's
 # probe storm — the 094912 audit measured attendance/today p95=471ms there
 # while the SAME endpoint benchmarked 63ms minutes earlier on a calmer box.
+# e2e gated too (2026-07-19, 124656 audit): it starts seconds after srs's
+# PERF-E capacity ramp (P200 flood) — its MODULE-01 login probe read 1239ms
+# at 1-min load 5.85 and failed the 1200ms bcrypt-aware budget; the same
+# login is a few hundred ms on a settled box.
 SETTLE_LOAD="${SETTLE_LOAD:-2.0}"
 SETTLE_MAX_S="${SETTLE_MAX_S:-180}"
-declare -A NEEDS_CALM=( [diagnose]=1 [benchmark]=1 [srs]=1 )
+declare -A NEEDS_CALM=( [diagnose]=1 [benchmark]=1 [srs]=1 [e2e]=1 )
 settle_box() {
   awk -v t="$SETTLE_LOAD" 'BEGIN{exit !(t>0)}' || return 0
   local waited=0 l1

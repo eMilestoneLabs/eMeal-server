@@ -94,39 +94,46 @@ export class MealsRepository {
     };
     const skip = (opts.page - 1) * opts.limit;
 
-    const [meals, total] = await Promise.all([
-      this.prisma.meal.findMany({
-        where,
-        skip,
-        take: opts.limit,
-        orderBy: [
-          // FR-MEAL-007 (ISSUE-18): zero-padded "HH:mm" strings sort correctly
-          // as text; meals with no window go last.
-          { attendanceWindowOpen: { sort: 'asc', nulls: 'last' } },
-          { order: 'asc' },
-          { createdAt: 'asc' },
-        ],
-        ...(opts.withPreferenceBindings
-          ? {
-              include: {
-                preferenceGroupBindings: {
-                  include: {
-                    preferenceGroup: {
-                      include: {
-                        options: {
-                          orderBy: [{ order: 'asc' }, { createdAt: 'asc' }],
-                        },
+    const meals = await this.prisma.meal.findMany({
+      where,
+      skip,
+      take: opts.limit,
+      orderBy: [
+        // FR-MEAL-007 (ISSUE-18): zero-padded "HH:mm" strings sort correctly
+        // as text; meals with no window go last.
+        { attendanceWindowOpen: { sort: 'asc', nulls: 'last' } },
+        { order: 'asc' },
+        { createdAt: 'asc' },
+      ],
+      ...(opts.withPreferenceBindings
+        ? {
+            include: {
+              preferenceGroupBindings: {
+                include: {
+                  preferenceGroup: {
+                    include: {
+                      options: {
+                        orderBy: [{ order: 'asc' }, { createdAt: 'asc' }],
                       },
                     },
                   },
-                  orderBy: { order: 'asc' },
                 },
+                orderBy: { order: 'asc' },
               },
-            }
-          : {}),
-      }),
-      this.prisma.meal.count({ where }),
-    ]);
+            },
+          }
+        : {}),
+    });
+    // Perf (2026-07-19): an under-filled page pins the exact total without a
+    // COUNT round trip — with the MMT cap (10 meals/group) vs the today
+    // path's limit of 50, the separate COUNT never fires in practice. A full
+    // page (only possible for exotic limits) still pays the exact COUNT, so
+    // the pagination contract's `total` stays precise in every case.
+    const underfilled =
+      meals.length < opts.limit && (skip === 0 || meals.length > 0);
+    const total = underfilled
+      ? skip + meals.length
+      : await this.prisma.meal.count({ where });
 
     // Bindings are stripped from the rows before entity build so the entity /
     // serializer payload stays byte-identical to the legacy shape.

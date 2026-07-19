@@ -31,6 +31,12 @@ import { hhmmToMinutes } from './utils/entry-chrono.util';
 import { StorageService } from '../../storage/storage.service';
 import { PreferencesService } from '../preferences/preferences.service';
 import { ConfigService } from '@nestjs/config';
+import { RedisService } from '../../redis/redis.service';
+import {
+  todayMealsCacheKey,
+  todayMealsCacheTtlSeconds,
+  invalidateTodayMealsCache,
+} from './utils/today-meals-cache.util';
 
 /**
  * Matches a base64 image data URI (jpeg/png) so the meal photo can be uploaded
@@ -66,7 +72,22 @@ export class MealsService {
     private readonly config: ConfigService,
     @Optional() @Inject('REALTIME_GATEWAY')
     private readonly realtime: RealtimeEventsService | null = null,
+    // Perf (2026-07-19): shared today-bundle cache for GET /meals/today —
+    // the highest-p50 endpoint in every audit (~6 DB queries per hit).
+    // @Optional so unit tests construct the service unchanged (cache off =
+    // byte-identical legacy path).
+    @Optional()
+    @Inject(RedisService)
+    private readonly redis: RedisService | null = null,
   ) {}
+
+  /** Drop this group's cached today-bundles (fail-soft, TTL-bounded). */
+  private async invalidateTodayCache(
+    organizationId: string,
+    groupId?: string,
+  ): Promise<void> {
+    await invalidateTodayMealsCache(this.redis, organizationId, groupId);
+  }
 
   /** SRS MMT-001/MMT-014: configurable Master Meal Template cap (default 10). */
   private get maxMealsPerGroup(): number {
@@ -349,6 +370,10 @@ export class MealsService {
 
     this.logger.log(`Meal created: \${meal.id} slotKey=\${meal.slotKey} group=\${meal.groupId}`);
 
+    // Perf (2026-07-19): drop the shared today-bundle BEFORE the realtime
+    // emit, so a client refetch triggered by the emit never re-reads stale.
+    await this.invalidateTodayCache(organizationId, meal.groupId);
+
     // B7: emit meal.updated.v1 so clients invalidate their meal cache
     this.realtime?.emitMealUpdated(organizationId, {
       organizationId,
@@ -495,8 +520,77 @@ export class MealsService {
     // before anything is returned, and tenant isolation holds because every
     // query is org-scoped on its own.
     const isAdmin = ADMIN_ROLES.includes(role as any);
+
+    // Perf (2026-07-19): shared Redis cache for the today-bundle. The DB
+    // portion of this response is IDENTICAL for every member of the group on
+    // a given org-date (includeDisabled resolves false for admin AND student
+    // here; all per-request fields are added by withWindowMeta AFTER the
+    // cache, from the LIVE group row). The group 404 gate + tenant isolation
+    // run LIVE on every request — a hit never skips them. Cache off
+    // (MEALS_TODAY_CACHE_TTL_SECONDS=0) or no Redis (unit tests) → the
+    // legacy 3-wide parallel wave below, byte-identical.
+    const cacheTtl = todayMealsCacheTtlSeconds();
+    if (cacheTtl > 0 && this.redis) {
+      // Org timezone is L1-cached (300s) — resolving the org-date key here
+      // costs a map lookup, not a query, on the hot path.
+      const tz = await this.groupsRepo.getOrganizationTimezone(organizationId);
+      const dateKey = date ?? getTodayInTimezone(tz);
+      const cacheKey = todayMealsCacheKey(organizationId, groupId, dateKey);
+      const [planGroup, hit] = await Promise.all([
+        this.groupsRepo.findByIdConfig
+          ? this.groupsRepo.findByIdConfig(groupId, organizationId)
+          : this.groupsRepo.findById(groupId, organizationId),
+        this.redis.get(cacheKey).catch(() => null),
+      ]);
+      if (!planGroup) {
+        throw new NotFoundException({
+          message: 'Group not found',
+          errors: { groupId: 'Group does not exist in your organization' },
+        });
+      }
+      if (hit) {
+        try {
+          return await this.withWindowMeta(
+            JSON.parse(hit),
+            planGroup,
+            organizationId,
+          );
+        } catch {
+          /* corrupt entry → rebuild below */
+        }
+      }
+      const [result, plannerOverlay] = await Promise.all([
+        this.listGroupMeals(
+          organizationId,
+          { groupId, page: 1, limit: 50 } as QueryMealsDto,
+          1,
+          50,
+          isAdmin,
+        ),
+        this.schedulesRepo.findTodayOverlay(groupId, organizationId, date),
+      ]);
+      const resp = await this.assembleTodayResponse(
+        planGroup,
+        result,
+        plannerOverlay,
+        groupId,
+        organizationId,
+      );
+      // Serialize BEFORE withWindowMeta mutates resp with per-request fields.
+      const payload = JSON.stringify(resp);
+      void this.redis.set(cacheKey, payload, cacheTtl).catch(() => undefined);
+      return this.withWindowMeta(resp, planGroup, organizationId);
+    }
+
+    // Legacy path (cache disabled / unit tests) — unchanged semantics.
+    // Perf (2026-07-19): this path reads ONLY config scalars off the group
+    // (mealsEnabled / planner flags / attendanceGraceMinutes + the 404 gate),
+    // so the scalars-only lookup skips findById's full member-relation fetch.
+    // Optional-call keeps existing test doubles (which stub findById) working.
     const [planGroup, result, plannerOverlay] = await Promise.all([
-      this.groupsRepo.findById(groupId, organizationId),
+      this.groupsRepo.findByIdConfig
+        ? this.groupsRepo.findByIdConfig(groupId, organizationId)
+        : this.groupsRepo.findById(groupId, organizationId),
       this.listGroupMeals(
         organizationId,
         { groupId, page: 1, limit: 50 } as QueryMealsDto,
@@ -514,6 +608,29 @@ export class MealsService {
         errors: { groupId: 'Group does not exist in your organization' },
       });
     }
+    const resp = await this.assembleTodayResponse(
+      planGroup,
+      result,
+      plannerOverlay,
+      groupId,
+      organizationId,
+    );
+    return this.withWindowMeta(resp, planGroup, organizationId);
+  }
+
+  /**
+   * Everything getTodayMeals computes AFTER its query wave and BEFORE the
+   * per-request window meta — extracted verbatim (2026-07-19) so the cached
+   * and uncached paths share one assembly. Returns the pre-window-meta
+   * response; the caller applies withWindowMeta with the LIVE group row.
+   */
+  private async assembleTodayResponse(
+    planGroup: any,
+    result: any,
+    plannerOverlay: Map<string, any>,
+    groupId: string,
+    organizationId: string,
+  ): Promise<any> {
     const plannerOn =
       planGroup.weeklyMenuEnabled || planGroup.dayWiseMealsEnabled;
 
@@ -589,13 +706,9 @@ export class MealsService {
         // result.data — and therefore the overlaid copies — already carry them.
         // The per-day OFF→[] clear and SUBSET filter above operate on those
         // real groups. Re-attaching here would clobber the subset, so we don't.
-        return this.withWindowMeta(
-          PaginatedResponseDto.of(overlaid, overlaid.length, 1, 50),
-          planGroup,
-          organizationId,
-        );
+        return PaginatedResponseDto.of(overlaid, overlaid.length, 1, 50);
       }
-      return this.withWindowMeta(result, planGroup, organizationId);
+      return result;
     }
 
     // No active meals. Only provide the implicit attendance slot when the meal
@@ -603,18 +716,15 @@ export class MealsService {
     // are ENABLED but none configured, attendance is intentionally blocked.
     if (planGroup && planGroup.mealsEnabled === false) {
       const slot = await this.ensureGeneralSlot(groupId, organizationId);
-      return this.withWindowMeta(
-        PaginatedResponseDto.of([MealSerializer.toResponse(slot)], 1, 1, 50),
-        planGroup,
-        organizationId,
+      return PaginatedResponseDto.of(
+        [MealSerializer.toResponse(slot)],
+        1,
+        1,
+        50,
       );
     }
 
-    return this.withWindowMeta(
-      PaginatedResponseDto.of([], 0, 1, 50),
-      planGroup,
-      organizationId,
-    );
+    return PaginatedResponseDto.of([], 0, 1, 50);
   }
 
   /**
@@ -961,6 +1071,9 @@ export class MealsService {
       requestId,
     });
 
+    // Perf (2026-07-19): today-bundle invalidation BEFORE the realtime emit.
+    await this.invalidateTodayCache(organizationId, updated.groupId);
+
     // B7: emit meal.updated.v1 on config change
     this.realtime?.emitMealUpdated(organizationId, {
       organizationId,
@@ -1017,6 +1130,10 @@ export class MealsService {
       requestId,
     });
 
+    // Perf (2026-07-19): the deleted meal's groupId isn't in scope here —
+    // org-wide today-bundle invalidation (few keys, SCAN-bounded) is exact.
+    await this.invalidateTodayCache(organizationId);
+
     return { message: 'Meal archived successfully' };
   }
 
@@ -1062,6 +1179,9 @@ export class MealsService {
     });
 
     this.logger.log(`Meals reordered for group=${dto.groupId}`);
+
+    // Perf (2026-07-19): order rides the today-bundle — drop it.
+    await this.invalidateTodayCache(organizationId, dto.groupId);
 
     return { message: 'Meals reordered successfully', count: dto.mealIds.length };
   }

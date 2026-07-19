@@ -334,22 +334,46 @@ export class AttendanceRepository {
       if (filters.toDate) where.attendanceDate.lte = filters.toDate;
     }
 
-    const [records, total] = await Promise.all([
-      this.prisma.attendanceRecord.findMany({
-        where,
-        include: this.mealInclude,
-        // FR-SORT-001 (ISSUE-12): latest first — newest date, then newest mark
-        // within the day (unmarked/pending last), id as stable final key.
-        orderBy: [
-          { attendanceDate: 'desc' },
-          { markedAt: { sort: 'desc', nulls: 'last' } },
-          { id: 'desc' },
-        ],
-        skip,
-        take: limit,
-      }),
-      this.prisma.attendanceRecord.count({ where }),
-    ]);
+    // Perf (2026-07-19): the single-day shape (GET /attendance/today —
+    // fromDate == toDate, limit 50) can never fill a page (records/day ≤
+    // meals/day ≤ MMT cap 10), so its COUNT round trip is skipped when the
+    // page under-fills; an under-filled page pins the exact total. Multi-day
+    // history queries keep the legacy parallel findMany+COUNT — their first
+    // page often fills, and a serial COUNT there would ADD latency.
+    const singleDay =
+      !!filters.fromDate &&
+      !!filters.toDate &&
+      filters.fromDate.getTime() === filters.toDate.getTime();
+
+    const findArgs = {
+      where,
+      include: this.mealInclude,
+      // FR-SORT-001 (ISSUE-12): latest first — newest date, then newest mark
+      // within the day (unmarked/pending last), id as stable final key.
+      orderBy: [
+        { attendanceDate: 'desc' },
+        { markedAt: { sort: 'desc', nulls: 'last' } },
+        { id: 'desc' },
+      ],
+      skip,
+      take: limit,
+    } as const;
+
+    let records: any[];
+    let total: number;
+    if (singleDay) {
+      records = await this.prisma.attendanceRecord.findMany(findArgs as any);
+      const underfilled =
+        records.length < limit && (skip === 0 || records.length > 0);
+      total = underfilled
+        ? skip + records.length
+        : await this.prisma.attendanceRecord.count({ where });
+    } else {
+      [records, total] = await Promise.all([
+        this.prisma.attendanceRecord.findMany(findArgs as any),
+        this.prisma.attendanceRecord.count({ where }),
+      ]);
+    }
 
     return {
       data: records.map((r) => this.toEntity(r)),

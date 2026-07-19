@@ -33,6 +33,8 @@ import { RealtimeEventsService } from '../../realtime/services/realtime-events.s
 import { ConfigService } from '@nestjs/config';
 import { NoticesService } from '../notices/notices.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { RedisService } from '../../redis/redis.service';
+import { invalidateTodayMealsCache } from '../meals/utils/today-meals-cache.util';
 
 /**
  * Module 22 (FR-HG-020): guest-config columns that are nullable in the schema
@@ -77,6 +79,12 @@ export class GroupsService {
     private readonly notices: NoticesService | null = null,
     @Optional() @Inject(NotificationsService)
     private readonly notifications: NotificationsService | null = null,
+    // Perf (2026-07-19): GET /meals/today bundle cache — meal-config updates
+    // (mealsEnabled / planner flags / windows) change the bundle students see.
+    // @Optional + explicit token (see CRITICAL note above) keeps unit tests
+    // constructing the service unchanged.
+    @Optional() @Inject(RedisService)
+    private readonly redis: RedisService | null = null,
   ) {}
 
   /** Typed access to the `groups.*` configuration namespace (CFG-001). */
@@ -805,6 +813,12 @@ export class GroupsService {
       },
       requestId,
     });
+
+    // Perf (2026-07-19): meal-config flags (mealsEnabled / planner modes /
+    // windows / prices) are baked into the shared GET /meals/today bundle —
+    // drop the group's cached bundles BEFORE the realtime emit so client
+    // refetches never re-read stale. Fail-soft inside the util.
+    await invalidateTodayMealsCache(this.redis, organizationId, id);
 
     // SRS FR-MODE-012 (Pass 6): push mode flips to the group room so student
     // dashboards drop/add meal widgets in real time — no stale meal actions.
@@ -1927,7 +1941,13 @@ export class GroupsService {
   // ── GET /groups/:id/meal-config ───────────────────────────────────────────
 
   async getMealConfig(id: string, organizationId: string) {
-    const group = await this.groupsRepo.findById(id, organizationId);
+    // Perf (2026-07-19): every field below is a group SCALAR — the
+    // members-relation fetch findById pays (to compute counts this response
+    // never uses) is skipped via the scalars-only read. Optional-call keeps
+    // existing test doubles (which stub findById) working.
+    const group = this.groupsRepo.findByIdConfig
+      ? await this.groupsRepo.findByIdConfig(id, organizationId)
+      : await this.groupsRepo.findById(id, organizationId);
     if (!group) throw new NotFoundException('Group not found');
     return {
       mealsEnabled: group.mealsEnabled,

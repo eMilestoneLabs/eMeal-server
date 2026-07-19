@@ -90,6 +90,30 @@ export class GroupsRepository {
   }
 
   /**
+   * Perf (hot path, 2026-07-19): scalars-only group read for flows that need
+   * the group's CONFIG flags (mealsEnabled, weeklyMenuEnabled,
+   * dayWiseMealsEnabled, attendanceGraceMinutes, …) but none of the member
+   * arrays. findById includes the ENTIRE member relation to compute counts,
+   * so config-only readers — meals/today is the hottest student endpoint —
+   * pay a member fetch + entity build that scales with group size for fields
+   * they never touch. Same WHERE semantics as findById; returns the raw
+   * scalar row (no include, no relation traffic).
+   */
+  async findByIdConfig(
+    id: string,
+    organizationId: string,
+    includeInactive = false,
+  ) {
+    return this.prisma.group.findFirst({
+      where: {
+        id,
+        organizationId, // CRITICAL: tenant isolation
+        ...(includeInactive ? {} : { isActive: true }),
+      },
+    });
+  }
+
+  /**
    * command_6 perf: existence-only tenant probe (select id — one indexed PK
    * row) for verification call sites that discard the group payload.
    * findById includes the ENTIRE member relation to compute counts, so using
@@ -209,16 +233,23 @@ export class GroupsRepository {
     };
     const skip = (opts.page - 1) * opts.limit;
 
-    const [groups, total] = await Promise.all([
-      this.prisma.group.findMany({
-        where,
-        skip,
-        take: opts.limit,
-        orderBy: { createdAt: 'desc' },
-        include: { members: this.memberSelect },
-      }),
-      this.prisma.group.count({ where }),
-    ]);
+    // Perf (2026-07-19): groups-per-org is limit-capped (CFG group limits),
+    // so page 1 virtually never fills — an under-filled page pins the exact
+    // total without the COUNT round trip. A full page still pays the exact
+    // COUNT, keeping the pagination contract precise. This list is hit on
+    // every admin app-open.
+    const groups = await this.prisma.group.findMany({
+      where,
+      skip,
+      take: opts.limit,
+      orderBy: { createdAt: 'desc' },
+      include: { members: this.memberSelect },
+    });
+    const underfilled =
+      groups.length < opts.limit && (skip === 0 || groups.length > 0);
+    const total = underfilled
+      ? skip + groups.length
+      : await this.prisma.group.count({ where });
 
     return {
       data: groups.map((g) => this.buildEntity(g)),
@@ -245,16 +276,21 @@ export class GroupsRepository {
     };
     const skip = (opts.page - 1) * opts.limit;
 
-    const [groups, total] = await Promise.all([
-      this.prisma.group.findMany({
-        where,
-        skip,
-        take: opts.limit,
-        orderBy: { createdAt: 'desc' },
-        include: { members: this.memberSelect },
-      }),
-      this.prisma.group.count({ where }),
-    ]);
+    // Perf (2026-07-19): a student belongs to a handful of groups — the
+    // same under-fill COUNT skip as findAll (see above). Hit on every
+    // student app-open.
+    const groups = await this.prisma.group.findMany({
+      where,
+      skip,
+      take: opts.limit,
+      orderBy: { createdAt: 'desc' },
+      include: { members: this.memberSelect },
+    });
+    const underfilled =
+      groups.length < opts.limit && (skip === 0 || groups.length > 0);
+    const total = underfilled
+      ? skip + groups.length
+      : await this.prisma.group.count({ where });
 
     return {
       data: groups.map((g) => this.buildEntity(g)),

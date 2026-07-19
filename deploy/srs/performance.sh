@@ -23,6 +23,29 @@ reuse_or_login STUDENT_TOKEN "${STUDENT_EMAIL:-}" "${STUDENT_PASS:-}"
 # round-trip without losing a check. Standalone (unset) still resolves it.
 [ -z "${GROUP_ID:-}" ] && { req GET /groups "" "$ADMIN_TOKEN"; GROUP_ID="$(jbody '(.data // .)[0].id // empty')"; }
 
+# ── PERF-A settle (2026-07-19, 124656 audit) ─────────────────────────────────
+# run.sh's module-start settle gate ran MINUTES ago; the functional + write
+# battery since then re-raised the 1-min load, so PERF-A's SLO gates were
+# measuring audit contention, not the app (srs started settled at 1.85, yet
+# PERF-A read health p95=101 / meals 277 / billing 324 — every one a calm-box
+# PASS: the same endpoints benchmarked 59/105/97 minutes later). Wait again
+# HERE, immediately before sampling. PERF_SETTLE_LOAD=0 disables.
+PERF_SETTLE_LOAD="${PERF_SETTLE_LOAD:-${SETTLE_LOAD:-2.0}}"
+PERF_SETTLE_MAX_S="${PERF_SETTLE_MAX_S:-120}"
+if awk -v t="$PERF_SETTLE_LOAD" 'BEGIN{exit !(t>0)}' && [ -r /proc/loadavg ]; then
+  _pw=0
+  while [ "$_pw" -lt "$PERF_SETTLE_MAX_S" ]; do
+    _pl=$(cut -d' ' -f1 /proc/loadavg)
+    awk -v l="$_pl" -v t="$PERF_SETTLE_LOAD" 'BEGIN{exit !(l<t)}' && {
+      [ "$_pw" -gt 0 ] && echo "  ✓ box settled (load $_pl) after ${_pw}s — sampling now" >&2
+      break
+    }
+    [ "$_pw" -eq 0 ] && echo "  ⏳ PERF-A settle: waiting for 1-min load < $PERF_SETTLE_LOAD (now $_pl; cap ${PERF_SETTLE_MAX_S}s; PERF_SETTLE_LOAD=0 to disable)…" >&2
+    sleep 10; _pw=$((_pw + 10))
+  done
+  [ "$_pw" -ge "$PERF_SETTLE_MAX_S" ] && echo "  ⚠ load still ≥ $PERF_SETTLE_LOAD after ${_pw}s — sampling anyway (p95s may include box contention)" >&2
+fi
+
 sec "PERF-A — LATENCY PERCENTILES (backend compute, localhost) FR-TIME / NFR-perf"
 echo "  (samples=$PERF_SAMPLES each; SLO gate on p95)" >&2
 # perf() runs IN-PROCESS (so its SLO PASS/FAIL line displays and counts) and

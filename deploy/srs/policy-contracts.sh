@@ -71,19 +71,30 @@ fi
 # ── LT11-017: per-record billAbsent snapshot in the serializer ───────────────
 # Admin history queries REQUIRE groupId (service 400s without it — by design);
 # the group-less form of this probe always skipped with "(HTTP 400)".
-req GET "/attendance?groupId=$GRP&limit=5" "" "$ADMIN_TOKEN"
-if [ "$R_CODE" = "200" ]; then
-  _n="$(jbody '(.data // .) | length')"
-  if [ "${_n:-0}" -gt 0 ] 2>/dev/null; then
+# The assertion is SHAPE-only (does the serializer emit the key), so ANY group
+# with at least one record satisfies it — scan every group instead of pinning
+# to $GRP (the first group WITH A MEAL can legally have zero attendance rows,
+# which produced the recurring "(no records)" SKIP on the 124656 audit while
+# other groups held records).
+_REC_CODE=""; _REC_N=0
+for _rg in ${GRP:+$GRP} $_GIDS; do
+  req GET "/attendance?groupId=$_rg&limit=5" "" "$ADMIN_TOKEN"
+  _REC_CODE="$R_CODE"
+  [ "$R_CODE" = "200" ] || continue
+  _REC_N="$(jbody '(.data // .) | length')"
+  [ "${_REC_N:-0}" -gt 0 ] 2>/dev/null && break
+done
+if [ "$_REC_CODE" = "200" ]; then
+  if [ "${_REC_N:-0}" -gt 0 ] 2>/dev/null; then
     _has="$(jbody '(.data // .)[0] | has("billAbsent")')"
     [ "$_has" = "true" ] \
       && ok "LT11-017 record serializer carries billAbsent" "" "LT11-017" \
       || no "LT11-017 record serializer carries billAbsent" "key missing" "LT11-017"
   else
-    skip "LT11-017 record serializer carries billAbsent" "(no records)" "LT11-017"
+    skip "LT11-017 record serializer carries billAbsent" "(no records in ANY group)" "LT11-017"
   fi
 else
-  skip "LT11-017 record serializer carries billAbsent" "(HTTP $R_CODE)" "LT11-017"
+  skip "LT11-017 record serializer carries billAbsent" "(HTTP $_REC_CODE)" "LT11-017"
 fi
 
 # ── LT11-016: preferenceGroupPickCounts on the meal summary ──────────────────
@@ -103,19 +114,48 @@ fi
 
 # ── LT11-008: recent request alerts are GROUP-scoped, never org-wide ─────────
 # Only alerts published in the last 6h are asserted (older ones may legally
-# predate the fix); none in-window → SKIP, never a false verdict.
-req GET "/notices?limit=50" "" "$ADMIN_TOKEN"
-if [ "$R_CODE" = "200" ]; then
+# predate the fix). A quiet box has none in-window, which used to SKIP every
+# run — so under WRITE_TESTS=1 the probe now SELF-SEEDS one: a student
+# vacation request raises the admin bell alert (the exact flow the srs write
+# battery exercises), we assert THAT alert is group-scoped, then the admin
+# rejects the request (self-clean; the leftover notice is identical to what
+# every srs write run legitimately leaves behind). Read-only runs keep the
+# old SKIP semantics. ACC-005 (unverified student) degrades back to SKIP.
+_lt11_008_recent() {   # fresh /notices read → _recent (json array) + _cnt; rc!=0 = feed unreadable
+  req GET "/notices?limit=50" "" "$ADMIN_TOKEN"
+  [ "$R_CODE" = "200" ] || return 1
   _CUTOFF="$(date -u -d '-6 hours' +%Y-%m-%dT%H:%M 2>/dev/null || date -u +%Y-%m-%dT%H:%M)"
   _recent="$(printf '%s' "$R_BODY" | jq --arg c "$_CUTOFF" '[(.data // .)[]? | select((.linkType // "") as $t | ["vacationRequests","guestRequests","correctionRequests"] | index($t)) | select((.publishedAt // .createdAt // "") >= $c)]' 2>/dev/null)"
   _cnt="$(printf '%s' "$_recent" | jq 'length' 2>/dev/null)"
+  return 0
+}
+if _lt11_008_recent; then
+  _SEED_VID=""
+  if [ "${_cnt:-0}" -eq 0 ] 2>/dev/null && [ "$WRITE_TESTS" = "1" ] && [ -n "${STUDENT_EMAIL:-}" ]; then
+    reuse_or_login STUDENT_TOKEN "$STUDENT_EMAIL" "${STUDENT_PASS:-}"
+    if [ -n "${STUDENT_TOKEN:-}" ]; then
+      _VS="$(date -d "+$((320 + RANDOM % 400)) days" +%F 2>/dev/null || echo 2027-06-01)"
+      _VE="$(date -d "$_VS +2 days" +%F 2>/dev/null || echo 2027-06-03)"
+      req POST /vacation-requests "$(jq -nc --arg s "$_VS" --arg e "$_VE" '{startDate:$s,endDate:$e,reason:"LT11-008 probe (auto-rejected)"}')" "$STUDENT_TOKEN"
+      if [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; then
+        _SEED_VID="$(jbody '.id // .data.id // empty')"
+        sleep 2   # the admin bell alert is raised fire-and-forget; let it commit
+        _lt11_008_recent || true
+      fi
+    fi
+  fi
   if [ "${_cnt:-0}" -gt 0 ] 2>/dev/null; then
     _orgwide="$(printf '%s' "$_recent" | jq '[.[] | select(.groupId == null)] | length')"
     [ "${_orgwide:-1}" = "0" ] \
       && ok "LT11-008 request alerts group-scoped" "($_cnt recent, 0 org-wide)" "LT11-008" \
       || no "LT11-008 request alerts group-scoped" "$_orgwide of $_cnt recent alerts org-wide" "LT11-008"
   else
-    skip "LT11-008 request alerts group-scoped" "(no request alerts in last 6h)" "LT11-008"
+    skip "LT11-008 request alerts group-scoped" "(no request alerts in last 6h; WRITE_TESTS=1 + student creds self-seed one)" "LT11-008"
+  fi
+  # Self-clean: reject the seeded request so no pending vacation lingers.
+  if [ -n "$_SEED_VID" ]; then
+    req PATCH "/vacation-requests/$_SEED_VID/reject" '{}' "$ADMIN_TOKEN"
+    [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ] || no "LT11-008 seed cleanup failed" "reject HTTP $R_CODE — reject request $_SEED_VID manually" "LT11-008"
   fi
 else
   skip "LT11-008 request alerts group-scoped" "(HTTP $R_CODE)" "LT11-008"

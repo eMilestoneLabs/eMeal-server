@@ -15,6 +15,8 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../../audit/audit.service';
 import { PreferenceGroupsRepository } from './repositories/preference-groups.repository';
 import { PreferenceGroupSerializer } from './serializers/preference-group.serializer';
+import { RedisService } from '../../redis/redis.service';
+import { invalidateTodayMealsCache } from '../meals/utils/today-meals-cache.util';
 import {
   CreatePreferenceGroupDto,
   UpdatePreferenceGroupDto,
@@ -93,6 +95,12 @@ export class PreferencesService {
     private readonly realtime: {
       emitMealUpdated(organizationId: string, payload: unknown): void;
     } | null = null,
+    // Perf (2026-07-19): GET /meals/today bundle cache — preference edits
+    // change the per-meal preferenceGroups it carries. @Optional keeps unit
+    // tests constructing the service unchanged.
+    @Optional()
+    @Inject(RedisService)
+    private readonly redis: RedisService | null = null,
   ) {}
 
   private cfg(key: string, fallback: number): number {
@@ -973,11 +981,22 @@ export class PreferencesService {
     groupId: string | null,
     mealId: string | null,
   ): void {
-    this.realtime?.emitMealUpdated(organizationId, {
+    // Perf (2026-07-19): preference edits ride the GET /meals/today bundle
+    // (preferenceGroups per meal) — drop the shared Redis cache BEFORE the
+    // realtime emit so a client refetch never re-reads stale. Fire-and-forget
+    // chain keeps this helper sync for its 8 existing call sites; a Redis
+    // outage degrades to TTL expiry (fail-soft inside the util).
+    void invalidateTodayMealsCache(
+      this.redis,
       organizationId,
-      groupId,
-      mealId,
-      reason: 'preference_groups_changed',
+      groupId ?? undefined,
+    ).finally(() => {
+      this.realtime?.emitMealUpdated(organizationId, {
+        organizationId,
+        groupId,
+        mealId,
+        reason: 'preference_groups_changed',
+      });
     });
   }
 }

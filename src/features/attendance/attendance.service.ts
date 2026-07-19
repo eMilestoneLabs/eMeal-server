@@ -2081,6 +2081,31 @@ export class AttendanceService {
       ? toUtcMidnight(query.fromDate)
       : new Date(toDate.getTime() - 30 * 24 * 60 * 60 * 1000);
 
+    // Perf (2026-07-19): same version-keyed read cache as getBillingSummary
+    // (FR-BILLX-050) — every billing-relevant write bumps the group version,
+    // orphaning cached ranges instantly, so hits are coherent by
+    // construction. This endpoint re-scanned the ENTIRE range's billing rows
+    // on every hit (p95 180ms vs 120ms budget in the 2026-07-19 benchmark);
+    // a hit is now one Redis GET. Same TTL knob as the summary cache
+    // (BILLING_SUMMARY_CACHE_TTL_SECONDS, 0 = disabled).
+    const seriesTtl = this.config.get<number>(
+      'attendance.billingSummaryCacheTtlSeconds',
+      60,
+    );
+    const seriesVer =
+      (await this.billing?.getBillingVersion?.(query.groupId)) ?? '0';
+    const seriesKey =
+      `bill:series:${organizationId}:${query.groupId}:${seriesVer}:` +
+      `${formatUtcDate(fromDate)}:${formatUtcDate(toDate)}:${bucket}`;
+    if (seriesTtl > 0) {
+      try {
+        const hit = await this.redis.get(seriesKey);
+        if (hit) return JSON.parse(hit);
+      } catch {
+        /* cache is best-effort */
+      }
+    }
+
     const { records } = await this.attendanceRepo.getBillingData(
       query.groupId,
       organizationId,
@@ -2121,7 +2146,19 @@ export class AttendanceService {
         presentMeals: v.presentMeals,
       }));
 
-    return { bucket, series };
+    const seriesResponse = { bucket, series };
+    if (seriesTtl > 0) {
+      try {
+        await this.redis.set(
+          seriesKey,
+          JSON.stringify(seriesResponse),
+          seriesTtl,
+        );
+      } catch {
+        /* cache is best-effort */
+      }
+    }
+    return seriesResponse;
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────

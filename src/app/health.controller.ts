@@ -40,6 +40,18 @@ export class HealthController {
     process.env.HEALTH_CACHE_TTL_MS ?? '1000',
     10,
   );
+  // SWR (2026-07-19): with plain TTL caching the one hit that lands after
+  // expiry still pays the full DB+Redis+queue probe wave INLINE — that
+  // refill hit IS the recurring "health p95>SLO by a few ms" audit failure
+  // (p50 stays a memory read, p95 rides the probe). Stale-while-revalidate
+  // serves the previous probe result immediately and refreshes in the
+  // background, so after the first boot-time probe NO request ever waits on
+  // a probe again. Staleness stays bounded by TTL + one probe duration
+  // (~1-2s worst case) — irrelevant for 60s-interval uptime monitors, and
+  // an outage still flips the payload to 'degraded' within ~1 extra hit.
+  // HEALTH_CACHE_SWR=0 restores the legacy inline-refresh behavior.
+  private static readonly SWR_ENABLED =
+    (process.env.HEALTH_CACHE_SWR ?? '1') !== '0';
   private probeCache: { at: number; probes: HealthProbes } | null = null;
   private probeInFlight: Promise<HealthProbes> | null = null;
 
@@ -80,14 +92,27 @@ export class HealthController {
     };
   }
 
-  /** Serves probes from the micro-cache; refreshes at most once per TTL. */
+  /**
+   * Serves probes from the micro-cache; refreshes at most once per TTL.
+   * SWR mode (default): an expired cache is served AS-IS while ONE shared
+   * background refresh runs — no request ever blocks on a probe wave after
+   * the first. Legacy mode (HEALTH_CACHE_SWR=0): the expiry hit refreshes
+   * inline exactly as before.
+   */
   private async getProbes(): Promise<HealthProbes> {
     const ttl = HealthController.CACHE_TTL_MS;
     if (ttl > 0 && this.probeCache && Date.now() - this.probeCache.at < ttl) {
       return this.probeCache.probes;
     }
     // Concurrent callers share one refresh instead of stampeding the DB.
-    if (ttl > 0 && this.probeInFlight) return this.probeInFlight;
+    if (ttl > 0 && this.probeInFlight) {
+      // SWR: a stale value exists → serve it now; the shared refresh will
+      // land for later hits. Without a cache (first boot) we must wait.
+      if (HealthController.SWR_ENABLED && this.probeCache) {
+        return this.probeCache.probes;
+      }
+      return this.probeInFlight;
+    }
 
     const refresh = this.runProbes()
       .then((probes) => {
@@ -98,6 +123,15 @@ export class HealthController {
         this.probeInFlight = null;
       });
     if (ttl > 0) this.probeInFlight = refresh;
+
+    // SWR: kick the refresh off in the background and answer from the stale
+    // cache immediately. runProbes never rejects (allSettled inside), but
+    // guard anyway so an unexpected throw can't become an unhandled
+    // rejection while we're not awaiting it.
+    if (ttl > 0 && HealthController.SWR_ENABLED && this.probeCache) {
+      refresh.catch(() => undefined);
+      return this.probeCache.probes;
+    }
     return refresh;
   }
 
