@@ -69,7 +69,9 @@ else
 fi
 
 # ── LT11-017: per-record billAbsent snapshot in the serializer ───────────────
-req GET "/attendance?limit=5" "" "$ADMIN_TOKEN"
+# Admin history queries REQUIRE groupId (service 400s without it — by design);
+# the group-less form of this probe always skipped with "(HTTP 400)".
+req GET "/attendance?groupId=$GRP&limit=5" "" "$ADMIN_TOKEN"
 if [ "$R_CODE" = "200" ]; then
   _n="$(jbody '(.data // .) | length')"
   if [ "${_n:-0}" -gt 0 ] 2>/dev/null; then

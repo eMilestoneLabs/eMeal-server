@@ -48,12 +48,14 @@ module.exports = {
       env: {
         NODE_ENV: 'development',
         PORT: 3000,
+        QUEUE_ROLE: 'web',       // HTTP tier — job processing lives in emeal-worker
       },
 
       // ── Environment: Production ────────────────────────────────────────
       env_production: {
         NODE_ENV: 'production',
         PORT: 3000,
+        QUEUE_ROLE: 'web',       // HTTP tier — job processing lives in emeal-worker
 
         // Database (override via .env — these are fallback reference values)
         // DATABASE_URL: 'postgresql://user:pass@localhost:5432/emeal_prod',
@@ -84,6 +86,53 @@ module.exports = {
       node_args: [
         '--max-old-space-size=384',  // Limit V8 heap to 384MB per instance
       ],
+    },
+
+    // ── Dedicated background-job tier (2026-07-19) ─────────────────────────
+    // Owns ALL BullMQ processors + the repeatable sweep scheduler (see
+    // QUEUE_ROLE in app.module.ts). Web instances above run QUEUE_ROLE=web
+    // and never execute jobs, so a sweep can no longer stall a request's
+    // event loop mid-flight (the measured rotating p95 outliers). One fork
+    // instance is correct: BullMQ concurrency lives inside the process, and
+    // job volume is minutes-cadence sweeps, not throughput work. Listens on
+    // :3010 (never routed by Nginx) purely so /health works for monitoring.
+    // Realtime emits from jobs reach web-tier sockets via the Socket.IO
+    // Redis adapter, which the PM2 cluster already requires.
+    {
+      name: 'emeal-worker',
+      script: 'dist/main.js',
+      instances: 1,
+      exec_mode: 'fork',
+
+      autorestart: true,
+      watch: false,
+      max_restarts: 10,
+      min_uptime: '10s',
+      restart_delay: 2000,
+      exp_backoff_restart_delay: 100,
+      max_memory_restart: '512M',
+
+      out_file: './logs/pm2-worker-out.log',
+      error_file: './logs/pm2-worker-error.log',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
+      merge_logs: true,
+      log_type: 'json',
+
+      env: {
+        NODE_ENV: 'development',
+        PORT: 3010,
+        QUEUE_ROLE: 'worker',
+      },
+      env_production: {
+        NODE_ENV: 'production',
+        PORT: 3010,
+        QUEUE_ROLE: 'worker',
+      },
+
+      kill_timeout: 10000,       // let in-flight jobs finish on reload
+      listen_timeout: 8000,
+      source_map_support: true,
+      node_args: ['--max-old-space-size=384'],
     },
   ],
 

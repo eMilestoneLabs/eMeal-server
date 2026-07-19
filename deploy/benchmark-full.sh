@@ -36,10 +36,26 @@ SAMPLES="${SAMPLES:-20}"
 # max=1762ms in the same-minute post-reload run vs p95=150ms four minutes
 # later in the same audit). Default: 2 hits per online worker (fallback 8
 # when pm2/jq are unavailable). Set WARMUPS=0 to measure cold-start on purpose.
+#
+# Worker-age escalation (2026-07-19): 2 hits/worker warms the ROUTE cache but
+# not V8 — the 20260719_094912 audit benchmarked 3-minute-old workers (deploy →
+# reload → measure) and 21 rows breached p95 with unchanged mins, while the
+# same battery on hours-old workers breached 6. When the YOUNGEST online
+# worker is younger than WARM_AGE_S (default 600s), escalate to 6 hits/worker
+# so measured samples land on JIT-optimized code — what real traffic sees.
 if [ -z "${WARMUPS:-}" ]; then
   _NW="$(pm2 jlist 2>/dev/null | jq '[.[] | select(.name=="emeal-server") | select(.pm2_env.status=="online")] | length' 2>/dev/null || true)"
   case "$_NW" in ''|0|null|*[!0-9]*) _NW=4;; esac
-  WARMUPS=$((_NW * 2))
+  _PER=2
+  _YOUNG="$(pm2 jlist 2>/dev/null | jq '[.[] | select(.name=="emeal-server") | select(.pm2_env.status=="online") | .pm2_env.pm_uptime] | min' 2>/dev/null || true)"
+  case "$_YOUNG" in ''|null|*[!0-9]*) : ;; *)
+    _AGE_S=$(( ( $(date +%s) * 1000 - _YOUNG ) / 1000 ))
+    if [ "$_AGE_S" -ge 0 ] && [ "$_AGE_S" -lt "${WARM_AGE_S:-600}" ]; then
+      _PER=6
+      echo "── youngest worker is ${_AGE_S}s old (< ${WARM_AGE_S:-600}s) → JIT-cold: warmups escalated to ${_PER}/worker ──"
+    fi
+  esac
+  WARMUPS=$((_NW * _PER))
 fi
 FROM="${FROM:-$(date -d '-7 days' +%F 2>/dev/null || date +%F)}"
 TO="${TO:-$(date +%F)}"

@@ -60,6 +60,21 @@ import { TelemetryModule } from '../features/telemetry/telemetry.module';
 import { HealthController } from './health.controller';
 import { WarmupService } from './warmup.service';
 
+// ── Web/worker tier split (2026-07-19) ───────────────────────────────────────
+// Benchmark forensics: BullMQ consumers + the repeatable sweep scheduler ran
+// inside every HTTP-serving PM2 worker, so a sweep firing mid-request blocked
+// that worker's event loop for 50–400ms — the measured rotating p95 outliers
+// (a DIFFERENT endpoint set slow on every audit run while mins never moved).
+// QUEUE_ROLE gates the tier: 'web' = HTTP only (no job processors), 'worker'
+// = the dedicated emeal-worker PM2 process that owns all job processing, any
+// other value (default 'all') = legacy single-tier behavior — so a deploy
+// without the env set, and every existing test, behaves exactly as before.
+// Realtime emits from worker-run jobs reach web-connected sockets through the
+// Socket.IO Redis adapter (already mandatory across the PM2 cluster).
+// Fail-safe direction: only the exact value 'web' sheds processors — a typo'd
+// role still processes jobs rather than silently letting queues pile up.
+const QUEUE_ROLE = process.env.QUEUE_ROLE ?? 'all';
+
 @Module({
   imports: [
     // Config — global, loaded first
@@ -125,9 +140,12 @@ import { WarmupService } from './warmup.service';
     ReportsModule,
     // SRS Module 03 — retention archives (Reports → Data Archives)
     RetentionModule,
-    // Phase B6 — Queue infrastructure + background workers
+    // Phase B6 — Queue infrastructure + background workers.
+    // QueueModule (producers — services enqueue jobs) loads on EVERY tier;
+    // WorkersModule (consumers + repeatable scheduler) is shed on 'web' so
+    // request event loops never execute background jobs.
     QueueModule,
-    WorkersModule,
+    ...(QUEUE_ROLE === 'web' ? [] : [WorkersModule]),
     // Observability — Flutter crash-report sink (structured logs → Loki/Grafana)
     TelemetryModule,
   ],

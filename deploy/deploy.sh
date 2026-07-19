@@ -40,7 +40,7 @@ rollback() {
   npm ci || true
   npx prisma generate || true
   npm run build || true
-  pm2 reload ecosystem.config.js --update-env || pm2 start ecosystem.config.js --env production || true
+  pm2 startOrReload ecosystem.config.js --update-env --env production || pm2 start ecosystem.config.js --env production || true
   journal "ROLLBACK COMPLETE — serving $PREV_COMMIT (DB NOT rolled back; restore a dump if a migration was destructive)"
   exit 1
 }
@@ -96,7 +96,12 @@ echo "==> 8/8 Reload app (PM2 cluster, zero-downtime)"
 # --env production is REQUIRED: without it, pm2 reload falls back to the default
 # `env` block (NODE_ENV=development), which leaks _devOtp in responses + weakens
 # security. Keep production env on reload.
-pm2 reload ecosystem.config.js --update-env --env production || pm2 start ecosystem.config.js --env production || rollback "pm2 reload"
+# startOrReload (2026-07-19): the ecosystem now carries TWO apps (emeal-server
+# web tier + emeal-worker job tier). startOrReload is PM2's documented
+# idempotent form — reloads running apps AND starts ones not yet running, so
+# the first deploy after the tier split brings emeal-worker up instead of
+# leaving background jobs unprocessed.
+pm2 startOrReload ecosystem.config.js --update-env --env production || pm2 start ecosystem.config.js --env production || rollback "pm2 reload"
 pm2 save || true
 
 echo "==> Health check (retry up to 10x)"
@@ -106,6 +111,23 @@ for i in $(seq 1 10); do
   sleep 2
 done
 [ "$ok" = "1" ] || rollback "health check"
+
+# Worker-tier health (2026-07-19): emeal-worker owns ALL background jobs
+# (sweeps, reminders, exports). If it failed to boot, requests still serve but
+# attendance materialization silently stops — surface that loudly. Non-fatal
+# (WARN, no rollback): the web tier is healthy and a worker-only fault is
+# fixable with `pm2 restart emeal-worker` without reverting the release.
+WORKER_HEALTH="${WORKER_HEALTH_URL:-http://localhost:3010/api/v1/health}"
+wok=0
+for i in $(seq 1 10); do
+  if curl -fsS "$WORKER_HEALTH" >/dev/null 2>&1; then wok=1; break; fi
+  sleep 2
+done
+if [ "$wok" = "1" ]; then
+  echo "==> Worker tier healthy (emeal-worker :3010)"
+else
+  journal "WARN emeal-worker health check failed — background jobs (sweeps/reminders/exports) may be stopped; check: pm2 logs emeal-worker"
+fi
 
 # ==> Warm the WHOLE cluster before declaring done. A freshly reloaded worker
 # JIT-compiles routes/guards/serializers on its first requests; with 4 workers

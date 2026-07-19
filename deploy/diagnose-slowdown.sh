@@ -70,6 +70,16 @@ STATS=$(printf '%s\n' "${TIMES[@]}" | sort -n | awk '
 echo "   $STATS"
 P95_MS=$(printf '%s\n' "${TIMES[@]}" | sort -n | awk '{a[NR]=$1} END {printf "%d", a[int(NR*0.95)]*1000}')
 
+# Stall forensics (2026-07-19): /health now reports the worker's event-loop
+# delay histogram since its last read. This is the arbiter for slow tails:
+#   eventLoop.maxMs ≈ the request tail  → IN-PROCESS stall (investigate app);
+#   eventLoop.maxMs small, tails high   → the HOST paused the worker (vCPU
+#   contention / co-located containers — no app code can fix that).
+EL=$(curl -s --max-time 5 http://localhost:3000/api/v1/health 2>/dev/null \
+  | jq -r '.eventLoop // empty | "mean=\(.meanMs)ms p99=\(.p99Ms)ms max=\(.maxMs)ms"' 2>/dev/null)
+[ -n "$EL" ] && \
+  echo "   event-loop delay (1 worker, since last /health read): $EL"
+
 echo
 echo "── VERDICT ──"
 if [ "$AVG_ST" -ge 10 ]; then
