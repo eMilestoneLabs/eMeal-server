@@ -873,6 +873,12 @@ model Notice {
   @@index([organizationId, isActive])
   @@index([expiresAt])
   @@index([targetUserId])
+  // Production scale: bell feed + unread-count filter on (org, isActive) and
+  // ORDER BY publishedAt DESC — this serves the sort straight from the index
+  // (no sort node) at any table size.
+  @@index([organizationId, isActive, publishedAt(sort: Desc)])
+  // Live-Test-11 collapsible-alert lookup: org + actor + publishedAt window.
+  @@index([organizationId, createdBy, publishedAt])
   @@map("notices")
 }
 

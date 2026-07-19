@@ -238,6 +238,33 @@ CERT_ARGS=()
 COOLDOWN="${COOLDOWN:-65}"
 declare -A NEEDS_COLD=( [security]=1 [srs]=1 [e2e]=1 [mealcheck]=1 [production]=1 [fixtures]=1 )
 
+# ── Load-settle gate (2026-07-19) ────────────────────────────────────────────
+# Latency modules must measure the APP, not the deploy. A benchmark started
+# minutes after deploy.sh (npm ci + nest build + PM2 reload) measures 45s-old
+# JIT-cold workers on a saturated box and reports false SLOW rows — proven by
+# the c8e09f9 audit: started at load 4.56 → 25 SLOW rows, yet the SAME
+# endpoints PASSED later in the SAME session once the box settled (dashboard
+# p95=38ms). Wait for the 1-min load average to drop below SETTLE_LOAD (cap
+# SETTLE_MAX_S), then measure. SETTLE_LOAD=0 disables. Audit pacing only —
+# zero coupling with prod code.
+SETTLE_LOAD="${SETTLE_LOAD:-2.0}"
+SETTLE_MAX_S="${SETTLE_MAX_S:-180}"
+declare -A NEEDS_CALM=( [diagnose]=1 [benchmark]=1 )
+settle_box() {
+  awk -v t="$SETTLE_LOAD" 'BEGIN{exit !(t>0)}' || return 0
+  local waited=0 l1
+  while [ "$waited" -lt "$SETTLE_MAX_S" ]; do
+    l1=$(cut -d' ' -f1 /proc/loadavg)
+    awk -v l="$l1" -v t="$SETTLE_LOAD" 'BEGIN{exit !(l<t)}' && {
+      [ "$waited" -gt 0 ] && echo "   ✓ box settled (load $l1) after ${waited}s"
+      return 0
+    }
+    [ "$waited" -eq 0 ] && echo "   ⏳ load-settle gate: waiting for 1-min load < $SETTLE_LOAD (now $l1; cap ${SETTLE_MAX_S}s; SETTLE_LOAD=0 to disable)…"
+    sleep 10; waited=$((waited + 10))
+  done
+  echo "   ⚠ load still ≥ $SETTLE_LOAD after ${SETTLE_MAX_S}s — measuring anyway (numbers may include box contention)"
+}
+
 # ── RUN-ONCE DEDUP CONTRACT (user ruling 2026-07-18) ────────────────────────
 # Every module ALWAYS runs its full own section set. Run-once dedup applies
 # ONLY where the IDENTICAL script file would otherwise execute twice in one
@@ -267,6 +294,8 @@ for m in "${SELECTED[@]}"; do
     echo "   ⏳ login-throttle cooldown ${COOLDOWN}s before '$m' (COOLDOWN=0 to disable)…"
     sleep "$COOLDOWN"
   fi
+  # Latency-sensitive module → let the box settle so p95s reflect the app.
+  [ -n "${NEEDS_CALM[$m]:-}" ] && settle_box
   FIRST=0
   run_module "$m"
 done

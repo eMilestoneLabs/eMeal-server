@@ -8,7 +8,10 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { UserRole, Prisma } from '@prisma/client';
-import * as bcrypt from 'bcryptjs';
+// Perf (2026-07-19): native-first bcrypt — same API + hash format, but the
+// rounds run on the libuv threadpool instead of the event loop, so logins no
+// longer stall concurrent reads on the worker (see password-hasher.util).
+import { bcryptLib as bcrypt } from '../../common/utils/password-hasher.util';
 import { createHash, randomInt } from 'crypto';
 import { ulid } from 'ulid';
 import { UsersRepository } from '../users/repositories/users.repository';

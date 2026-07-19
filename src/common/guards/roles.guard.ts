@@ -15,6 +15,16 @@ import { RedisService } from '../../redis/redis.service';
 /** SRS FR-MEMX-007: how long a verified role may be trusted before re-check. */
 const ROLE_CACHE_TTL_SECONDS = 60;
 
+// Perf (2026-07-19): tiny in-process L1 in FRONT of the Redis role cache — a
+// hot user's role resolves with ZERO network hops on nearly every request
+// (the Redis GET was the last per-request round-trip in the read pipeline).
+// Role-change propagation was already TTL-driven (60s, no explicit
+// invalidation exists); the L1 adds at most its own TTL on top (5s default),
+// so governance is unchanged in practice. Env ROLE_L1_TTL_MS (0 = disable).
+// Bounded: on overflow the map is cleared whole — O(1), self-healing.
+const ROLE_L1_TTL_MS = parseInt(process.env.ROLE_L1_TTL_MS ?? '5000', 10);
+const ROLE_L1_MAX_ENTRIES = 10000;
+
 /**
  * RolesGuard — enforces @Roles(...) decorator.
  * Must be used AFTER JwtAuthGuard (request.user must be populated).
@@ -79,13 +89,24 @@ export class RolesGuard implements CanActivate {
     return true;
   }
 
-  /** Current DB role, cached 60s. Falls back to the JWT claim if unavailable. */
+  /** In-process L1: userId → { role, expiry } (see ROLE_L1_TTL_MS above). */
+  private readonly roleL1 = new Map<string, { role: string; exp: number }>();
+
+  /** Current DB role, cached 60s (Redis) + 5s (in-process L1). Falls back to
+   *  the JWT claim if unavailable. */
   private async resolveCurrentRole(user: JwtPayload): Promise<string> {
     if (!this.prisma) return user.role;
+    if (ROLE_L1_TTL_MS > 0) {
+      const hit = this.roleL1.get(user.sub);
+      if (hit && hit.exp > Date.now()) return hit.role;
+    }
     const cacheKey = `auth:role:${user.sub}`;
     try {
       const cached = await this.redis?.get(cacheKey);
-      if (cached) return cached;
+      if (cached) {
+        this.rememberRole(user.sub, cached);
+        return cached;
+      }
     } catch (_) {
       /* cache is best-effort */
     }
@@ -100,10 +121,18 @@ export class RolesGuard implements CanActivate {
       } catch (_) {
         /* cache is best-effort */
       }
+      this.rememberRole(user.sub, role);
       return role;
     } catch (_) {
       // DB hiccup must not lock admins out mid-incident — trust the JWT.
       return user.role;
     }
+  }
+
+  /** Populate the L1 (bounded; whole-map clear on overflow is O(1) + safe). */
+  private rememberRole(userId: string, role: string): void {
+    if (ROLE_L1_TTL_MS <= 0) return;
+    if (this.roleL1.size >= ROLE_L1_MAX_ENTRIES) this.roleL1.clear();
+    this.roleL1.set(userId, { role, exp: Date.now() + ROLE_L1_TTL_MS });
   }
 }
