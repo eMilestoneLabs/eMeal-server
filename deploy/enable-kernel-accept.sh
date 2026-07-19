@@ -67,12 +67,24 @@ PM2_BIN="$(grep -oP '^ExecStart=\K\S+' "$UNIT" | head -1 || true)"
 [ -n "$PM2_BIN" ] || { echo "✗ pm2 binary not found (not in ExecStart of $UNIT nor in PATH)"; exit 1; }
 PM2_HOME_ENV="$(grep -oP '^Environment=PM2_HOME=\K.*' "$UNIT" | head -1 || true)"
 PM2_HOME_ENV="${PM2_HOME_ENV:-$(getent passwd "$PM2_USER" | cut -d: -f6)/.pm2}"
+# The pm2 bin is a node script (#!/usr/bin/env node) — runuser strips the nvm
+# PATH, so `node` itself must be resolvable too (2026-07-19 live run failed
+# with "/usr/bin/env: 'node': No such file or directory"). pm2 startup writes
+# the full nvm PATH into the unit's Environment=PATH= line — reuse it; if
+# absent, derive the node bin dir from the pm2 path (nvm layout:
+# <prefix>/lib/node_modules/pm2/bin/pm2 → <prefix>/bin).
+PM2_PATH_ENV="$(grep -oP '^Environment=PATH=\K[^"]*' "$UNIT" | head -1 || true)"
+if [ -z "$PM2_PATH_ENV" ]; then
+  NODE_PREFIX="$(dirname "$(dirname "$(dirname "$(dirname "$(dirname "$PM2_BIN")")")")")"
+  [ -x "$NODE_PREFIX/bin/node" ] && PM2_PATH_ENV="$NODE_PREFIX/bin"
+fi
+PM2_PATH_ENV="${PM2_PATH_ENV:+$PM2_PATH_ENV:}/usr/local/bin:/usr/bin:/bin"
 
 pm2_run() {
   if [ "$(id -u)" = 0 ] && [ "$PM2_USER" != root ]; then
-    runuser -u "$PM2_USER" -- env PM2_HOME="$PM2_HOME_ENV" "$PM2_BIN" "$@"
+    runuser -u "$PM2_USER" -- env PATH="$PM2_PATH_ENV" PM2_HOME="$PM2_HOME_ENV" "$PM2_BIN" "$@"
   else
-    PM2_HOME="$PM2_HOME_ENV" "$PM2_BIN" "$@"
+    env PATH="$PM2_PATH_ENV:$PATH" PM2_HOME="$PM2_HOME_ENV" "$PM2_BIN" "$@"
   fi
 }
 
