@@ -11,6 +11,7 @@ import { ROLES_KEY } from '../decorators/roles.decorator';
 import { JwtPayload } from '../decorators/current-user.decorator';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../redis/redis.service';
+import { INVALIDATION_CHANNELS } from '../utils/auth-cache-invalidation.util';
 
 /** SRS FR-MEMX-007: how long a verified role may be trusted before re-check. */
 const ROLE_CACHE_TTL_SECONDS = 60;
@@ -52,7 +53,14 @@ export class RolesGuard implements CanActivate {
     private readonly prisma: PrismaService | null,
     @Optional() @Inject(RedisService)
     private readonly redis: RedisService | null,
-  ) {}
+  ) {
+    // Invalidation bus (2026-07-19): a role change anywhere drops this
+    // worker's L1 entry within ~1-2ms — the 5s TTL stays as the safety net.
+    // Optional-chained end to end so test doubles without the bus are no-ops.
+    this.redis?.subscribeInvalidation?.(INVALIDATION_CHANNELS.role, (userId) =>
+      this.roleL1.delete(userId),
+    );
+  }
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const requiredRoles = this.reflector.getAllAndOverride<string[]>(ROLES_KEY, [

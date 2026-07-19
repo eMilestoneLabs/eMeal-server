@@ -19,6 +19,7 @@ import { RedisService } from '../../redis/redis.service';
 import { normalizePhone } from '../../common/utils/phone.util';
 import { getTodayInTimezone } from '../../common/utils/date.utils';
 import { resumeAutoAttendanceForUser } from '../../common/utils/auto-attendance-resume.util';
+import { invalidateUserAuthCaches } from '../../common/utils/auth-cache-invalidation.util';
 
 @Injectable()
 export class UsersService {
@@ -210,6 +211,13 @@ export class UsersService {
       dto.avatarUrl,
       user.avatarUrl,
     );
+
+    // Invalidation bus (2026-07-19): an email change is auth-cache-relevant
+    // (future re-verification rules ride this) — broadcast so every worker's
+    // guard L1 drops this user instantly. Fire-and-forget, TTL fallback.
+    if (dto.email !== undefined && dto.email !== user.email) {
+      void invalidateUserAuthCaches(this.redis, userId);
+    }
 
     const updated = await this.usersRepo.update(userId, {
       ...(dto.name !== undefined && { name: dto.name }),

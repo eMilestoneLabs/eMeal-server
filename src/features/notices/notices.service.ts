@@ -8,6 +8,7 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { StorageService } from '../../storage/storage.service';
+import { RedisService } from '../../redis/redis.service';
 import { NoticesRepository } from './repositories/notices.repository';
 import { NoticeSerializer } from './serializers/notice.serializer';
 import { AuditService } from '../../audit/audit.service';
@@ -46,7 +47,69 @@ export class NoticesService {
     @Optional()
     @Inject(StorageService)
     private readonly storage: StorageService | null = null,
+    // Perf (2026-07-19): Redis response cache for the two bell hot reads
+    // (feed + unread-count — the only endpoints over budget in EVERY audit
+    // run). @Optional so unit tests construct the service unchanged (cache
+    // then simply off, byte-identical legacy behavior).
+    @Optional()
+    @Inject(RedisService)
+    private readonly redis: RedisService | null = null,
   ) {}
+
+  // ── Bell response cache (feed + unread-count) ──────────────────────────────
+  // Keys are per-user (read/dismiss state and audience are per-user), TTL is a
+  // safety net only — every mutation invalidates explicitly BEFORE its
+  // realtime event fires, so a client refetching on the event always sees
+  // fresh data. NOTICE_CACHE_TTL_SECONDS=0 disables (exact legacy path).
+  // The member-gate ALWAYS runs live even on cache hits: a removed/blocked
+  // member loses access instantly, cache or no cache.
+
+  private static cacheTtlSeconds(): number {
+    return parseInt(process.env.NOTICE_CACHE_TTL_SECONDS ?? '45', 10);
+  }
+
+  private feedCacheKey(
+    organizationId: string,
+    userId: string,
+    groupId: string | undefined,
+    page: number,
+    limit: number,
+    admin: boolean,
+    includeInactive: boolean,
+  ): string {
+    return (
+      `ntc:v1:${organizationId}:${userId}:feed:${groupId ?? '-'}:` +
+      `${page}:${limit}:${admin ? 1 : 0}:${includeInactive ? 1 : 0}`
+    );
+  }
+
+  private unreadCacheKey(
+    organizationId: string,
+    userId: string,
+    groupId: string | undefined,
+    role: string,
+  ): string {
+    return `ntc:v1:${organizationId}:${userId}:unread:${groupId ?? '-'}:${role}`;
+  }
+
+  /** Notice content changed for the whole org (create/update/delete/refresh). */
+  private async invalidateOrgNoticeCache(organizationId: string): Promise<void> {
+    if (NoticesService.cacheTtlSeconds() <= 0) return;
+    await this.redis
+      ?.deletePattern(`ntc:v1:${organizationId}:*`)
+      .catch(() => undefined);
+  }
+
+  /** Only THIS user's read/dismiss state changed (markRead/dismiss/…). */
+  private async invalidateUserNoticeCache(
+    organizationId: string,
+    userId: string,
+  ): Promise<void> {
+    if (NoticesService.cacheTtlSeconds() <= 0) return;
+    await this.redis
+      ?.deletePattern(`ntc:v1:${organizationId}:${userId}:*`)
+      .catch(() => undefined);
+  }
 
   // ── SRS Module 03 NTC-012/013 — attachment validation ──────────────────────
 
@@ -232,6 +295,8 @@ export class NoticesService {
         });
         if (existing) {
           const refreshed = await this.repo.refreshAlert(existing.id, params.body);
+          // Invalidate BEFORE the event so refetching bells see fresh data.
+          await this.invalidateOrgNoticeCache(params.organizationId);
           this.realtime?.emitNoticeCreated(
             params.organizationId,
             params.groupId ?? null,
@@ -262,6 +327,8 @@ export class NoticesService {
         pinned: false,
         expiresAt: null,
       });
+      // Invalidate BEFORE the event so refetching bells see fresh data.
+      await this.invalidateOrgNoticeCache(params.organizationId);
       // Live badge: reuse the notice-created realtime channel so an open bell
       // refreshes immediately (the widget re-fetches its unread count).
       this.realtime?.emitNoticeCreated(params.organizationId, notice.groupId, {
@@ -389,6 +456,8 @@ export class NoticesService {
       pinned: notice.pinned,
       publishedAt: notice.publishedAt.toISOString(),
     };
+    // Invalidate BEFORE the event so refetching bells see fresh data.
+    await this.invalidateOrgNoticeCache(organizationId);
     this.realtime?.emitNoticeCreated(organizationId, notice.groupId, payload);
 
     // FR-NOTX-006 / ISSUE-15: best-effort push to in-scope members. The stored
@@ -416,40 +485,70 @@ export class NoticesService {
     const admin = this.isAdmin(role);
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
+    const includeInactive = admin ? !!query.includeInactive : false;
 
     // Members may only request notices for a group they actively belong to —
     // prevents cross-group leakage inside the same organization.
     // command_6 perf: the list query is org+audience-scoped itself, so the
     // membership gate runs CONCURRENTLY with it; the 403 is still thrown
-    // before anything is returned.
-    const [member, { data, total }] = await Promise.all([
+    // before anything is returned. The gate is ALWAYS live (never cached).
+    const memberGate =
       !admin && query.groupId
         ? this.repo.isActiveMember(query.groupId, userId)
-        : Promise.resolve(true),
-      this.repo.list(organizationId, userId, {
+        : Promise.resolve(true);
+
+    const fetchPage = async () => {
+      const { data, total } = await this.repo.list(organizationId, userId, {
         groupId: query.groupId,
-        includeInactive: admin ? !!query.includeInactive : false,
+        includeInactive,
         page,
         limit,
         withReadCount: admin,
         audiences: this.audiencesFor(role),
         // NTF-005: bell feed retention (ignored for the admin includeInactive view).
         retentionDays: this.retentionDays(),
-      }),
-    ]);
+      });
+      return { data: NoticeSerializer.toList(data), total, page, limit };
+    };
+
+    const ttl = NoticesService.cacheTtlSeconds();
+    if (ttl > 0 && this.redis) {
+      const cacheKey = this.feedCacheKey(
+        organizationId, userId, query.groupId, page, limit, admin, includeInactive,
+      );
+      const [member, cached] = await Promise.all([
+        memberGate,
+        this.redis.get(cacheKey).catch(() => null),
+      ]);
+      this.assertNoticeMember(member);
+      if (cached) {
+        try {
+          return JSON.parse(cached);
+        } catch {
+          /* corrupt cache entry → recompute below */
+        }
+      }
+      const response = await fetchPage();
+      void this.redis
+        .set(cacheKey, JSON.stringify(response), ttl)
+        .catch(() => undefined);
+      return response;
+    }
+
+    // Legacy path (cache disabled / redis absent) — behavior unchanged.
+    const [member, response] = await Promise.all([memberGate, fetchPage()]);
+    this.assertNoticeMember(member);
+    return response;
+  }
+
+  /** Shared 403 for the group-membership gate (feed path). */
+  private assertNoticeMember(member: boolean): void {
     if (!member) {
       throw new ForbiddenException({
         message: 'You are not a member of this group',
         errors: { groupId: 'Not an active member' },
       });
     }
-
-    return {
-      data: NoticeSerializer.toList(data),
-      total,
-      page,
-      limit,
-    };
   }
 
   // ── UNREAD COUNT (members + admins) ─────────────────────────────────────────
@@ -462,11 +561,38 @@ export class NoticesService {
   ) {
     // command_6 perf: membership gate + unread count in ONE parallel wave
     // (was two sequential round trips for members); non-member response is
-    // still { count: 0 }.
-    const [member, count] = await Promise.all([
+    // still { count: 0 }. The gate is ALWAYS live — only the count is cached.
+    const memberGate =
       !this.isAdmin(role) && groupId
         ? this.repo.isActiveMember(groupId, userId)
-        : Promise.resolve(true),
+        : Promise.resolve(true);
+
+    const ttl = NoticesService.cacheTtlSeconds();
+    if (ttl > 0 && this.redis) {
+      const cacheKey = this.unreadCacheKey(organizationId, userId, groupId, role);
+      const [member, cached] = await Promise.all([
+        memberGate,
+        this.redis.get(cacheKey).catch(() => null),
+      ]);
+      if (!member) return { count: 0 };
+      if (cached != null) {
+        const parsed = Number(cached);
+        if (Number.isFinite(parsed)) return { count: parsed };
+      }
+      const count = await this.repo.unreadCount(
+        organizationId,
+        userId,
+        groupId,
+        this.audiencesFor(role),
+        this.retentionDays(),
+      );
+      void this.redis.set(cacheKey, String(count), ttl).catch(() => undefined);
+      return { count };
+    }
+
+    // Legacy path (cache disabled / redis absent) — behavior unchanged.
+    const [member, count] = await Promise.all([
+      memberGate,
       this.repo.unreadCount(
         organizationId,
         userId,
@@ -490,6 +616,7 @@ export class NoticesService {
       });
     }
     await this.repo.markRead(noticeId, userId);
+    await this.invalidateUserNoticeCache(organizationId, userId);
     return { success: true };
   }
 
@@ -505,6 +632,7 @@ export class NoticesService {
       groupId,
       this.audiencesFor(role),
     );
+    await this.invalidateUserNoticeCache(organizationId, userId);
     return { success: true, updated };
   }
 
@@ -523,6 +651,7 @@ export class NoticesService {
       });
     }
     await this.repo.dismiss(noticeId, userId);
+    await this.invalidateUserNoticeCache(organizationId, userId);
     return { success: true };
   }
 
@@ -543,6 +672,7 @@ export class NoticesService {
       this.audiencesFor(role),
       this.retentionDays(),
     );
+    await this.invalidateUserNoticeCache(organizationId, userId);
     return { success: true, dismissed: updated };
   }
 
@@ -585,6 +715,7 @@ export class NoticesService {
       requestId,
     });
 
+    await this.invalidateOrgNoticeCache(organizationId);
     return NoticeSerializer.toResponse(updated);
   }
 
@@ -609,6 +740,7 @@ export class NoticesService {
       });
     }
     await this.repo.softDelete(id, organizationId);
+    await this.invalidateOrgNoticeCache(organizationId);
 
     this.audit.log({
       organizationId,

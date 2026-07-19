@@ -35,8 +35,91 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy() {
+    if (this.subscriber) {
+      await this.subscriber.quit().catch(() => undefined);
+      this.subscriber = null;
+    }
     await this.client.quit();
     this.logger.log('Redis disconnected');
+  }
+
+  // ── Cache-invalidation bus (2026-07-19) ────────────────────────────────────
+  // Event-driven cache coherence across PM2 workers: a mutation site publishes
+  // on a channel, every worker's subscriber drops its in-process L1 entry
+  // within ~1-2ms — TTLs remain as the safety net, the bus makes propagation
+  // instant (the scaled-down Meta memcache-invalidation-pipeline model).
+  // Fail-soft by Governance Law #17: publish/subscribe failures degrade to
+  // exactly the pre-bus TTL behavior, never break a request.
+  // CACHE_INVAL_BUS=0 disables both directions (default on).
+
+  private subscriber: Redis | null = null;
+  private readonly subscribedChannels = new Set<string>();
+  // Handler registry: ONE 'message' listener total dispatches to all
+  // registered handlers (guards are instantiated per Nest module context, so
+  // many instances may subscribe — a listener per instance would trip Node's
+  // MaxListenersExceededWarning; a registry keeps it clean at any count).
+  private readonly invalidationHandlers = new Map<
+    string,
+    Array<(payload: string) => void>
+  >();
+  private static busEnabled(): boolean {
+    return (process.env.CACHE_INVAL_BUS ?? '1') !== '0';
+  }
+
+  /** Broadcast an invalidation event to every worker. Fire-and-forget safe. */
+  async publishInvalidation(channel: string, payload: string): Promise<void> {
+    if (!RedisService.busEnabled()) return;
+    try {
+      await this.client.publish(channel, payload);
+    } catch (err) {
+      this.logger.warn(
+        `invalidation publish failed (TTL fallback governs): ${(err as Error).message}`,
+      );
+    }
+  }
+
+  /**
+   * Register a handler for an invalidation channel. Uses ONE dedicated
+   * subscriber connection (Redis subscribers block their connection) shared
+   * by all channels, created lazily on first use. Handler errors are isolated.
+   */
+  subscribeInvalidation(channel: string, handler: (payload: string) => void): void {
+    if (!RedisService.busEnabled()) return;
+    try {
+      if (!this.subscriber) {
+        this.subscriber = this.client.duplicate();
+        this.subscriber.on('error', (err) =>
+          this.logger.warn(`invalidation subscriber error: ${err.message}`),
+        );
+        // The ONLY message listener — dispatches to the handler registry.
+        this.subscriber.on('message', (ch: string, msg: string) => {
+          const handlers = this.invalidationHandlers.get(ch);
+          if (!handlers) return;
+          for (const h of handlers) {
+            try {
+              h(msg);
+            } catch {
+              /* one bad handler must never affect the bus */
+            }
+          }
+        });
+      }
+      const list = this.invalidationHandlers.get(channel) ?? [];
+      list.push(handler);
+      this.invalidationHandlers.set(channel, list);
+      if (!this.subscribedChannels.has(channel)) {
+        this.subscribedChannels.add(channel);
+        void this.subscriber.subscribe(channel).catch((err: Error) => {
+          this.logger.warn(
+            `invalidation subscribe failed (TTL fallback governs): ${err.message}`,
+          );
+        });
+      }
+    } catch (err) {
+      this.logger.warn(
+        `invalidation bus unavailable (TTL fallback governs): ${(err as Error).message}`,
+      );
+    }
   }
 
   // ── Connection state ──────────────────────────────────────────────────────

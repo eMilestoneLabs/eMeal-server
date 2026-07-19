@@ -2,10 +2,14 @@ import {
   CanActivate,
   ExecutionContext,
   ForbiddenException,
+  Inject,
   Injectable,
+  Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
+import { RedisService } from '../../redis/redis.service';
+import { INVALIDATION_CHANNELS } from '../utils/auth-cache-invalidation.util';
 
 /**
  * SRS Module 03 ACC-005 (survey Q1/Q19) — email verification is required to
@@ -42,7 +46,19 @@ export class EmailVerifiedGuard implements CanActivate {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
-  ) {}
+    // Invalidation bus (2026-07-19): additive + optional so existing unit
+    // tests constructing (prisma, config) keep working unchanged.
+    @Optional()
+    @Inject(RedisService)
+    private readonly redis: RedisService | null = null,
+  ) {
+    // A verification-relevant change anywhere drops this worker's positive
+    // entry within ~1-2ms — the 60s TTL stays as the safety net.
+    this.redis?.subscribeInvalidation?.(
+      INVALIDATION_CHANNELS.emailVerified,
+      (userId) => this.verifiedUntil.delete(userId),
+    );
+  }
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const enforced =

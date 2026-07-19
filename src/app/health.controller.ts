@@ -1,4 +1,5 @@
 import { Controller, Get } from '@nestjs/common';
+import { monitorEventLoopDelay } from 'perf_hooks';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { QueueService } from '../queue/queue.service';
@@ -11,6 +12,21 @@ interface HealthProbes {
   queues: Record<string, unknown>;
   allHealthy: boolean;
 }
+
+// Stall forensics (2026-07-19): request tails (p95 spikes with unchanged
+// mins, a DIFFERENT endpoint set slow on every audit run, and /health —
+// an in-memory cache read — showing 400ms outliers) point at stalls BELOW
+// the app: either this worker's event loop pausing, or the shared vCPU
+// being scheduled away (noisy neighbor / co-located containers). This
+// histogram separates the two with hard data: `eventLoop.max` ≈ request
+// tail → in-process stall (investigate app); `eventLoop.max` low while
+// request tails stay high → the host paused us (vCPU steal / host noise —
+// no application code can fix that). Sampled continuously at ~20ms
+// resolution; numbers are ms since the previous /health read (reset each
+// read so every sample covers a known window). Additive payload field.
+const loopDelay = monitorEventLoopDelay({ resolution: 20 });
+loopDelay.enable();
+const NS_PER_MS = 1e6;
 
 @Controller('health')
 export class HealthController {
@@ -42,11 +58,22 @@ export class HealthController {
   @Get()
   async check() {
     const probes = await this.getProbes();
+    // Event-loop lag over the window since the last /health read (ms).
+    // mean/p99 ≈ 0-2ms and max small → loop healthy; a large max here that
+    // matches a request-latency spike = in-process stall; small max while
+    // requests spiked = the HOST paused this worker (vCPU steal).
+    const eventLoop = {
+      meanMs: +(loopDelay.mean / NS_PER_MS).toFixed(2),
+      p99Ms: +(loopDelay.percentile(99) / NS_PER_MS).toFixed(2),
+      maxMs: +(loopDelay.max / NS_PER_MS).toFixed(2),
+    };
+    loopDelay.reset();
     return {
       status: probes.allHealthy ? 'ok' : 'degraded',
       database: probes.database,
       redis: probes.redis,
       queues: probes.queues,
+      eventLoop,
       timestamp: new Date().toISOString(),
       uptime: Math.floor(process.uptime()),
       version: process.env.npm_package_version ?? '1.0.0',
