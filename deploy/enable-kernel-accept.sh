@@ -55,6 +55,27 @@ fi
 SVC="$(basename "$UNIT" .service)"
 BAK="$UNIT.bak-kernel-accept"
 
+# pm2 lives under the app user's nvm prefix, so root's PATH (sudo) can't see
+# it — the 2026-07-19 live run died at `pm2: command not found` AFTER editing
+# the unit. Resolve the binary + user + PM2_HOME from the unit file itself
+# (pm2 startup writes its full path into ExecStart and its env into
+# Environment=), and run every pm2 command as that user.
+PM2_USER="$(grep -oP '^User=\K.*' "$UNIT" | head -1 || true)"
+PM2_USER="${PM2_USER:-$(id -un)}"
+PM2_BIN="$(grep -oP '^ExecStart=\K\S+' "$UNIT" | head -1 || true)"
+[ -n "$PM2_BIN" ] && [ -x "$PM2_BIN" ] || PM2_BIN="$(command -v pm2 || true)"
+[ -n "$PM2_BIN" ] || { echo "✗ pm2 binary not found (not in ExecStart of $UNIT nor in PATH)"; exit 1; }
+PM2_HOME_ENV="$(grep -oP '^Environment=PM2_HOME=\K.*' "$UNIT" | head -1 || true)"
+PM2_HOME_ENV="${PM2_HOME_ENV:-$(getent passwd "$PM2_USER" | cut -d: -f6)/.pm2}"
+
+pm2_run() {
+  if [ "$(id -u)" = 0 ] && [ "$PM2_USER" != root ]; then
+    runuser -u "$PM2_USER" -- env PM2_HOME="$PM2_HOME_ENV" "$PM2_BIN" "$@"
+  else
+    PM2_HOME="$PM2_HOME_ENV" "$PM2_BIN" "$@"
+  fi
+}
+
 daemon_pid() { pgrep -f 'PM2 .*God Daemon' | head -1 || true; }
 
 show_state() {
@@ -88,10 +109,10 @@ wait_health() {
 restart_daemon() {
   # Fresh dump so the resurrect after the daemon restart restores EXACTLY the
   # current process list (web tier + worker tier).
-  echo "  → pm2 save (snapshot current process list)"
-  pm2 save
+  echo "  → pm2 save (snapshot current process list; as $PM2_USER via $PM2_BIN)"
+  pm2_run save
   echo "  → pm2 kill (stop daemon + apps; ≈10s downtime starts now)"
-  pm2 kill
+  pm2_run kill
   echo "  → systemctl daemon-reload && systemctl restart $SVC (daemon restarts with new env, resurrects apps)"
   systemctl daemon-reload
   systemctl restart "$SVC"
