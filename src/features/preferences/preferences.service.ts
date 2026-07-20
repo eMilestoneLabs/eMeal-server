@@ -25,6 +25,19 @@ import {
   PreferenceSelectionDto,
 } from './dto/preference-group.dto';
 
+/**
+ * Live-Test-11 ISSUE-008: reserved key of the SYSTEM "None" option that is
+ * automatically appended (last) to every effective preference group. It means
+ * "attending, but no optional item": satisfies required groups, bills ₹0,
+ * carries no quantity/inventory, is mutually exclusive with every other pick,
+ * cannot be created/edited/deleted by admins, and never counts toward the
+ * 2–5 option limit (it is virtual — never stored in the DB).
+ */
+export const NONE_OPTION_KEY = '__none__';
+
+/** Display label snapshotted for NONE rows (dashboard shows it separately). */
+export const NONE_OPTION_LABEL = 'None';
+
 /** The resolved, per-meal-effective shape used by validation and embedding. */
 export interface EffectivePreferenceGroup {
   id: string;
@@ -195,6 +208,25 @@ export class PreferencesService {
           maxQty: o.maxQty,
           order: o.order,
         }));
+      // ISSUE-008: the SYSTEM "None" option — always available, always LAST,
+      // ₹0, veg-safe, quantity-locked to 1. Virtual (never stored), so it can
+      // never count toward the 2–5 option cap nor be edited by admins. Only
+      // appended when the group has at least one real option — a group with
+      // zero selectable options keeps its legacy auto-satisfied fail-safe.
+      if (options.length > 0) {
+        options.push({
+          id: NONE_OPTION_KEY,
+          key: NONE_OPTION_KEY,
+          label: NONE_OPTION_LABEL,
+          emoji: null,
+          color: null,
+          isVeg: true,
+          priceDelta: 0,
+          minQty: 1,
+          maxQty: 1,
+          order: (options[options.length - 1]?.order ?? 0) + 1,
+        });
+      }
       const effective: EffectivePreferenceGroup = {
         id: g.id,
         label: g.label,
@@ -274,18 +306,35 @@ export class PreferencesService {
       // rejects everything else), so a required vegOnly group whose active
       // options are all non-veg used to make the meal permanently unmarkable
       // (client hides it, server demanded it → 422 forever).
-      const selectable = g.vegOnly
+      // ISSUE-008: the virtual NONE option is excluded from this emptiness
+      // check — it must never turn a legacy auto-satisfied group into one
+      // that suddenly demands an explicit pick.
+      const selectable = (g.vegOnly
         ? g.options.filter((o) => o.isVeg)
-        : g.options;
+        : g.options
+      ).filter((o) => o.key !== NONE_OPTION_KEY);
       if (selectable.length === 0) continue;
+
+      // ISSUE-008: NONE is mutually exclusive with every other pick in the
+      // group — server-authoritative mirror of the client auto-deselect.
+      const pickedNone = chosen.some((s) => s.optionKey === NONE_OPTION_KEY);
+      if (pickedNone && chosen.length > 1) {
+        details.push({
+          groupId: g.id,
+          reason: `"${NONE_OPTION_LABEL}" cannot be combined with other ${g.label} picks`,
+        });
+        continue;
+      }
 
       const min = g.required ? Math.max(g.minSelect, 1) : 0;
       const max = Math.min(Math.max(g.maxSelect, min || 1), selectable.length);
-      if (chosen.length < min) {
+      // ISSUE-008: a lone NONE satisfies any required group (min) and is
+      // always within max (it is exactly one pick that means "no item").
+      if (!pickedNone && chosen.length < min) {
         details.push({ groupId: g.id, reason: `Choose a ${g.label} option` });
         continue;
       }
-      if (chosen.length > max) {
+      if (!pickedNone && chosen.length > max) {
         details.push({ groupId: g.id, reason: `Choose at most ${max} ${g.label} option(s)` });
         continue;
       }
@@ -639,6 +688,10 @@ export class PreferencesService {
       preferenceGroupId: groupId,
       order: dto.order ?? group.options.length,
       ...dto,
+      // Live-Test-11 ISSUE-014/010: the group is the PARENT policy — a new
+      // option added to a veg-only group ALWAYS inherits Veg, regardless of
+      // what the payload claims (same cascade as create/update-group).
+      ...(group.vegOnly === true ? { isVeg: true } : {}),
     });
     this.auditConfig(organizationId, adminId, groupId, 'update', { addedOption: dto.key }, requestId);
     this.emitConfigChanged(organizationId, group.groupId, null);
@@ -656,6 +709,16 @@ export class PreferencesService {
     const option = await this.repo.findOptionById(id);
     if (!option || option.group.organizationId !== organizationId) {
       throw new NotFoundException('Preference option not found');
+    }
+    // ISSUE-008: an option can never be RENAMED into the system "None".
+    if ((dto.label ?? '').trim().toLowerCase() === 'none') {
+      throw new BadRequestException({
+        message: `"${NONE_OPTION_LABEL}" is a system option`,
+        errors: {
+          label:
+            'A "None" choice is added automatically to every group — options cannot take that name',
+        },
+      });
     }
     // Live-Test-11 ISSUE-014: inside a veg-only group the per-option veg flag
     // is locked ON — change the group's policy to change the options.
@@ -930,6 +993,21 @@ export class PreferencesService {
     const labels = new Set<string>();
     for (const o of options) {
       const normKey = o.key.trim().toLowerCase();
+      // ISSUE-008: "None" is a SYSTEM option — always present, always last,
+      // never admin-managed. Reserve its key and label in both cases.
+      if (
+        normKey === NONE_OPTION_KEY ||
+        normKey === 'none' ||
+        (o.label ?? '').trim().toLowerCase() === 'none'
+      ) {
+        throw new BadRequestException({
+          message: `"${NONE_OPTION_LABEL}" is a system option`,
+          errors: {
+            options:
+              'A "None" choice is added automatically to every group — you do not need to create it',
+          },
+        });
+      }
       if (keys.has(normKey)) {
         throw new BadRequestException({
           message: `Duplicate option key "${o.key}"`,

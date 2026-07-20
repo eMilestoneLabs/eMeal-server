@@ -317,6 +317,10 @@ export class AttendanceService {
             // Live-Test-11 ISSUE-017: Bill-Absent policy snapshotted onto
             // every absent write — rides the same query, no extra round-trip.
             billAbsentMeals: true,
+            // ISSUE-007B: option-priced quantity billing gate.
+            mealPricingEnabled: true,
+            // ISSUE-011: Global Meal Preference switch (master-mode gate).
+            preferencesEnabled: true,
           },
         },
         organization: { select: { timezone: true } },
@@ -423,6 +427,8 @@ export class AttendanceService {
         dateUtc: toUtcMidnight(attendanceDate),
         mealOpenTime:
           effective.openTime ?? meal.attendanceWindowOpen ?? null,
+        // ISSUE-005: identity-first boundary coverage (start/end meal).
+        mealSlotKey: (meal as any).slotKey ?? null,
         candidates: [
           { userId, isVacationMode: user?.isVacationMode === true },
         ],
@@ -587,6 +593,11 @@ export class AttendanceService {
           pgGroups,
           effective,
         );
+      } else if ((meal.group as any)?.preferencesEnabled === false) {
+        // ISSUE-011: MASTER mode + Global Meal Preferences OFF — no meal
+        // demands or accepts preference picks (mirror of the today view).
+        // Planner mode is governed by the published day (strip-at-publish).
+        pgGroups = [];
       }
       if (pgGroups.length > 0) {
         // Live-Test-11 ISSUE-002: unlimited Present↔Absent toggling inside the
@@ -637,6 +648,15 @@ export class AttendanceService {
         // can produce) divide exactly; the round only guards hand-crafted data.
         if (effectivePrice != null) {
           markPrice = effectivePrice + Math.round(validated.totalDelta / 100);
+        } else if (
+          validated.totalDelta > 0 &&
+          (meal.group as any)?.mealPricingEnabled === true
+        ) {
+          // Live-Test-11 ISSUE-007B: quantity/option-priced billing without a
+          // base plate price — a ₹50/plate option × qty 10 must bill ₹500
+          // even when the meal itself carries no base price. Still opt-in:
+          // pricing-disabled groups keep recording selections unbilled.
+          markPrice = Math.round(validated.totalDelta / 100);
         }
         derivedPreference = dto.preference ?? validated.primaryKey;
         selectionSnapshot = validated.snapshot;
@@ -1075,6 +1095,10 @@ export class AttendanceService {
             dayWiseMealsEnabled: true,
             // ISSUE-017: policy snapshot for consented absent writes too.
             billAbsentMeals: true,
+            // ISSUE-007B: option-priced quantity billing gate.
+            mealPricingEnabled: true,
+            // ISSUE-011: Global Meal Preference switch (master-mode gate).
+            preferencesEnabled: true,
           },
         },
       },
@@ -1116,6 +1140,9 @@ export class AttendanceService {
           pgGroups,
           effective,
         );
+      } else if ((meal?.group as any)?.preferencesEnabled === false) {
+        // ISSUE-011: master-mode Global OFF — same gate as markAttendance.
+        pgGroups = [];
       }
       if (pgGroups.length > 0) {
         const validated = this.preferencesService.validateSelections(
@@ -1125,6 +1152,13 @@ export class AttendanceService {
         // Same paise→₹ unit boundary as markAttendance (Issue 1/2).
         if (price != null) {
           finalPrice = price + Math.round(validated.totalDelta / 100);
+        } else if (
+          validated.totalDelta > 0 &&
+          (meal?.group as any)?.mealPricingEnabled === true
+        ) {
+          // ISSUE-007B: option-priced quantity billing with no base price —
+          // identical rule to markAttendance so approvals bill the same.
+          finalPrice = Math.round(validated.totalDelta / 100);
         }
         derivedPreference = params.preference ?? validated.primaryKey;
         selectionSnapshot = validated.snapshot;
@@ -1492,6 +1526,8 @@ export class AttendanceService {
       groupId: meal.groupId,
       dateUtc: attendanceDateUtc,
       mealOpenTime: meal.attendanceWindowOpen ?? null,
+      // ISSUE-005: identity-first boundary coverage (start/end meal).
+      mealSlotKey: (meal as any).slotKey ?? null,
       candidates: activeMembers.map((m) => ({
         userId: m.userId,
         isVacationMode: m.user.isVacationMode === true,
@@ -1518,6 +1554,9 @@ export class AttendanceService {
       preferenceBreakdown: counts.preferenceBreakdown,
       preferenceGroupBreakdown: counts.preferenceGroupBreakdown,
       preferenceGroupPickCounts: counts.preferenceGroupPickCounts,
+      // ISSUE-004: distinct-respondent headcount per group (1 member = 1,
+      // regardless of multi-pick rows or quantities).
+      preferenceGroupRespondentCounts: counts.preferenceGroupRespondentCounts,
     });
 
     // Module 22 (FR-HG-060/061): kitchen counts include booked+approved
@@ -1857,6 +1896,8 @@ export class AttendanceService {
           role: meta?.role ?? 'member',
           email: meta?.email ?? null,
           phone: meta?.phone ?? null,
+          // Live-Test-11 ISSUE-003 (additive): avatar for billing rows.
+          avatarUrl: (meta as any)?.avatarUrl ?? null,
           totalBill: agg.totalBill + guest.guestAmount,
           // Live-Test-5 ISSUE-4: own meal charges (incl. policy-billed
           // skipped/absent) as an independent component — guest charges are

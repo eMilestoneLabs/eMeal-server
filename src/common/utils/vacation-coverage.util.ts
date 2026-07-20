@@ -42,12 +42,23 @@ function hhmmToMinutes(t: string | null | undefined): number | null {
  * Pure boundary math: does an approved request cover (dateUtc, meal)?
  * `mealOpenMinutes` null (windowless meal) or an unresolvable boundary slot
  * resolves to covered (fail-safe).
+ *
+ * Live-Test-11 ISSUE-005 — MEAL PRIORITY over time math: when the evaluated
+ * meal IS the boundary slot itself (`mealSlotKey` matches), it is covered by
+ * IDENTITY — the start meal is always the first covered meal and the end meal
+ * always the last, even if per-day window overrides shifted its open time
+ * relative to the master clock the boundary was resolved against. Open-time
+ * comparison only ranks the OTHER meals around the boundary. If the boundary
+ * meal no longer exists on that day (deleted / republished without it), the
+ * unresolvable bound falls back to whole-boundary-day coverage — i.e. the
+ * DATE governs, exactly the documented fallback.
  */
 export function requestCoversMeal(
   req: VacationRangeLite,
   dateUtc: Date,
   mealOpenMinutes: number | null,
   slotOpenMinutes: (slotKey: string) => number | null,
+  mealSlotKey?: string | null,
 ): boolean {
   const t = dateUtc.getTime();
   if (t < req.startDate.getTime() || t > req.endDate.getTime()) return false;
@@ -57,6 +68,22 @@ export function requestCoversMeal(
   if ((!isStartDay || !req.startSlotKey) && (!isEndDay || !req.endSlotKey)) {
     return true; // interior day, or boundary day without a slot bound
   }
+
+  // ISSUE-005: the boundary meal itself is covered by IDENTITY (inclusive
+  // start meal / inclusive end meal) — never subject to clock comparison.
+  // A single-day request with BOTH bounds set still honours the opposite
+  // bound (e.g. start=Lunch end=Lunch covers exactly Lunch).
+  if (mealSlotKey) {
+    const startIdentity = isStartDay && req.startSlotKey === mealSlotKey;
+    const endIdentity = isEndDay && req.endSlotKey === mealSlotKey;
+    if (startIdentity && (!isEndDay || !req.endSlotKey || endIdentity)) {
+      return true;
+    }
+    if (endIdentity && (!isStartDay || !req.startSlotKey || startIdentity)) {
+      return true;
+    }
+  }
+
   if (mealOpenMinutes === null) return true; // windowless meal → fail-safe
 
   if (isStartDay && req.startSlotKey) {
@@ -92,6 +119,12 @@ export async function getVacationCoveredUserIds(
     dateUtc: Date;
     /** HH:mm open time of the meal being evaluated (null = windowless). */
     mealOpenTime: string | null;
+    /**
+     * ISSUE-005 (additive): slotKey of the meal being evaluated. When it
+     * matches a request's boundary slot, coverage is decided by IDENTITY
+     * (start meal inclusive / end meal inclusive) instead of clock math.
+     */
+    mealSlotKey?: string | null;
     candidates: Array<{ userId: string; isVacationMode: boolean }>;
   },
 ): Promise<Set<string>> {
@@ -186,7 +219,13 @@ export async function getVacationCoveredUserIds(
     if (reqs && reqs.length > 0) {
       if (
         reqs.some((r) =>
-          requestCoversMeal(r, dateUtc, mealOpenMinutes, slotOpenLookup),
+          requestCoversMeal(
+            r,
+            dateUtc,
+            mealOpenMinutes,
+            slotOpenLookup,
+            params.mealSlotKey ?? null,
+          ),
         )
       ) {
         covered.add(c.userId);

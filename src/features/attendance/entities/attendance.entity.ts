@@ -132,6 +132,10 @@ export class MealAttendanceSummaryEntity {
   // breakdown totals ("Ruti ×3" = 1 pick, 3 plates).
   preferenceGroupPickCounts?: Record<string, number>;
 
+  // Live-Test-11 ISSUE-004 (additive): distinct members who answered each
+  // preference group — the multi-pick/quantity-safe headcount source.
+  preferenceGroupRespondentCounts?: Record<string, number>;
+
   constructor(data: Partial<MealAttendanceSummaryEntity>) {
     Object.assign(this, data);
   }

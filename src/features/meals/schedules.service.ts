@@ -316,6 +316,25 @@ export class SchedulesService {
    * Publish a schedule — makes it visible to students.
    * Idempotent: calling publish on an already-published schedule is safe.
    */
+  /**
+   * ISSUE-011: is the group's GLOBAL Meal Preferences switch OFF? Optional-
+   * chained + fail-safe (unknown ⇒ false = keep preferences) so partial test
+   * doubles and legacy groups behave exactly as before.
+   */
+  private async groupPreferencesOff(
+    groupId: string,
+    organizationId: string,
+  ): Promise<boolean> {
+    try {
+      const g = this.groupsRepo.findByIdConfig
+        ? await this.groupsRepo.findByIdConfig(groupId, organizationId)
+        : await this.groupsRepo.findById(groupId, organizationId);
+      return (g as any)?.preferencesEnabled === false;
+    } catch {
+      return false;
+    }
+  }
+
   async publishSchedule(
     id: string,
     organizationId: string,
@@ -342,10 +361,18 @@ export class SchedulesService {
         organizationId,
         dto.entries,
       );
+      // ISSUE-011: Global Meal Preferences OFF ⇒ the published snapshot goes
+      // out preference-free — the moment members receive this publish, no
+      // meal shows/demands preference picks (Global overrides every meal).
+      const stripPrefs = await this.groupPreferencesOff(
+        existing.groupId,
+        organizationId,
+      );
       schedule = await this.schedulesRepo.replaceAndPublish(
         id,
         organizationId,
         entries,
+        stripPrefs,
       );
     } else {
       // SRS Module 03 MMT-011 (publish-blocked bug): entries referencing a
@@ -392,7 +419,16 @@ export class SchedulesService {
           });
         }
       }
-      schedule = await this.schedulesRepo.publish(id, organizationId);
+      // ISSUE-011: same Global-OFF strip on the plain flag-flip publish.
+      const stripPrefs = await this.groupPreferencesOff(
+        existing.groupId,
+        organizationId,
+      );
+      schedule = await this.schedulesRepo.publish(
+        id,
+        organizationId,
+        stripPrefs,
+      );
     }
 
     this.audit.log({

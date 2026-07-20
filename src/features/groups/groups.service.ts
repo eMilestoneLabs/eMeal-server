@@ -109,6 +109,16 @@ export class GroupsService {
       const seen = new Set<string>();
       for (const tag of tags) {
         const norm = tag.trim().toLowerCase();
+        // Live-Test-11 ISSUE-008: 'None' is reserved for the system option.
+        if (norm === 'none') {
+          throw new BadRequestException({
+            message: 'Validation failed',
+            errors: {
+              enabledPreferences:
+                '"None" is a system option — it is always available to members automatically',
+            },
+          });
+        }
         if (seen.has(norm)) {
           throw new ConflictException({
             message: 'Validation failed',
@@ -748,6 +758,41 @@ export class GroupsService {
     }
 
     const group = await this.groupsRepo.update(id, organizationId, updateData);
+
+    // Live-Test-11 ISSUE-011: the GLOBAL Meal Preference toggle is a
+    // STRUCTURAL configuration change — exactly like a master meal deletion,
+    // every published planner of this group auto-flips to DRAFT (published
+    // snapshot intact: members keep the last published week untouched until
+    // the admin reviews and republishes; the publish path then applies the
+    // new global state to the snapshot). Fail-soft: a revert failure never
+    // blocks the config save itself.
+    if (
+      updateData.preferencesEnabled !== undefined &&
+      updateData.preferencesEnabled !== (existing as any).preferencesEnabled
+    ) {
+      try {
+        const reverted = await this.prisma.mealSchedule.updateMany({
+          where: { groupId: id, organizationId, isPublished: true },
+          data: { isPublished: false },
+        });
+        if (reverted.count > 0) {
+          this.audit.log({
+            organizationId,
+            actorId,
+            targetId: id,
+            targetType: 'Group',
+            action: 'update',
+            metadata: {
+              globalPreferenceToggle: updateData.preferencesEnabled,
+              schedulesRevertedToDraft: reverted.count,
+            },
+            requestId,
+          });
+        }
+      } catch {
+        /* fail-soft — schedule revert must never block the config save */
+      }
+    }
 
     // Additive (#8): update the requesting admin's functional role for THIS
     // group (per-group title). Only applies when the actor is a member.

@@ -200,10 +200,30 @@ export class SchedulesRepository {
     return this.buildScheduleEntity(raw);
   }
 
+  /**
+   * Live-Test-11 ISSUE-011: Global Meal Preference OFF is applied AT PUBLISH
+   * TIME — every snapshot row's per-day preference config is forced off, so
+   * members receive the preference-free week the moment the admin publishes
+   * (and keep the previous published week untouched until then).
+   */
+  private stripSnapshotPreferences(snapshot: any[]): any[] {
+    return snapshot.map((e) => ({
+      ...e,
+      preferencesEnabled: false,
+      enabledPreferences: [],
+      enabledPreferenceGroupIds: [],
+    }));
+  }
+
   /** Persist the published snapshot for a schedule from its current live entries. */
-  private async captureSnapshot(id: string, organizationId: string): Promise<void> {
+  private async captureSnapshot(
+    id: string,
+    organizationId: string,
+    stripPreferences = false,
+  ): Promise<void> {
     const full = await this.findById(id, organizationId);
-    const snapshot = full ? this.snapshotFromEntries(full.entries) : [];
+    let snapshot = full ? this.snapshotFromEntries(full.entries) : [];
+    if (stripPreferences) snapshot = this.stripSnapshotPreferences(snapshot);
     await this.prisma.mealSchedule.updateMany({
       where: { id, organizationId },
       data: { publishedSnapshot: snapshot } as any,
@@ -614,10 +634,16 @@ export class SchedulesRepository {
     }));
   }
 
-  async publish(id: string, organizationId: string): Promise<MealScheduleEntity> {
+  async publish(
+    id: string,
+    organizationId: string,
+    // ISSUE-011: true when the group's Global Meal Preferences are OFF.
+    stripPreferences = false,
+  ): Promise<MealScheduleEntity> {
     // Freeze the current live entries as the published snapshot students read.
     const current = await this.findById(id, organizationId);
-    const snapshot = current ? this.snapshotFromEntries(current.entries) : [];
+    let snapshot = current ? this.snapshotFromEntries(current.entries) : [];
+    if (stripPreferences) snapshot = this.stripSnapshotPreferences(snapshot);
     const result = await this.prisma.mealSchedule.updateMany({
       where: { id, organizationId },
       data: {
@@ -653,6 +679,9 @@ export class SchedulesRepository {
       menuItems?: string[] | null;
       price?: number | null;
     }>,
+    // ISSUE-011: true when the group's Global Meal Preferences are OFF —
+    // the captured snapshot publishes preference-free.
+    stripPreferences = false,
   ): Promise<MealScheduleEntity> {
     await this.prisma.$transaction(async (tx) => {
       const owned = await tx.mealSchedule.findFirst({
@@ -706,7 +735,7 @@ export class SchedulesRepository {
       });
     });
     // Freeze the just-published entries as the snapshot students read.
-    await this.captureSnapshot(id, organizationId);
+    await this.captureSnapshot(id, organizationId, stripPreferences);
     return this.findById(id, organizationId) as Promise<MealScheduleEntity>;
   }
 

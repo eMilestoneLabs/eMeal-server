@@ -41,7 +41,10 @@ import {
   getWindowState,
 } from '../common/utils/date.utils';
 import { getVacationCoveredUserIds } from '../common/utils/vacation-coverage.util';
-import { resolvePublishedDayEntries } from '../common/utils/published-day.util';
+import {
+  resolvePublishedDayEntries,
+  PublishedDayEntry,
+} from '../common/utils/published-day.util';
 import { GroupsRepository } from '../features/groups/repositories/groups.repository';
 import { RetentionService } from '../features/retention/retention.service';
 
@@ -691,11 +694,16 @@ export class SystemDefaultWorker extends WorkerHost {
     dayWiseMealsEnabled: boolean;
     organization: { timezone: string | null } | null;
   }): Promise<void> {
-    // Live-Test-8 ISSUE-003/006: meal system OFF = meals are hidden from every
-    // member — never auto-mark (and thereby auto-bill) invisible meals. The
-    // group's stored sub-flags are preserved for re-enable; this gate is what
-    // makes them inert meanwhile.
-    if (group.mealsEnabled === false) return;
+    // Live-Test-11 ISSUE-002 (user-confirmed rule, supersedes the Live-Test-8
+    // blanket gate): Attendance-Only Mode ≠ Meal System. When mealsEnabled is
+    // OFF only MEAL functionality is inert — the group's attendance WINDOWS
+    // remain the primary attendance mechanism, so personal Auto-Attendance
+    // still materializes on them. Guarantees in attendance-only mode:
+    //  • price is ALWAYS null (no meal billing can ever be generated),
+    //  • the planner overlay is ignored (windows come from the MASTER rows —
+    //    the exact set /meals/today shows and marking enforces),
+    //  • preference gates below still apply to any leftover meal-era rows.
+    const attendanceOnly = group.mealsEnabled === false;
     const tz = group.organization?.timezone ?? 'Asia/Kolkata';
     const todayStr = todayInTimezone(tz);
     const nowTime = getCurrentTimeInTimezone(tz);
@@ -720,6 +728,7 @@ export class SystemDefaultWorker extends WorkerHost {
         select: {
           id: true,
           name: true,
+          slotKey: true,
           isActive: true,
           preferencesEnabled: true,
           attendanceWindowOpen: true,
@@ -727,11 +736,15 @@ export class SystemDefaultWorker extends WorkerHost {
           price: true,
         },
       }),
-      resolvePublishedDayEntries(this.prisma, {
-        groupId: group.id,
-        organizationId: group.organizationId,
-        dateStr: todayStr,
-      }),
+      // ISSUE-002: attendance-only ignores the planner entirely (meal-system
+      // machinery) — skip the published-day query, no entries to overlay.
+      attendanceOnly
+        ? Promise.resolve(new Map<string, PublishedDayEntry>())
+        : resolvePublishedDayEntries(this.prisma, {
+            groupId: group.id,
+            organizationId: group.organizationId,
+            dateStr: todayStr,
+          }),
     ]);
     if (!meals.length) return;
 
@@ -745,10 +758,11 @@ export class SystemDefaultWorker extends WorkerHost {
     });
     const hasGroups = new Set(boundGroups.map((b) => b.mealId));
 
-    // mealsEnabled === false already early-returned above, so planner mode is
-    // decided by the two planner flags alone here.
+    // ISSUE-002: attendance-only never runs planner mode (same rule as the
+    // /meals/today overlay and the marking path's plannerActive gate).
     const plannerActive =
-      group.weeklyMenuEnabled === true || group.dayWiseMealsEnabled === true;
+      !attendanceOnly &&
+      (group.weeklyMenuEnabled === true || group.dayWiseMealsEnabled === true);
 
     for (const meal of meals) {
       const entry = entryMap.get(meal.id);
@@ -789,9 +803,16 @@ export class SystemDefaultWorker extends WorkerHost {
         group,
         mealId: meal.id,
         mealName: meal.name,
+        slotKey: (meal as any).slotKey ?? null,
         dateUtc,
         dateStr: todayStr,
-        price: entry?.price != null ? entry.price : (meal.price ?? null),
+        // ISSUE-002: attendance-only windows NEVER bill — meal billing is
+        // meal-system functionality and the meal system is OFF.
+        price: attendanceOnly
+          ? null
+          : entry?.price != null
+            ? entry.price
+            : (meal.price ?? null),
         openTime: open,
       });
     }
@@ -801,6 +822,8 @@ export class SystemDefaultWorker extends WorkerHost {
     group: { id: string; organizationId: string };
     mealId: string;
     mealName: string;
+    /** ISSUE-005: boundary-identity vacation coverage (start/end meal). */
+    slotKey?: string | null;
     dateUtc: Date;
     dateStr: string;
     price: number | null;
@@ -838,6 +861,7 @@ export class SystemDefaultWorker extends WorkerHost {
       groupId: group.id,
       dateUtc,
       mealOpenTime: params.openTime,
+      mealSlotKey: params.slotKey ?? null,
       candidates: members.map((m) => ({
         userId: m.userId,
         isVacationMode: m.user.isVacationMode === true,
@@ -988,11 +1012,13 @@ export class SystemDefaultWorker extends WorkerHost {
     },
     defaultFloor: number,
   ): Promise<void> {
-    // Live-Test-8 ISSUE-003/006: meal system OFF = meals hidden from every
-    // member — the close-time sweep must not materialize Present/Skip records
-    // (and bills) for invisible meals. Stored sub-flags stay preserved for
-    // the next meals-ON flip; this gate keeps them inert meanwhile.
-    if (group.mealsEnabled === false) return;
+    // Live-Test-11 ISSUE-002 (user-confirmed rule, supersedes the Live-Test-8
+    // blanket gate): attendance WINDOWS stay fully functional when the meal
+    // system is OFF — the close-time sweep still materializes Present/Skip on
+    // them (attendance automation), but price is ALWAYS null (no meal billing
+    // can ever be generated) and the planner overlay is ignored (windows come
+    // from the MASTER rows, the exact set /meals/today shows).
+    const attendanceOnly = group.mealsEnabled === false;
     // Opt-out (auto-Present) wins when both policies are enabled — a group
     // where everyone defaults to Present has no unmarked members to Skip.
     const materializeStatus: 'present' | 'skipped' =
@@ -1020,6 +1046,7 @@ export class SystemDefaultWorker extends WorkerHost {
         select: {
           id: true,
           name: true,
+          slotKey: true,
           isActive: true,
           preferencesEnabled: true,
           attendanceWindowOpen: true,
@@ -1027,11 +1054,15 @@ export class SystemDefaultWorker extends WorkerHost {
           price: true,
         },
       }),
-      resolvePublishedDayEntries(this.prisma, {
-        groupId: group.id,
-        organizationId: group.organizationId,
-        dateStr: todayStr,
-      }),
+      // ISSUE-002: attendance-only ignores the planner entirely (meal-system
+      // machinery) — skip the published-day query, no entries to overlay.
+      attendanceOnly
+        ? Promise.resolve(new Map<string, PublishedDayEntry>())
+        : resolvePublishedDayEntries(this.prisma, {
+            groupId: group.id,
+            organizationId: group.organizationId,
+            dateStr: todayStr,
+          }),
     ]);
     if (!meals.length) return;
 
@@ -1054,10 +1085,11 @@ export class SystemDefaultWorker extends WorkerHost {
       hasGroups = new Set(boundGroups.map((b) => b.mealId));
     }
 
-    // mealsEnabled === false already early-returned above, so planner mode is
-    // decided by the two planner flags alone here.
+    // ISSUE-002: attendance-only never runs planner mode (same rule as the
+    // /meals/today overlay and the marking path's plannerActive gate).
     const plannerActive =
-      group.weeklyMenuEnabled === true || group.dayWiseMealsEnabled === true;
+      !attendanceOnly &&
+      (group.weeklyMenuEnabled === true || group.dayWiseMealsEnabled === true);
 
     for (const meal of meals) {
       const entry = entryMap.get(meal.id);
@@ -1102,9 +1134,16 @@ export class SystemDefaultWorker extends WorkerHost {
         group,
         mealId: meal.id,
         mealName: meal.name,
+        slotKey: (meal as any).slotKey ?? null,
         dateUtc,
         dateStr: todayStr,
-        price: entry?.price != null ? entry.price : (meal.price ?? null),
+        // ISSUE-002: attendance-only windows NEVER bill — meal billing is
+        // meal-system functionality and the meal system is OFF.
+        price: attendanceOnly
+          ? null
+          : entry?.price != null
+            ? entry.price
+            : (meal.price ?? null),
         openTime: open,
         status: mealStatus,
       });
@@ -1115,6 +1154,8 @@ export class SystemDefaultWorker extends WorkerHost {
     group: { id: string; organizationId: string };
     mealId: string;
     mealName: string;
+    /** ISSUE-005: boundary-identity vacation coverage (start/end meal). */
+    slotKey?: string | null;
     dateUtc: Date;
     dateStr: string;
     price: number | null;
@@ -1173,6 +1214,7 @@ export class SystemDefaultWorker extends WorkerHost {
       groupId: group.id,
       dateUtc,
       mealOpenTime: params.openTime,
+      mealSlotKey: params.slotKey ?? null,
       candidates: members.map((m) => ({
         userId: m.userId,
         isVacationMode: m.user.isVacationMode === true,

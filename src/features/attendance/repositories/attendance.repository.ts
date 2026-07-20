@@ -521,8 +521,15 @@ export class AttendanceRepository {
     preferenceBreakdown: Record<string, number>;
     preferenceGroupBreakdown: Record<string, Record<string, number>>;
     preferenceGroupPickCounts: Record<string, number>;
+    preferenceGroupRespondentCounts: Record<string, number>;
   }> {
-    const [statusGroups, prefGroups, priceGroups, selectionGroups] = await Promise.all([
+    const [
+      statusGroups,
+      prefGroups,
+      priceGroups,
+      selectionGroups,
+      respondentGroups,
+    ] = await Promise.all([
       this.prisma.attendanceRecord.groupBy({
         by: ['status'],
         where: { mealId, organizationId, attendanceDate },
@@ -566,6 +573,19 @@ export class AttendanceRepository {
         // Live-Test-11 ISSUE-016: pick-row counts ride the same query so the
         // Kitchen Summary can validate HEADCOUNT (who picked) separately from
         // the quantity totals it serves ("Ruti ×3" = 1 member, 3 plates).
+        _count: { _all: true },
+      }),
+      // Live-Test-11 ISSUE-004: DISTINCT-RESPONDENT counts per group label.
+      // A multi-pick member creates one selection ROW per option, so the
+      // pick-row count above overcounts headcount ("4 of 3" false mismatch).
+      // Grouping by (groupLabel, recordId) collapses each member to one row
+      // per group — the Kitchen Summary validates THIS against Present
+      // headcount (1 member = 1, regardless of picks or quantities).
+      this.prisma.attendancePreferenceSelection.groupBy({
+        by: ['groupLabelSnapshot', 'attendanceRecordId'],
+        where: {
+          record: { mealId, organizationId, attendanceDate, status: 'present' },
+        },
         _count: { _all: true },
       }),
     ]);
@@ -618,6 +638,15 @@ export class AttendanceRepository {
         ((row as any)._count?._all ?? 0);
     }
 
+    // ISSUE-004: one row per (groupLabel, record) — count = distinct members
+    // who answered that preference group (multi-pick / quantity independent).
+    const preferenceGroupRespondentCounts: Record<string, number> = {};
+    for (const row of respondentGroups as any[]) {
+      const groupLabel = row.groupLabelSnapshot as string;
+      preferenceGroupRespondentCounts[groupLabel] =
+        (preferenceGroupRespondentCounts[groupLabel] ?? 0) + 1;
+    }
+
     return {
       presentCount: statusCounts.present,
       absentCount: statusCounts.absent,
@@ -626,6 +655,7 @@ export class AttendanceRepository {
       preferenceBreakdown,
       preferenceGroupBreakdown,
       preferenceGroupPickCounts,
+      preferenceGroupRespondentCounts,
     };
   }
 
@@ -712,6 +742,8 @@ export class AttendanceRepository {
       role: string;
       email: string | null;
       phone: string | null;
+      // Live-Test-11 ISSUE-003 (additive): avatar for billing member rows.
+      avatarUrl: string | null;
     }>;
     records: Array<{
       userId: string;
@@ -737,6 +769,7 @@ export class AttendanceRepository {
               role: true,
               email: true,
               phone: true,
+              avatarUrl: true,
             },
           },
         },
@@ -768,6 +801,7 @@ export class AttendanceRepository {
         role: (m.functionalRole ?? m.user?.role ?? 'member') as string,
         email: m.user?.email ?? null,
         phone: m.user?.phone ?? null,
+        avatarUrl: (m.user as any)?.avatarUrl ?? null,
       })),
       records: records.map((r) => ({
         userId: r.userId,

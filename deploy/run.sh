@@ -256,21 +256,34 @@ declare -A NEEDS_COLD=( [security]=1 [srs]=1 [e2e]=1 [mealcheck]=1 [production]=
 # at 1-min load 5.85 and failed the 1200ms bcrypt-aware budget; the same
 # login is a few hundred ms on a settled box.
 SETTLE_LOAD="${SETTLE_LOAD:-2.0}"
+# 2026-07-19 forensic ruling: the ONLY 0-SLOW benchmark ever recorded
+# (20260718_041602) ran at 15-MIN load 0.49 — a box idle for a quarter hour.
+# A low 1-min load right after a burst is NOT the same box (caches draining,
+# loki/promtail ingesting the burst's logs, pg housekeeping). Gate on the
+# 15-min average too, so a certified run means a genuinely calm box.
+# SETTLE_LOAD15=0 disables just the 15-min check (advisory after cap, like
+# the 1-min gate — the run proceeds either way with a warning).
+SETTLE_LOAD15="${SETTLE_LOAD15:-1.0}"
 SETTLE_MAX_S="${SETTLE_MAX_S:-180}"
 declare -A NEEDS_CALM=( [diagnose]=1 [benchmark]=1 [srs]=1 [e2e]=1 )
 settle_box() {
   awk -v t="$SETTLE_LOAD" 'BEGIN{exit !(t>0)}' || return 0
-  local waited=0 l1
+  local waited=0 l1 l15
   while [ "$waited" -lt "$SETTLE_MAX_S" ]; do
     l1=$(cut -d' ' -f1 /proc/loadavg)
-    awk -v l="$l1" -v t="$SETTLE_LOAD" 'BEGIN{exit !(l<t)}' && {
-      [ "$waited" -gt 0 ] && echo "   ✓ box settled (load $l1) after ${waited}s"
+    l15=$(cut -d' ' -f3 /proc/loadavg)
+    if awk -v l="$l1" -v t="$SETTLE_LOAD" 'BEGIN{exit !(l<t)}' \
+       && { awk -v t="$SETTLE_LOAD15" 'BEGIN{exit !(t>0)}' \
+            && awk -v l="$l15" -v t="$SETTLE_LOAD15" 'BEGIN{exit !(l<t)}' \
+            || ! awk -v t="$SETTLE_LOAD15" 'BEGIN{exit !(t>0)}'; }; then
+      [ "$waited" -gt 0 ] && echo "   ✓ box settled (load 1m=$l1 15m=$l15) after ${waited}s"
       return 0
-    }
-    [ "$waited" -eq 0 ] && echo "   ⏳ load-settle gate: waiting for 1-min load < $SETTLE_LOAD (now $l1; cap ${SETTLE_MAX_S}s; SETTLE_LOAD=0 to disable)…"
+    fi
+    [ "$waited" -eq 0 ] && echo "   ⏳ load-settle gate: waiting for 1-min load < $SETTLE_LOAD AND 15-min load < $SETTLE_LOAD15 (now 1m=$l1 15m=$l15; cap ${SETTLE_MAX_S}s; SETTLE_LOAD=0 / SETTLE_LOAD15=0 to disable)…"
     sleep 10; waited=$((waited + 10))
   done
-  echo "   ⚠ load still ≥ $SETTLE_LOAD after ${SETTLE_MAX_S}s — measuring anyway (numbers may include box contention)"
+  l15=$(cut -d' ' -f3 /proc/loadavg)
+  echo "   ⚠ box not calm after ${SETTLE_MAX_S}s (1m=$(cut -d' ' -f1 /proc/loadavg) 15m=$l15) — measuring anyway; do NOT certify these numbers as a golden baseline (the only 0-SLOW run ever had 15m=0.49)"
 }
 
 # ── RUN-ONCE DEDUP CONTRACT (user ruling 2026-07-18) ────────────────────────

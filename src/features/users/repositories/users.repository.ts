@@ -18,13 +18,21 @@ export class UsersRepository {
    * where buildEntity() previously fired one GroupMember query per user.
    */
   private buildEntityFromInclude(user: any): UserEntity {
-    const groupIds = (user.groupMembers ?? [])
-      .filter((m: any) => m.status === 'active')
-      .map((m: any) => m.groupId);
+    const activeMembers = (user.groupMembers ?? []).filter(
+      (m: any) => m.status === 'active',
+    );
+    const groupIds = activeMembers.map((m: any) => m.groupId);
     return new UserEntity({
       ...user,
       groupIds,
       groupId: groupIds[0] ?? null,
+      // ISSUE-001 (additive): membership briefs with real group names +
+      // per-group functional role for the client's group switcher.
+      groups: activeMembers.map((m: any) => ({
+        id: m.groupId,
+        name: m.group?.name ?? '',
+        role: m.functionalRole ?? null,
+      })),
     });
   }
 
@@ -33,7 +41,13 @@ export class UsersRepository {
     return {
       groupMembers: {
         where: { status: 'active' as const },
-        select: { groupId: true, status: true },
+        select: {
+          groupId: true,
+          status: true,
+          // ISSUE-001: group name + per-group role for the switcher labels.
+          functionalRole: true,
+          group: { select: { name: true } },
+        },
       },
     };
   }

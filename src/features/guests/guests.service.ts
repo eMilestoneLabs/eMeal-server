@@ -301,6 +301,8 @@ export class GuestsService {
       // Live-Test-11 ISSUE-005: boundary math on the EFFECTIVE (published)
       // open time — same clock the member sees, master as fallback.
       mealOpenTime: effective.openTime ?? meal.attendanceWindowOpen,
+      // ISSUE-005: identity-first boundary coverage (start/end meal).
+      mealSlotKey: (meal as any).slotKey ?? null,
       candidates: [
         { userId: hostUserId, isVacationMode: hostUser?.isVacationMode === true },
       ],
@@ -394,7 +396,17 @@ export class GuestsService {
       v: ValidatedSelections | null,
     ): number | null => {
       const base = priceFor(isAdult);
-      if (base == null || v == null) return base;
+      if (v == null) return base;
+      if (base == null) {
+        // Live-Test-11 ISSUE-007B (guest parity with markAttendance): option-
+        // priced quantity billing must bill even when the meal carries no
+        // base plate price — a ₹50/plate option × qty 10 books ₹500. Still
+        // opt-in: pricing-disabled groups (headcount-only, base null) keep
+        // recording selections unbilled, exactly like the member path.
+        return group.mealPricingEnabled === true && v.totalDelta > 0
+          ? Math.round(v.totalDelta / 100)
+          : base;
+      }
       return base + Math.round(v.totalDelta / 100);
     };
 

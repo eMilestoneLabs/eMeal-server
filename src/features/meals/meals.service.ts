@@ -179,6 +179,16 @@ export class MealsService {
       const seen = new Set<string>();
       for (const tag of tags) {
         const norm = tag.trim().toLowerCase();
+        // Live-Test-11 ISSUE-008: 'None' is reserved for the system option.
+        if (norm === 'none') {
+          throw new BadRequestException({
+            message: 'Validation failed',
+            errors: {
+              enabledPreferences:
+                '"None" is a system option — it is always available to members automatically',
+            },
+          });
+        }
         if (seen.has(norm)) {
           throw new ConflictException({
             message: 'Validation failed',
@@ -631,15 +641,31 @@ export class MealsService {
     groupId: string,
     organizationId: string,
   ): Promise<any> {
+    // Live-Test-11 ISSUE-002 (attendance-only audit): the planner overlay is
+    // meal-system machinery — an Attendance-Only group (mealsEnabled=false)
+    // must NEVER be planner-gated, exactly like the marking path
+    // (attendance.service plannerActive). Leftover weekly/day-wise flags from
+    // a previous meal-mode config used to blank the today list (no overlay →
+    // no cards) or resurrect the frozen published MENU while the mark
+    // endpoint accepted the live windows — attendance-only groups now always
+    // see their real attendance windows.
     const plannerOn =
-      planGroup.weeklyMenuEnabled || planGroup.dayWiseMealsEnabled;
+      planGroup.mealsEnabled !== false &&
+      (planGroup.weeklyMenuEnabled || planGroup.dayWiseMealsEnabled);
 
-    if (result.data.length > 0) {
-      // Additive: overlay the active planner schedule (Weekly / Day-Wise Meal
-      // Mode) onto today's meals so per-day attendance window, preference
-      // enforcement and meal visibility follow admin configuration. Attendance,
-      // analytics, history and notifications stay unchanged (same mealId/date).
-      if (plannerOn) {
+    // Additive: overlay the active planner schedule (Weekly / Day-Wise Meal
+    // Mode) onto today's meals so per-day attendance window, preference
+    // enforcement and meal visibility follow admin configuration. Attendance,
+    // analytics, history and notifications stay unchanged (same mealId/date).
+    // Live-Test-11 ISSUE-012: this branch runs even when the LIVE meal list
+    // is EMPTY — deleting/disabling the LAST master meal used to skip the
+    // overlay entirely and instantly blank the member view, while the frozen
+    // published snapshot (the only schedule members may see) still carried
+    // the meals. The archived-meal rehydration below rebuilds every
+    // snapshot-carried card, so members keep the last published week fully
+    // operational until the admin reviews the draft and republishes.
+    {
+      if (plannerOn && (result.data.length > 0 || plannerOverlay.size > 0)) {
         const overlay = plannerOverlay;
         const overlaid =
           overlay.size > 0
@@ -708,7 +734,20 @@ export class MealsService {
         // real groups. Re-attaching here would clobber the subset, so we don't.
         return PaginatedResponseDto.of(overlaid, overlaid.length, 1, 50);
       }
-      return result;
+      if (result.data.length > 0) {
+        // Live-Test-11 ISSUE-011: MASTER mode has no publish workflow, so the
+        // GLOBAL Meal Preferences switch applies immediately — OFF strips every
+        // meal's preference config from the member view (Global overrides every
+        // meal; per-meal settings stay stored and return when Global is ON).
+        if (planGroup.preferencesEnabled === false) {
+          for (const m of result.data as any[]) {
+            m.preferencesEnabled = false;
+            m.enabledPreferences = [];
+            m.preferenceGroups = [];
+          }
+        }
+        return result;
+      }
     }
 
     // No active meals. Only provide the implicit attendance slot when the meal
@@ -1061,13 +1100,32 @@ export class MealsService {
 
     const updated = await this.mealsRepo.update(id, organizationId, updateData);
 
+    // Live-Test-11 ISSUE-012: Enable/Disable is a STRUCTURAL Master Meal
+    // change — exactly like deletion, every published planner carrying this
+    // meal auto-flips to DRAFT (published snapshot intact: members keep the
+    // last published week — the disabled meal stays visible/markable via the
+    // snapshot rehydration — until the admin reviews and republishes; the
+    // publish self-heal then drops still-disabled entries). Optional-call
+    // keeps existing test doubles without this repo method working.
+    let revertedSchedules = 0;
+    if (dto.isEnabled !== undefined && dto.isEnabled !== existing.isActive) {
+      revertedSchedules =
+        (await this.schedulesRepo.revertPublishedForMeal?.(
+          id,
+          organizationId,
+        )) ?? 0;
+    }
+
     this.audit.log({
       organizationId,
       actorId: adminId,
       targetId: id,
       targetType: 'Meal',
       action: 'update',
-      metadata: { changes: Object.keys(updateData) },
+      metadata: {
+        changes: Object.keys(updateData),
+        ...(revertedSchedules > 0 ? { revertedSchedules } : {}),
+      },
       requestId,
     });
 

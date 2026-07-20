@@ -28,6 +28,11 @@ export class UserEntity {
   groupId: string | null;
   groupIds: string[];
 
+  // Live-Test-11 ISSUE-001 (additive): per-membership brief so the client can
+  // label its group switcher with real names + per-group functional roles.
+  // Optional — only populated by finders that join the Group relation.
+  groups?: { id: string; name: string; role: string | null }[];
+
   lastLoginAt: Date | null;
   createdAt: Date;
   updatedAt: Date;

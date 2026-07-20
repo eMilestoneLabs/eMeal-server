@@ -21,6 +21,10 @@ export class UserSerializer {
       organizationId: user.organizationId ?? null,
       groupId: user.groupId ?? null,
       groupIds: user.groupIds ?? [],
+      // Live-Test-11 ISSUE-001 (additive): membership briefs {id, name, role}
+      // so the client shows real group names in its switcher. Empty for
+      // finders that don't join the Group relation — client falls back.
+      groups: user.groups ?? [],
       avatarUrl: user.avatarUrl ?? null,
       gender: user.gender ?? null,
       age: user.age ?? null,

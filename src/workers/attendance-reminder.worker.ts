@@ -114,6 +114,8 @@ export class AttendanceReminderWorker extends WorkerHost {
         where: { id: mealId },
         select: {
           attendanceWindowOpen: true,
+          // ISSUE-005: identity-first boundary coverage needs the slotKey.
+          slotKey: true,
           organization: { select: { timezone: true } },
         },
       }),
@@ -145,6 +147,8 @@ export class AttendanceReminderWorker extends WorkerHost {
       groupId,
       dateUtc: toUtcMidnight(getTodayInTimezone(tz)),
       mealOpenTime: effOpen,
+      // ISSUE-005: identity-first boundary coverage (start/end meal).
+      mealSlotKey: (mealRow as any)?.slotKey ?? null,
       candidates: membersWithToken.map((m) => ({
         userId: m.userId,
         isVacationMode: false, // flag=true members were already filtered out

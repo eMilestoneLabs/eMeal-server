@@ -57,6 +57,9 @@ export class AttendanceSerializer {
       userName: record.user?.name ?? null,
       userEmail: record.user?.email ?? null,
       userPhone: record.user?.phone ?? null,
+      // Live-Test-11 ISSUE-003 (additive): joined avatar so admin rosters and
+      // activity lists render the member's profile photo consistently.
+      userAvatarUrl: record.user?.avatarUrl ?? null,
       // Live-Test-9 ISSUE-4.5 (additive): role + mark source so admin rosters
       // can order Admin/Manager first and auto-marked rows by name.
       userRole: (record.user as any)?.role ?? null,
@@ -174,6 +177,10 @@ export class MealAttendanceSummarySerializer {
       preferenceGroupBreakdown: summary.preferenceGroupBreakdown ?? {},
       // ISSUE-016 (additive): headcount validation source for qty groups.
       preferenceGroupPickCounts: summary.preferenceGroupPickCounts ?? {},
+      // ISSUE-004 (additive): distinct-respondent headcount — safe for
+      // multi-pick AND quantity groups (1 member = 1).
+      preferenceGroupRespondentCounts:
+        summary.preferenceGroupRespondentCounts ?? {},
     };
   }
 
