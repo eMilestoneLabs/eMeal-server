@@ -38,6 +38,20 @@ export const NONE_OPTION_KEY = '__none__';
 /** Display label snapshotted for NONE rows (dashboard shows it separately). */
 export const NONE_OPTION_LABEL = 'None';
 
+/**
+ * ISSUE-005 (system NONE): true when a FLAT preference value is the system
+ * "None" tag — either the standalone 'none' key the clients send or the
+ * group-mode '__none__' option key. Case/whitespace tolerant so every
+ * validation site (members, guests, corrections) shares one rule.
+ */
+export function isSystemNonePreference(
+  value: string | null | undefined,
+): boolean {
+  if (!value) return false;
+  const v = value.trim().toLowerCase();
+  return v === 'none' || v === NONE_OPTION_KEY;
+}
+
 /** The resolved, per-meal-effective shape used by validation and embedding. */
 export interface EffectivePreferenceGroup {
   id: string;

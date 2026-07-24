@@ -17,7 +17,10 @@ import { AuditService } from '../../audit/audit.service';
 import { BillingService } from '../billing/billing.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NoticesService } from '../notices/notices.service';
-import { PreferencesService } from '../preferences/preferences.service';
+import {
+  PreferencesService,
+  isSystemNonePreference,
+} from '../preferences/preferences.service';
 import type { ValidatedSelections } from '../preferences/preferences.service';
 import { MembersRepository } from '../groups/repositories/members.repository';
 import { ADMIN_ROLES } from '../../common/decorators/roles.decorator';
@@ -377,7 +380,15 @@ export class GuestsService {
           errors: { guests: 'Select a preference for each guest' },
         });
       }
-      if (g.mealPreference && allowed.length > 0 && !allowed.includes(g.mealPreference)) {
+      // ISSUE-005 (system NONE): 'none' is the always-available system tag —
+      // "attending, no optional preference item" — never part of the admin's
+      // configured list, always accepted, billed ₹0 like a member's none pick.
+      if (
+        g.mealPreference &&
+        allowed.length > 0 &&
+        !isSystemNonePreference(g.mealPreference) &&
+        !allowed.includes(g.mealPreference)
+      ) {
         throw new UnprocessableEntityException({
           message: `Preference '${g.mealPreference}' is not enabled for this group`,
           errors: { guests: `Allowed: ${allowed.join(', ')}` },
@@ -658,7 +669,12 @@ export class GuestsService {
     }
     if (dto.mealPreference !== undefined && dto.mealPreference !== null) {
       const allowed = (meal.group?.enabledPreferences ?? []) as string[];
-      if (allowed.length > 0 && !allowed.includes(dto.mealPreference)) {
+      // ISSUE-005 (system NONE): the system 'none' tag is always accepted.
+      if (
+        allowed.length > 0 &&
+        !isSystemNonePreference(dto.mealPreference) &&
+        !allowed.includes(dto.mealPreference)
+      ) {
         throw new UnprocessableEntityException({
           message: `Preference '${dto.mealPreference}' is not enabled for this group`,
           errors: { mealPreference: `Allowed: ${allowed.join(', ')}` },

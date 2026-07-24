@@ -454,6 +454,15 @@ export class SchedulesRepository {
     await this.prisma.$transaction(async (tx) => {
       const scheduleUpdate: any = {};
       if (data.weekStart !== undefined) scheduleUpdate.weekStart = data.weekStart;
+      // ISSUE-001 (Live-Test-12): ANY draft edit automatically converts the
+      // planner to DRAFT — a PATCH that touches the week or its entries flips
+      // isPublished off in the same transaction, so the admin UI can never
+      // claim "Published" while the live entries differ from the frozen
+      // snapshot. publishedAt + publishedSnapshot stay INTACT: members keep
+      // reading the last published week until the admin re-publishes.
+      if (data.weekStart !== undefined || data.entries !== undefined) {
+        scheduleUpdate.isPublished = false;
+      }
 
       if (Object.keys(scheduleUpdate).length > 0) {
         const result = await tx.mealSchedule.updateMany({
@@ -597,6 +606,27 @@ export class SchedulesRepository {
         isPublished: true,
         entries: { some: { mealId } },
       },
+      data: { isPublished: false },
+    });
+    return result.count;
+  }
+
+  /**
+   * ISSUE-001 (Live-Test-12): GROUP-scoped auto-draft — every published
+   * planner of the group flips to DRAFT (snapshot + publishedAt intact, so
+   * members keep the last published week). Used by the unconditional
+   * auto-draft triggers (master meal delete / disable / re-enable): the
+   * meal-scoped variant misses the re-enable case where a publish self-heal
+   * already dropped the disabled meal's entries — no entry rows exist to
+   * match, yet the admin must still be routed through review → republish
+   * before the re-enabled meal reaches members.
+   */
+  async revertPublishedForGroup(
+    groupId: string,
+    organizationId: string,
+  ): Promise<number> {
+    const result = await this.prisma.mealSchedule.updateMany({
+      where: { groupId, organizationId, isPublished: true },
       data: { isPublished: false },
     });
     return result.count;

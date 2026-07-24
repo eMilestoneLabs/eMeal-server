@@ -1100,20 +1100,28 @@ export class MealsService {
 
     const updated = await this.mealsRepo.update(id, organizationId, updateData);
 
-    // Live-Test-11 ISSUE-012: Enable/Disable is a STRUCTURAL Master Meal
-    // change — exactly like deletion, every published planner carrying this
-    // meal auto-flips to DRAFT (published snapshot intact: members keep the
-    // last published week — the disabled meal stays visible/markable via the
-    // snapshot rehydration — until the admin reviews and republishes; the
-    // publish self-heal then drops still-disabled entries). Optional-call
-    // keeps existing test doubles without this repo method working.
+    // Live-Test-11 ISSUE-012 + Live-Test-12 ISSUE-001: Enable/Disable is a
+    // STRUCTURAL Master Meal change — an UNCONDITIONAL auto-draft trigger.
+    // Every published planner of the GROUP flips to DRAFT (published snapshot
+    // intact: members keep the last published week — a disabled meal stays
+    // visible/markable via the snapshot rehydration — until the admin reviews
+    // and republishes; the publish self-heal then drops still-disabled
+    // entries). Group-scoped (not meal-scoped) so RE-ENABLING a meal whose
+    // entries a previous publish already dropped still routes the admin
+    // through review → republish before the meal reaches members.
+    // Optional-calls keep existing test doubles without these repo methods
+    // working (meal-scoped fallback preserves the LT-11 behaviour there).
     let revertedSchedules = 0;
     if (dto.isEnabled !== undefined && dto.isEnabled !== existing.isActive) {
-      revertedSchedules =
-        (await this.schedulesRepo.revertPublishedForMeal?.(
-          id,
-          organizationId,
-        )) ?? 0;
+      revertedSchedules = this.schedulesRepo.revertPublishedForGroup
+        ? await this.schedulesRepo.revertPublishedForGroup(
+            existing.groupId,
+            organizationId,
+          )
+        : ((await this.schedulesRepo.revertPublishedForMeal?.(
+            id,
+            organizationId,
+          )) ?? 0);
     }
 
     this.audit.log({
@@ -1152,6 +1160,10 @@ export class MealsService {
     adminId: string,
     requestId?: string,
   ) {
+    // Live-Test-12 ISSUE-001: capture the meal's group BEFORE archiving so
+    // the unconditional auto-draft trigger below can flip the whole group's
+    // published planners (and the today-cache drop can stay group-scoped).
+    const target = await this.mealsRepo.findById(id, organizationId, true);
     await this.mealsRepo.softDelete(id, organizationId);
 
     // SRS Module 03 MMT-011: a deleted master meal is removed from all future
@@ -1169,14 +1181,20 @@ export class MealsService {
       organizationId,
     );
 
-    // Live-Test-9 ISSUE-002: every published planner still carrying this meal
-    // auto-flips to DRAFT (snapshot intact — members keep the last published
-    // week until republish). The admin sees the unpublished-changes state
+    // Live-Test-9 ISSUE-002 + Live-Test-12 ISSUE-001: master meal DELETE is an
+    // UNCONDITIONAL auto-draft trigger — every published planner of the GROUP
+    // flips to DRAFT (snapshot intact — members keep the last published week
+    // until republish). The admin sees the unpublished-changes state
     // immediately instead of a schedule that silently claims to be published.
-    const revertedSchedules = await this.schedulesRepo.revertPublishedForMeal(
-      id,
-      organizationId,
-    );
+    // Meal-scoped fallback keeps test doubles without the group method (and
+    // the no-group edge) on the LT-9 behaviour.
+    const revertedSchedules =
+      target?.groupId && this.schedulesRepo.revertPublishedForGroup
+        ? await this.schedulesRepo.revertPublishedForGroup(
+            target.groupId,
+            organizationId,
+          )
+        : await this.schedulesRepo.revertPublishedForMeal(id, organizationId);
 
     this.audit.log({
       organizationId,
@@ -1188,9 +1206,9 @@ export class MealsService {
       requestId,
     });
 
-    // Perf (2026-07-19): the deleted meal's groupId isn't in scope here —
-    // org-wide today-bundle invalidation (few keys, SCAN-bounded) is exact.
-    await this.invalidateTodayCache(organizationId);
+    // Perf: group-scoped today-bundle invalidation when the group is known
+    // (captured above); org-wide fallback keeps the legacy exactness.
+    await this.invalidateTodayCache(organizationId, target?.groupId);
 
     return { message: 'Meal archived successfully' };
   }
