@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { normalizePreferenceKey } from '../../../common/utils/system-none.util';
 import {
   AttendanceEntity,
   AttendanceSummaryEntity,
@@ -513,6 +514,15 @@ export class AttendanceRepository {
     mealId: string,
     organizationId: string,
     attendanceDate: Date,
+    /**
+     * ISSUE-002 (Live-Test-13): true when this meal runs STANDALONE
+     * preferences. Only then does a PRESENT record with no preference mean the
+     * system None ("attending, no optional item") and get folded into the
+     * hidden None tally. Defaults to false so every existing caller — and any
+     * preference-free meal — keeps the exact previous behaviour (such rows
+     * excluded), and no phantom preference section can appear.
+     */
+    preferencesActive = false,
   ): Promise<{
     presentCount: number;
     absentCount: number;
@@ -535,16 +545,25 @@ export class AttendanceRepository {
         where: { mealId, organizationId, attendanceDate },
         _count: { status: true },
       }),
+      // ISSUE-002 (Live-Test-13): PRESENT records with NO preference are no
+      // longer excluded — they are folded into the system None tally at read
+      // time (see normalizePreferenceKey). Such rows come from legacy data,
+      // imports, and guests booked while "Require a preference per guest" was
+      // OFF; dropping them made (visible + None) fall short of Total Present,
+      // which is what showed a permanent red "data mismatch" on the Kitchen
+      // Summary. Stored rows are never modified. `_all` is required because
+      // Prisma's per-field _count ignores NULLs — the exact reason the null
+      // bucket would otherwise come back as 0.
       this.prisma.attendanceRecord.groupBy({
         by: ['preference'],
         where: {
           mealId,
           organizationId,
           attendanceDate,
-          preference: { not: null },
           status: 'present',
+          ...(preferencesActive ? {} : { preference: { not: null } }),
         },
-        _count: { preference: true },
+        _count: { _all: true },
       }),
       // Issue 1: snapshot unit price actually billed for this meal+date.
       // Group present records by their captured price snapshot so the admin
@@ -598,11 +617,16 @@ export class AttendanceRepository {
       else if (s === 'skipped') statusCounts.skipped = row._count.status;
     }
 
+    // ISSUE-002: NULL → system None, and both None spellings collapse onto one
+    // key so the hidden tally is never split in two. Accumulated (not
+    // assigned) because several raw values can normalize to the same bucket.
     const preferenceBreakdown: Record<string, number> = {};
     for (const row of prefGroups) {
-      if (row.preference) {
-        preferenceBreakdown[row.preference] = row._count.preference;
-      }
+      // Guarded above: when preferences are inactive the query already
+      // excluded NULLs, so normalize only ever sees real values here.
+      const key = normalizePreferenceKey(row.preference);
+      preferenceBreakdown[key] =
+        (preferenceBreakdown[key] ?? 0) + ((row._count as any)?._all ?? 0);
     }
 
     // Pick the most common snapshot price among present records (mode). Within a

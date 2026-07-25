@@ -22,6 +22,10 @@ import {
   isSystemNonePreference,
 } from '../preferences/preferences.service';
 import type { ValidatedSelections } from '../preferences/preferences.service';
+import {
+  normalizePreferenceKey,
+  SYSTEM_NONE_FLAT_KEY,
+} from '../../common/utils/system-none.util';
 import { MembersRepository } from '../groups/repositories/members.repository';
 import { ADMIN_ROLES } from '../../common/decorators/roles.decorator';
 import {
@@ -367,6 +371,16 @@ export class GuestsService {
     //    booking impossible from the sheet (it renders groups, not flat chips).
     const prefRequired = group.guestPreferenceRequired === true;
     const allowed = (group.enabledPreferences ?? []) as string[];
+    // ISSUE-002 (Live-Test-13): does this meal run STANDALONE (flat) tags?
+    // Only then does "no pick" mean the system None for the flat
+    // `mealPreference` column. Deliberately NOT `|| pgGroups.length > 0`:
+    // on a GROUP-only meal that column is a DERIVED primary key, so writing a
+    // flat 'none' there would invent a standalone signal and make the Kitchen
+    // Summary render an empty "Standalone Preference" card (its section shows
+    // whenever the flat breakdown is non-empty). Group meals keep NULL and are
+    // reported through the per-group breakdown, which has its own None option.
+    // Matches the read-side gate in attendance.service (meal.preferencesEnabled).
+    const preferencesActive = allowed.length > 0;
     for (const g of dto.guests) {
       if (
         prefRequired &&
@@ -487,8 +501,14 @@ export class GuestsService {
         displayName: g.displayName ?? null,
         // Group-pick meals derive the flat tag from the primary selection —
         // exactly how member marking derives it (keeps veg/non-veg analytics).
+        // ISSUE-002: with a preference system active but no pick made (allowed
+        // when "Require a preference per guest" is OFF), store the system None
+        // rather than NULL — "attending, no optional item" is an explicit
+        // state, so no NEW null-preference guest rows are ever created.
         mealPreference:
-          g.mealPreference ?? guestSelections[i]?.primaryKey ?? null,
+          g.mealPreference ??
+          guestSelections[i]?.primaryKey ??
+          (preferencesActive ? SYSTEM_NONE_FLAT_KEY : null),
         // Immutable per-guest selection snapshot (Live-Test-6 ISSUE-2).
         preferences:
           guestSelections[i] && guestSelections[i]!.snapshot.length > 0
@@ -1141,6 +1161,13 @@ export class GuestsService {
     organizationId: string,
     mealId: string,
     dateUtc: Date,
+    /**
+     * ISSUE-002 (Live-Test-13): true when the meal runs STANDALONE
+     * preferences. Only then is a guest with no preference folded into the
+     * hidden system None tally. Defaults to false so preference-free meals
+     * keep their previous shape and no phantom preference section appears.
+     */
+    preferencesActive = false,
   ) {
     // Live-Test-10 (Kitchen Summary, additive): fetch ALL guest requests for
     // the meal/date in the same single query — status + pendingApproval ride
@@ -1172,10 +1199,29 @@ export class GuestsService {
     // .preferences) is aggregated per group, mirroring the member-side
     // preferenceGroupBreakdown exactly.
     const byGroup: Record<string, Record<string, number>> = {};
+    // ISSUE-002 (Live-Test-13): DISTINCT guest respondents per group label —
+    // the guest mirror of the member-side preferenceGroupRespondentCounts.
+    // byGroup below sums QUANTITY (portions the kitchen prepares), so a guest
+    // ordering "Chicken ×3" contributes 3 there. The dashboard was using that
+    // portion total as a HEADCOUNT, making it exceed the expected number of
+    // people and raising a permanent red mismatch on Quantity-enabled groups.
+    // One guest counts ONCE here however many options or portions they picked.
+    const byGroupRespondents: Record<string, number> = {};
     for (const g of rows) {
-      const key = g.mealPreference ?? 'unspecified';
+      // ISSUE-002 (Live-Test-13): a guest with no preference is the system
+      // None ("attending, no optional item") — NOT a nameless 'unspecified'
+      // bucket, which the dashboard discarded, so such guests counted toward
+      // Total To Serve while contributing to neither the visible rows nor the
+      // hidden None tally (permanent red "data mismatch"). Read-time only:
+      // the stored mealPreference is untouched.
+      const key = preferencesActive
+        ? normalizePreferenceKey(g.mealPreference)
+        : (g.mealPreference ?? 'unspecified');
       byPreference[key] = (byPreference[key] ?? 0) + 1;
       const selections = Array.isArray(g.preferences) ? g.preferences : [];
+      // Groups THIS guest answered — dedupes multi-pick/quantity rows so the
+      // respondent tally below stays a headcount, never a portion total.
+      const answeredGroups = new Set<string>();
       for (const s of selections as Array<Record<string, unknown>>) {
         const groupLabel = typeof s.groupLabel === 'string' ? s.groupLabel : null;
         const optionLabel =
@@ -1185,6 +1231,12 @@ export class GuestsService {
         byGroup[groupLabel] ??= {};
         byGroup[groupLabel][optionLabel] =
           (byGroup[groupLabel][optionLabel] ?? 0) + qty;
+        // Counted for EVERY answered option incl. the system None (its row
+        // carries quantity 1), exactly like the member respondent aggregate.
+        answeredGroups.add(groupLabel);
+      }
+      for (const label of answeredGroups) {
+        byGroupRespondents[label] = (byGroupRespondents[label] ?? 0) + 1;
       }
     }
     return {
@@ -1195,6 +1247,11 @@ export class GuestsService {
       // Additive (Live-Test-9 ISSUE-4.2/4.3): per-group guest plate counts —
       // { groupLabel: { optionLabel: totalQuantity } }.
       guestPreferenceGroupBreakdown: byGroup,
+      // ISSUE-002 (additive): { groupLabel: distinctGuestCount } — the
+      // HEADCOUNT the dashboard validates against, kept separate from the
+      // portion totals above so Quantity/Multiple-Pick groups stop reading a
+      // plate count as a person count.
+      guestPreferenceGroupRespondentCounts: byGroupRespondents,
       // Additive (Live-Test-10 Kitchen Summary): administrative guest-request
       // statuses. Only guestCount (approved) feeds kitchen/billing/attendance
       // totals — these rows are dashboard visibility only.

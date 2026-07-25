@@ -18,6 +18,11 @@ import { PreferenceGroupSerializer } from './serializers/preference-group.serial
 import { RedisService } from '../../redis/redis.service';
 import { invalidateTodayMealsCache } from '../meals/utils/today-meals-cache.util';
 import {
+  isSystemNonePreference,
+  SYSTEM_NONE_GROUP_KEY,
+  SYSTEM_NONE_LABEL,
+} from '../../common/utils/system-none.util';
+import {
   CreatePreferenceGroupDto,
   UpdatePreferenceGroupDto,
   PreferenceOptionDto,
@@ -33,24 +38,22 @@ import {
  * cannot be created/edited/deleted by admins, and never counts toward the
  * 2–5 option limit (it is virtual — never stored in the DB).
  */
-export const NONE_OPTION_KEY = '__none__';
+export const NONE_OPTION_KEY = SYSTEM_NONE_GROUP_KEY;
 
 /** Display label snapshotted for NONE rows (dashboard shows it separately). */
-export const NONE_OPTION_LABEL = 'None';
+export const NONE_OPTION_LABEL = SYSTEM_NONE_LABEL;
 
 /**
  * ISSUE-005 (system NONE): true when a FLAT preference value is the system
  * "None" tag — either the standalone 'none' key the clients send or the
  * group-mode '__none__' option key. Case/whitespace tolerant so every
  * validation site (members, guests, corrections) shares one rule.
+ *
+ * Live-Test-13: the implementation moved to `common/utils/system-none.util`
+ * so repositories and workers can share it without importing a feature
+ * service. Re-exported here unchanged — every existing importer keeps working.
  */
-export function isSystemNonePreference(
-  value: string | null | undefined,
-): boolean {
-  if (!value) return false;
-  const v = value.trim().toLowerCase();
-  return v === 'none' || v === NONE_OPTION_KEY;
-}
+export { isSystemNonePreference };
 
 /** The resolved, per-meal-effective shape used by validation and embedding. */
 export interface EffectivePreferenceGroup {

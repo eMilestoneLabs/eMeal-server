@@ -32,6 +32,7 @@ import { StorageService } from '../../storage/storage.service';
 import { PreferencesService } from '../preferences/preferences.service';
 import { ConfigService } from '@nestjs/config';
 import { RedisService } from '../../redis/redis.service';
+import { mealSummaryKey } from '../../common/utils/attendance-cache-keys.util';
 import {
   todayMealsCacheKey,
   todayMealsCacheTtlSeconds,
@@ -1139,6 +1140,28 @@ export class MealsService {
 
     // Perf (2026-07-19): today-bundle invalidation BEFORE the realtime emit.
     await this.invalidateTodayCache(organizationId, updated.groupId);
+
+    // ISSUE-002 (Live-Test-13): the admin meal-summary payload folds
+    // PRESENT-with-no-preference rows into the hidden system-None tally ONLY
+    // on preference meals, so flipping this flag changes a CACHED result while
+    // touching no attendance record — the Kitchen Summary would otherwise
+    // serve the previous fold for the rest of the TTL (300s). Drop TODAY's
+    // key (the only date the dashboard renders) so the tick is correct on the
+    // very next request. O(1), no scan; best-effort — a Redis hiccup must
+    // never fail the config save, and the TTL still self-heals.
+    if (
+      dto.preferencesEnabled !== undefined &&
+      dto.preferencesEnabled !== existing.preferencesEnabled
+    ) {
+      try {
+        const tz = await this.mealsRepo.getOrganizationTimezone(organizationId);
+        await this.redis?.del(
+          mealSummaryKey(organizationId, id, getTodayInTimezone(tz)),
+        );
+      } catch {
+        /* best-effort cache drop — TTL remains the backstop */
+      }
+    }
 
     // B7: emit meal.updated.v1 on config change
     this.realtime?.emitMealUpdated(organizationId, {

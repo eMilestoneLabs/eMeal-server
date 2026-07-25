@@ -39,6 +39,7 @@ import {
   AttendanceSummaryEntity,
   MealAttendanceSummaryEntity,
 } from './entities/attendance.entity';
+import { mealSummaryKey } from '../../common/utils/attendance-cache-keys.util';
 import { MarkAttendanceDto } from './dto/mark-attendance.dto';
 import { BulkAttendanceDto } from './dto/bulk-attendance.dto';
 import { AdminOverrideDto, AdminBulkOverrideDto } from './dto/admin-override.dto';
@@ -65,9 +66,7 @@ const CACHE_TTL = 300;
 function summaryKey(orgId: string, userId: string, groupId: string) {
   return `attendance:summary:${orgId}:${userId}:${groupId}`;
 }
-function mealSummaryKey(orgId: string, mealId: string, date: string) {
-  return `attendance:meal:${orgId}:${mealId}:${date}`;
-}
+
 function groupDaySummaryKey(orgId: string, groupId: string, date: string) {
   return `attendance:group:${orgId}:${groupId}:${date}`;
 }
@@ -1495,6 +1494,9 @@ export class AttendanceService {
         displayName: true,
         groupId: true,
         attendanceWindowOpen: true,
+        // ISSUE-002 (Live-Test-13): gates the read-time NULL → system None
+        // fold below. Rides the existing select — no extra query.
+        preferencesEnabled: true,
       },
     });
     if (!meal) throw new NotFoundException('Meal not found');
@@ -1535,10 +1537,15 @@ export class AttendanceService {
     });
     const expectedParticipants = totalMembers - onVacation.size;
 
+    // ISSUE-002: fold PRESENT-with-no-preference rows into the hidden system
+    // None tally ONLY on meals that actually run standalone preferences. On a
+    // preference-free meal every record is legitimately NULL, and folding
+    // would invent a "Standalone Preference" section containing nothing.
     const counts = await this.attendanceRepo.getMealSummary(
       query.mealId,
       organizationId,
       attendanceDateUtc,
+      meal.preferencesEnabled === true,
     );
 
     const summaryEntity = new MealAttendanceSummaryEntity({
@@ -1566,6 +1573,9 @@ export class AttendanceService {
           organizationId,
           query.mealId,
           attendanceDateUtc,
+          // ISSUE-002: same gate as the member fold above — a guest with no
+          // preference counts as the system None only on preference meals.
+          meal.preferencesEnabled === true,
         )
       : {
           guestCount: 0,
@@ -1573,6 +1583,7 @@ export class AttendanceService {
           guestChildren: 0,
           guestPreferenceBreakdown: {},
           guestPreferenceGroupBreakdown: {},
+          guestPreferenceGroupRespondentCounts: {},
           guestPendingApproval: 0,
           guestCancelled: 0,
           guestNoShow: 0,

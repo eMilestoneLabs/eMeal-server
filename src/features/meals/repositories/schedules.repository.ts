@@ -104,7 +104,23 @@ export class SchedulesRepository {
     });
   }
 
-  private buildScheduleEntity(raw: any): MealScheduleEntity {
+  private buildScheduleEntity(
+    raw: any,
+    /**
+     * ISSUE-001 (Live-Test-13): keep entries whose master meal was archived.
+     *
+     * Set ONLY by the published/student read path ([scheduleFromSnapshot]'s
+     * legacy fallback). A row published before the `publishedSnapshot` column
+     * existed has a null snapshot, so that fallback rebuilds from the LIVE
+     * entries — and applying the draft-view archive filter there deleted the
+     * meal from the member's weekly menu the instant it was disabled/deleted,
+     * with no publish. Every previously published production week is exactly
+     * that case, which is why fixing only the snapshot path never held.
+     * For a PUBLISHED row the live entries ARE the published state, so they
+     * must be served whole until the admin republishes.
+     */
+    includeArchivedMeals = false,
+  ): MealScheduleEntity {
     // Live-Test-5 ISSUE-5 (auto-draft on master-meal delete): the LIVE/draft
     // view never shows entries whose master meal was soft-deleted — the
     // planner instantly reflects the deletion ("auto draft"), while members
@@ -112,7 +128,10 @@ export class SchedulesRepository {
     // Entries without a meal join (snapshot rebuilds) are kept as-is.
     const entries = SchedulesRepository.sortEntriesChronologically(
       (raw.entries ?? [])
-        .filter((e: any) => !e.meal || e.meal.isActive !== false)
+        .filter(
+          (e: any) =>
+            includeArchivedMeals || !e.meal || e.meal.isActive !== false,
+        )
         .map((e: any) => this.buildEntryEntity(e)),
     );
     return new MealScheduleEntity({
@@ -197,7 +216,11 @@ export class SchedulesRepository {
         updatedAt: raw.updatedAt,
       });
     }
-    return this.buildScheduleEntity(raw);
+    // ISSUE-001: legacy (null-snapshot) published rows — serve the live
+    // entries WHOLE, archived master meals included. This is the published
+    // state members must keep until the admin reviews the auto-draft and
+    // republishes; the publish self-heal drops them at that point.
+    return this.buildScheduleEntity(raw, true);
   }
 
   /**
