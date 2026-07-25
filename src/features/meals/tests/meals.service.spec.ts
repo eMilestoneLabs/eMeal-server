@@ -353,6 +353,108 @@ describe('MealsService', () => {
     });
   });
 
+  // ── ISSUE-001 lifecycle scenarios (delete / disable / re-enable) ────────
+
+  describe('ISSUE-001 enable rules (positive / negative / corner)', () => {
+    const disabledMeal = { ...mockMeal, isActive: false, deletedAt: null } as any;
+    const deletedMeal = {
+      ...mockMeal,
+      isActive: false,
+      deletedAt: new Date('2026-07-20T00:00:00.000Z'),
+    } as any;
+
+    it('NEGATIVE: a DELETED meal can never be re-enabled', async () => {
+      mealsRepo.findById.mockResolvedValue(deletedMeal);
+
+      await expect(
+        service.updateMeal('meal_01', 'org_01', 'usr_admin', {
+          isEnabled: true,
+        }),
+      ).rejects.toThrow(/deleted and cannot be enabled/i);
+      // Rejected BEFORE any write.
+      expect(mealsRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('NEGATIVE: re-enabling past the cap is rejected with a reason', async () => {
+      mealsRepo.findById.mockResolvedValue(disabledMeal);
+      groupsRepo.findById.mockResolvedValue(mockGroup);
+      mealsRepo.countActiveInGroup.mockResolvedValue(10); // cap reached
+
+      await expect(
+        service.updateMeal('meal_01', 'org_01', 'usr_admin', {
+          isEnabled: true,
+        }),
+      ).rejects.toThrow(/at most 10/i);
+      expect(mealsRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('NEGATIVE: re-enabling into a taken ACTIVE name is a conflict', async () => {
+      mealsRepo.findById.mockResolvedValue(disabledMeal);
+      groupsRepo.findById.mockResolvedValue(mockGroup);
+      mealsRepo.countActiveInGroup.mockResolvedValue(1);
+      mealsRepo.existsByNameInGroup.mockResolvedValue(true);
+
+      await expect(
+        service.updateMeal('meal_01', 'org_01', 'usr_admin', {
+          isEnabled: true,
+        }),
+      ).rejects.toThrow(/already exists/i);
+      expect(mealsRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('POSITIVE: a DISABLED meal re-enables under the cap', async () => {
+      mealsRepo.findById.mockResolvedValue(disabledMeal);
+      groupsRepo.findById.mockResolvedValue(mockGroup);
+      mealsRepo.countActiveInGroup.mockResolvedValue(1);
+      mealsRepo.existsByNameInGroup.mockResolvedValue(false);
+      mealsRepo.update.mockResolvedValue({ ...mockMeal, isActive: true });
+
+      await service.updateMeal('meal_01', 'org_01', 'usr_admin', {
+        isEnabled: true,
+      });
+
+      expect(mealsRepo.update).toHaveBeenCalledWith(
+        'meal_01',
+        'org_01',
+        expect.objectContaining({ isActive: true }),
+      );
+    });
+
+    it('CORNER: enable/disable flips the GROUP planners to draft (snapshot intact)', async () => {
+      // The shared harness omits the group-scoped method on purpose (the
+      // deleteMeal test above exercises the meal-scoped fallback). Production
+      // HAS it, so inject it to assert the real path.
+      (schedulesRepo as any).revertPublishedForGroup = jest.fn(async () => 1);
+      mealsRepo.findById.mockResolvedValue(mockMeal);
+      groupsRepo.findById.mockResolvedValue(mockGroup);
+      mealsRepo.update.mockResolvedValue({ ...mockMeal, isActive: false });
+
+      await service.updateMeal('meal_01', 'org_01', 'usr_admin', {
+        isEnabled: false,
+      });
+
+      // Auto-draft trigger #2 — publishedAt/publishedSnapshot are untouched,
+      // so members keep the last published week until republish.
+      expect(schedulesRepo.revertPublishedForGroup).toHaveBeenCalledWith(
+        'grp_01',
+        'org_01',
+      );
+    });
+
+    it('CORNER: a non-enable edit does NOT flip planners to draft', async () => {
+      (schedulesRepo as any).revertPublishedForGroup = jest.fn(async () => 1);
+      mealsRepo.findById.mockResolvedValue(mockMeal);
+      groupsRepo.findById.mockResolvedValue(mockGroup);
+      mealsRepo.update.mockResolvedValue(mockMeal);
+
+      await service.updateMeal('meal_01', 'org_01', 'usr_admin', {
+        description: 'new text',
+      });
+
+      expect(schedulesRepo.revertPublishedForGroup).not.toHaveBeenCalled();
+    });
+  });
+
   // ── REORDER ────────────────────────────────────────────────────────────
 
   describe('reorderMeals', () => {

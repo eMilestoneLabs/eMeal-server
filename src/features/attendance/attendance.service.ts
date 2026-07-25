@@ -1593,6 +1593,10 @@ export class AttendanceService {
     const response = {
       ...MealAttendanceSummarySerializer.toResponse(summaryEntity),
       ...guestCounts,
+      // ISSUE-006 (additive): snapshot label → stable preference-group id, so
+      // the dashboard resolves a RENAMED group's config (multi-pick / quantity
+      // / required) instead of falling back to the single-pick defaults.
+      preferenceGroupIdByLabel: counts.preferenceGroupIdByLabel,
       attendingTotal: counts.presentCount + guestCounts.guestCount,
       // Pass 15 (FR-ANL-003): expected = active − vacationing (never counts
       // blocked/removed members — the membership status filter handles those).

@@ -531,6 +531,8 @@ export class AttendanceRepository {
     preferenceBreakdown: Record<string, number>;
     preferenceGroupBreakdown: Record<string, Record<string, number>>;
     preferenceGroupPickCounts: Record<string, number>;
+    /** ISSUE-006: snapshot label → stable preference-group id (rename-proof). */
+    preferenceGroupIdByLabel: Record<string, string>;
     preferenceGroupRespondentCounts: Record<string, number>;
   }> {
     const [
@@ -584,7 +586,13 @@ export class AttendanceRepository {
       // dashboard shows per-option plate counts (label snapshots are immutable
       // — later edits to a preference group never rewrite past summaries).
       this.prisma.attendancePreferenceSelection.groupBy({
-        by: ['groupLabelSnapshot', 'optionLabelSnapshot'],
+        // ISSUE-006: preferenceGroupId rides the SAME query (guidebook §3b
+        // "ride the include") so the dashboard can resolve a group's config by
+        // its stable ID instead of its label. A RENAMED group leaves historical
+        // rows carrying the OLD label snapshot, which no longer matches the
+        // live config — the section then lost its multi-pick/quantity flags and
+        // rendered the single-pick chip. Finer grouping only; merged below.
+        by: ['groupLabelSnapshot', 'optionLabelSnapshot', 'preferenceGroupId'],
         where: {
           record: { mealId, organizationId, attendanceDate, status: 'present' },
         },
@@ -650,6 +658,8 @@ export class AttendanceRepository {
     // picks the group received, independent of quantities. The Kitchen
     // Summary validates THIS against headcount while serving qty totals.
     const preferenceGroupPickCounts: Record<string, number> = {};
+    // ISSUE-006: label → group id, so a renamed group still resolves its config.
+    const preferenceGroupIdByLabel: Record<string, string> = {};
     for (const row of selectionGroups) {
       const qty = row._sum.quantity ?? 0;
       if (qty <= 0) continue;
@@ -660,6 +670,8 @@ export class AttendanceRepository {
       preferenceGroupPickCounts[groupLabel] =
         (preferenceGroupPickCounts[groupLabel] ?? 0) +
         ((row as any)._count?._all ?? 0);
+      const gid = (row as any).preferenceGroupId;
+      if (gid) preferenceGroupIdByLabel[groupLabel] ??= gid;
     }
 
     // ISSUE-004: one row per (groupLabel, record) — count = distinct members
@@ -680,6 +692,7 @@ export class AttendanceRepository {
       preferenceGroupBreakdown,
       preferenceGroupPickCounts,
       preferenceGroupRespondentCounts,
+      preferenceGroupIdByLabel,
     };
   }
 

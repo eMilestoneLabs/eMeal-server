@@ -11,7 +11,11 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
-import { AttendanceWindowDto, normalizeSlotKey } from './create-meal.dto';
+import {
+  AttendanceWindowDto,
+  normalizeSlotKey,
+  normalizeMealName,
+} from './create-meal.dto';
 
 /**
  * UpdateMealDto — request body for PATCH /api/v1/meals/:id
@@ -29,11 +33,15 @@ export class UpdateMealDto {
   @MaxLength(64)
   slotKey?: string;
 
+  // UNI-016: same normalize-on-write rule as create (trim + collapse spaces);
+  // a RENAME must not be able to smuggle in a whitespace-variant duplicate.
+  @Transform(({ value }) => normalizeMealName(value))
   @IsOptional()
   @IsString()
   @MaxLength(128)
   name?: string;
 
+  @Transform(({ value }) => normalizeMealName(value))
   @IsOptional()
   @IsString()
   @MaxLength(128)

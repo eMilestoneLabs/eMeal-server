@@ -31,6 +31,7 @@ export class MealsRepository {
       displayName: raw.displayName ?? null,
       order: raw.order ?? 0,
       isActive: raw.isActive,
+      deletedAt: raw.deletedAt ?? null,
       attendanceEnabled: raw.attendanceEnabled,
       description: raw.description ?? null,
       menuItems: raw.menuItems ?? [],
@@ -89,6 +90,13 @@ export class MealsRepository {
     const where = {
       groupId,
       organizationId, // CRITICAL: tenant isolation
+      // ISSUE-001: DELETED meals leave the Master Meal Template PERMANENTLY —
+      // unconditionally, even for includeDisabled (which exists so the admin
+      // can re-enable a temporarily DISABLED meal, never to resurrect a
+      // deleted one). History paths never come through here: they read
+      // attendance/billing rows or the published snapshot, and
+      // findByIdsAnyState still resolves deleted meals by id for those.
+      deletedAt: null,
       ...(opts.includeDisabled ? {} : { isActive: true }),
       ...(opts.slotKey ? { slotKey: opts.slotKey } : {}),
     };
@@ -304,12 +312,22 @@ export class MealsRepository {
    */
   async softDelete(id: string, organizationId: string): Promise<void> {
     const result = await this.prisma.meal.updateMany({
-      where: { id, organizationId, isActive: true },
-      data: { isActive: false },
+      // ISSUE-001: gated on deletedAt (NOT isActive) — a DISABLED meal is now
+      // listed in the Master Meal Template (so it can be re-enabled), which
+      // means its Delete action is reachable too. The old `isActive: true`
+      // guard matched zero rows for a disabled meal and failed with
+      // "already archived", making disabled meals impossible to delete.
+      // Deleting an already-DELETED meal still correctly 404s.
+      where: { id, organizationId, deletedAt: null },
+      // Stamping deletedAt is what makes DELETE permanent and distinguishable
+      // from DISABLE (which only clears isActive). The row itself survives so
+      // attendance, billing, reports and published snapshots keep resolving
+      // the meal's name and price.
+      data: { isActive: false, deletedAt: new Date() },
     });
 
     if (result.count === 0) {
-      throw new NotFoundException('Meal not found or already archived');
+      throw new NotFoundException('Meal not found or already deleted');
     }
   }
 

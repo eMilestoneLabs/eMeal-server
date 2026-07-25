@@ -151,7 +151,18 @@ export class DashboardRepository {
       where: {
         organizationId,
         groupId: { in: activeGroupIds },
-        isActive: true,
+        // ISSUE-001 (Live-Test-13): a meal DISABLED/DELETED in the Master Meal
+        // Template must stay visible until the admin republishes — filtering on
+        // `isActive: true` alone dropped it from the member's dashboard the
+        // instant it was archived, and (because the attendance query below is
+        // narrowed to these ids) silently dropped that day's marked record with
+        // it. Archived meals that still carry attendance for the day therefore
+        // stay in the list. Relation `some` on the indexed mealId — same single
+        // query, no extra wave (guidebook §3b).
+        OR: [
+          { isActive: true },
+          { attendanceRecords: { some: { attendanceDate: todayUtc } } },
+        ],
       },
       orderBy: { order: 'asc' },
       select: {
@@ -266,7 +277,16 @@ export class DashboardRepository {
 
       // Today's active meals (for participation tracking)
       this.prisma.meal.findMany({
-        where: { organizationId, isActive: true },
+        // ISSUE-001: same rule as the student dashboard — an archived meal that
+        // still has attendance for TODAY keeps its participation row until the
+        // admin republishes (the aggregate below is narrowed to these ids).
+        where: {
+          organizationId,
+          OR: [
+            { isActive: true },
+            { attendanceRecords: { some: { attendanceDate: todayUtc } } },
+          ],
+        },
         select: { id: true, name: true, displayName: true, slotKey: true },
         take: 20,
         orderBy: { order: 'asc' },

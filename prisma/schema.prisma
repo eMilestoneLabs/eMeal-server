@@ -398,6 +398,15 @@ model Meal {
 
   // Visibility flags — two separate flags (B3 contract requirement)
   isActive          Boolean @default(true)  // serialized as "isActive" in API response — Flutter reads isActive (NOT isEnabled)
+  // ISSUE-001 (Live-Test-13): DELETE and DISABLE are different business
+  // operations and must stay distinguishable. Both used to set isActive=false
+  // only, so the Master Meal Template could not show disabled meals (for
+  // re-enabling) without also resurrecting deleted ones.
+  //   deletedAt = null  → DISABLE (temporary; stays in the template, re-enableable)
+  //   deletedAt != null → DELETE  (permanent; never listed, never re-enableable)
+  // The ROW is never removed: attendance, billing, reports and previously
+  // published schedules keep referencing it, so history stays intact.
+  deletedAt         DateTime?
   attendanceEnabled Boolean @default(true)  // attendance can remain when meal is hidden
 
   // Preference system — two-level (group-level + per-meal override)
@@ -426,6 +435,8 @@ model Meal {
   @@index([groupId])
   @@index([isActive])
   @@index([order])
+  // ISSUE-001: every template listing filters on it, so it rides an index.
+  @@index([deletedAt])
   @@map("meals")
 }
 

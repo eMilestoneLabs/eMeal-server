@@ -246,8 +246,14 @@ export class MealConfigDto {
 export class CreateGroupDto {
   // Trimmed BEFORE validation — IsNotEmpty alone accepts whitespace-only
   // strings (FR-GRP-013, caught live in the Pass 10 server validation).
+  // UNI-005 (unique_mandatory_rules.xlsx): Group Name normalization is
+  // "Trim -> Collapse Spaces -> Lowercase". Trim alone let a whitespace
+  // variant ("Boys  Hostel") slip past the org-scoped uniqueness gate as a
+  // distinct name; lowercase is applied at COMPARISON time
+  // (existsActiveByNameType uses mode: 'insensitive'), so display casing is
+  // preserved here.
   @Transform(({ value }) =>
-    typeof value === 'string' ? value.trim() : value,
+    typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : value,
   )
   // SRS GRP-003: Group Name is 2–50 characters (trimmed). MinLength runs after
   // the trim transform so whitespace can't pad a too-short name.

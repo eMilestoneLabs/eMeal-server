@@ -1024,6 +1024,22 @@ export class MealsService {
       });
     }
 
+    // ISSUE-001 (Live-Test-13): a DELETED meal is permanently out of the
+    // Master Meal Template — it can never be re-enabled. DISABLE stays
+    // reversible. Checked before the cap so the admin gets the real reason.
+    if (
+      dto.isEnabled === true &&
+      (existing as any).deletedAt != null
+    ) {
+      throw new ConflictException({
+        message: `"${existing.name}" was deleted and cannot be enabled again — create a new meal instead.`,
+        errors: {
+          isEnabled:
+            'Deleted meals are permanently removed from the Master Meal Template',
+        },
+      });
+    }
+
     // SRS Module 03 MMT-001/MMT-014 + MODE-003.2: re-enabling an archived
     // meal/window counts against the same cap as creating one.
     if (dto.isEnabled === true && existing.isActive === false) {

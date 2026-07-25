@@ -31,6 +31,14 @@ export class MealEntity {
 
   // Visibility
   isActive: boolean;          // serialized as "isEnabled" (M-04 pattern)
+
+  /**
+   * ISSUE-001 (Live-Test-13): set when the meal was DELETED (permanent
+   * removal from the Master Meal Template). null = never deleted, so a
+   * DISABLED meal (isActive=false, deletedAt=null) can still be re-enabled.
+   * Internal only — not serialized to the API contract.
+   */
+  deletedAt: Date | null;
   attendanceEnabled: boolean; // independently controls attendance marking
 
   // Preferences
@@ -59,6 +67,7 @@ export class MealEntity {
     this.menuItems = partial.menuItems ?? [];
     this.imageUrl = partial.imageUrl ?? null;
     this.isActive = partial.isActive ?? true;
+    this.deletedAt = partial.deletedAt ?? null;
     this.attendanceEnabled = partial.attendanceEnabled ?? true;
     this.preferencesEnabled = partial.preferencesEnabled ?? false;
     this.enabledPreferences = partial.enabledPreferences ?? [];

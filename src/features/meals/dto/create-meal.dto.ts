@@ -23,6 +23,21 @@ export const normalizeSlotKey = (v: unknown): unknown =>
   typeof v === 'string' ? v.trim().replace(/\s+/g, ' ').toLowerCase() : v;
 
 /**
+ * UNI-016 (unique_mandatory_rules.xlsx) — Meal Name, GROUP scope, normalized
+ * "Trim → Collapse Spaces → Lowercase".
+ *
+ * Only the LOWERCASE half was implemented (the duplicate probe compares with
+ * `mode: 'insensitive'`), so " Lunch", "Lunch " and "Ice  Cream" all slipped
+ * past the uniqueness gate as distinct names. Case is deliberately PRESERVED
+ * here — it is the admin's display text; lowercase applies to the COMPARISON,
+ * not to storage. Same normalize-on-WRITE / forgive-on-READ discipline the
+ * guidebook (§8) already uses for emails: new rows are clean, legacy rows keep
+ * matching case-insensitively.
+ */
+export const normalizeMealName = (v: unknown): unknown =>
+  typeof v === 'string' ? v.trim().replace(/\s+/g, ' ') : v;
+
+/**
  * AttendanceWindowDto — nested object for attendanceWindow field.
  * HH:mm format validated via regex.
  */
@@ -79,12 +94,14 @@ export class CreateMealDto {
   slotKey: string;
 
   /** Internal admin-facing name. Used as displayName fallback. */
+  @Transform(({ value }) => normalizeMealName(value))
   @IsString()
   @IsNotEmpty()
   @MaxLength(128)
   name: string;
 
   /** Student-facing display label. Null → serializer falls back to name. */
+  @Transform(({ value }) => normalizeMealName(value))
   @IsOptional()
   @IsString()
   @MaxLength(128)
