@@ -187,9 +187,24 @@ export class SchedulesRepository {
 
   /**
    * Rebuild a schedule entity whose entries come from the published snapshot.
+   *
    * Legacy rows published before this column existed have a null snapshot — for
-   * them we fall back to the live entries (safe: before this change a published
-   * row could not also hold an unsynced draft, so live == published).
+   * them we fall back to the LIVE entries, served WHOLE (archived master meals
+   * included) via `includeArchivedMeals`.
+   *
+   * HISTORY — read before changing this (ISSUE-001, Live-Test-13):
+   * this fallback originally carried the note "safe: a published row cannot
+   * also hold an unsynced draft, so live == published". That was TRUE when the
+   * snapshot column landed, but the auto-draft triggers added later
+   * (revertPublishedForMeal / revertPublishedForGroup, which flip a published
+   * row to draft while it stays published-visible) INVALIDATED it — a published
+   * row can now absolutely hold an unsynced draft. The stale note went
+   * unrevised and was read as proof of safety for several sessions, while this
+   * branch quietly applied the DRAFT view's archived-meal filter to the
+   * member-facing published read. Every week published by an older build has a
+   * null snapshot, so production always took this path: disabling or deleting a
+   * master meal removed it from the member weekly menu instantly, with no
+   * publish. Data created after the snapshot column exists never reproduces it.
    */
   private scheduleFromSnapshot(raw: any): MealScheduleEntity {
     const snap = raw.publishedSnapshot;

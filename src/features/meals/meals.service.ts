@@ -1149,18 +1149,26 @@ export class MealsService {
     // key (the only date the dashboard renders) so the tick is correct on the
     // very next request. O(1), no scan; best-effort — a Redis hiccup must
     // never fail the config save, and the TTL still self-heals.
+    // Guidebook §3 pattern 4: this is a side-effect, NOT part of the response —
+    // fire-and-forget with internal catch. Awaiting it would add two hops to
+    // the meal-toggle round-trip, the exact "button tap takes too long"
+    // complaint this batch is fixing. The TTL remains the backstop.
     if (
       dto.preferencesEnabled !== undefined &&
       dto.preferencesEnabled !== existing.preferencesEnabled
     ) {
-      try {
-        const tz = await this.mealsRepo.getOrganizationTimezone(organizationId);
-        await this.redis?.del(
-          mealSummaryKey(organizationId, id, getTodayInTimezone(tz)),
-        );
-      } catch {
-        /* best-effort cache drop — TTL remains the backstop */
-      }
+      void (async () => {
+        try {
+          const tz = await this.mealsRepo.getOrganizationTimezone(
+            organizationId,
+          );
+          await this.redis?.del(
+            mealSummaryKey(organizationId, id, getTodayInTimezone(tz)),
+          );
+        } catch {
+          /* best-effort cache drop — TTL remains the backstop */
+        }
+      })();
     }
 
     // B7: emit meal.updated.v1 on config change
