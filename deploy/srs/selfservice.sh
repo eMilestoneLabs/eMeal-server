@@ -76,8 +76,32 @@ esac
 sec "Live-Test-14 — ISSUE-004: Pending → System Skip, and the ₹0 Skip bills nothing"
 
 # Discover real ids at runtime — never hardcode (run.sh rule 6).
+#
+# Group SELECTION matters: blindly taking .data[0] picked a group with NO meals
+# today (live run 2026-07-26 reported "meals=0"), so the ISSUE-004 and ISSUE-001
+# probes silently SKIPPED and nothing was actually exercised. Scan the admin's
+# groups instead and prefer, in order:
+#   1. a group with a CLOSED window today  → both probes can run in full;
+#   2. any group with meals today          → at least the window states are real;
+#   3. the first group                     → preserves the old behaviour.
+# Bounded to the first 10 groups so the probe cost stays trivial.
 req GET /groups "" "$ADMIN_TOKEN"
-GID="$(jbody '.data[0].id // empty')"
+ALL_GIDS="$(jbody '[.data[]?.id] | .[0:10] | .[]')"
+GID=""; GID_ANY_MEALS=""; GID_FIRST=""
+while read -r _g; do
+  [ -n "$_g" ] || continue
+  [ -n "$GID_FIRST" ] || GID_FIRST="$_g"
+  req GET "/meals/today?groupId=$_g" "" "$ADMIN_TOKEN"
+  [ "$R_CODE" = "200" ] || continue
+  _n="$(jbody '[.data[]?] | length')"
+  case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
+  [ "$_n" -gt 0 ] && [ -z "$GID_ANY_MEALS" ] && GID_ANY_MEALS="$_g"
+  if [ -n "$(jbody '[.data[]? | select(.windowState=="closed")] | length | select(. > 0)')" ]; then
+    GID="$_g"; break
+  fi
+done <<< "$ALL_GIDS"
+[ -n "$GID" ] || GID="${GID_ANY_MEALS:-$GID_FIRST}"
+[ -n "$GID" ] && echo "   probe group: $GID"
 
 if [ -z "$GID" ]; then
   skip "ISSUE-004 pending/skip reconciliation" "no group visible to admin" "LT14-004-A"
@@ -164,7 +188,7 @@ else
   req GET "/meals/today?groupId=$GID" "" "$ADMIN_TOKEN"
   CMID="$(jbody '[.data[]? | select(.windowState=="closed")][0].id // empty')"
   if [ -z "$CMID" ]; then
-    skip "admin self-correction auto-applies" "no closed window today" "LT14-001-B"
+    skip "admin self-correction auto-applies"       "no CLOSED window today in group $GID (meals=$(jbody '[.data[]?] | length')) — re-run after a close"       "LT14-001-B"
   else
     # Capture the admin's current status so the probe can restore it.
     req GET "/attendance/today?groupId=$GID" "" "$ADMIN_TOKEN"
