@@ -99,7 +99,14 @@ export class AttendanceService {
   // command_6 (timezone integrity): in-process org-timezone TTL cache — same
   // pattern as GroupsRepository.getOrganizationTimezone, so "org today"
   // lookups never pay a per-request PK query on hot read paths.
-  private readonly orgTzCache = new Map<string, { tz: string; exp: number }>();
+  // Live-Test-14 ISSUE-002(vi): the same cached row now also carries the org's
+  // DISPLAY NAME, so the admin dashboard can greet with the real organisation
+  // instead of the "Your Organisation" placeholder — a widened `select` on a
+  // query that already ran, never a second lookup.
+  private readonly orgTzCache = new Map<
+    string,
+    { tz: string; name: string; exp: number }
+  >();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -145,20 +152,30 @@ export class AttendanceService {
     // that resolves "today". Fall back to the same default timezone the org
     // lookup below uses.
     if (!organizationId) return getTodayInTimezone('Asia/Kolkata');
+    return getTodayInTimezone((await this.getOrgProfile(organizationId)).tz);
+  }
+
+  /**
+   * Live-Test-14 ISSUE-002(vi): the org's timezone + display name from ONE
+   * TTL-cached PK lookup (shared with {@link getOrgToday} — a caller that needs
+   * both pays for neither twice). Falls back to the platform defaults for an
+   * org-less account, exactly like the timezone path always has.
+   */
+  async getOrgProfile(
+    organizationId: string,
+  ): Promise<{ tz: string; name: string }> {
+    if (!organizationId) return { tz: 'Asia/Kolkata', name: '' };
     const ttlMs = parseInt(process.env.ORG_TZ_CACHE_TTL_MS ?? '300000', 10);
     const hit = this.orgTzCache.get(organizationId);
-    let tz: string;
-    if (hit && hit.exp > Date.now()) {
-      tz = hit.tz;
-    } else {
-      const org = await this.prisma.organization.findUnique({
-        where: { id: organizationId },
-        select: { timezone: true },
-      });
-      tz = org?.timezone ?? 'Asia/Kolkata';
-      this.orgTzCache.set(organizationId, { tz, exp: Date.now() + ttlMs });
-    }
-    return getTodayInTimezone(tz);
+    if (hit && hit.exp > Date.now()) return { tz: hit.tz, name: hit.name };
+    const org = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { timezone: true, name: true },
+    });
+    const tz = org?.timezone ?? 'Asia/Kolkata';
+    const name = org?.name ?? '';
+    this.orgTzCache.set(organizationId, { tz, name, exp: Date.now() + ttlMs });
+    return { tz, name };
   }
 
   /**

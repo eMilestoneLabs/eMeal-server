@@ -192,6 +192,27 @@ export class NotificationPayloadService {
     };
   }
 
+  /**
+   * Live-Test-14 ISSUE-005: the admin's decision on a hosted-guest request.
+   * Mirrors [buildCorrectionDecidedPayload] — FR-NOTX-017 safe (no amounts, no
+   * other members' data) and routed to the REGISTERED member attendance path
+   * where the guest sheet lives.
+   */
+  buildGuestDecidedPayload(params: {
+    approved: boolean;
+    mealName: string;
+    dateStr: string;
+  }): NotificationPayload {
+    return {
+      title: params.approved ? 'Guest Request Approved' : 'Guest Request Update',
+      body: params.approved
+        ? `Your guest booking for ${params.mealName} (${params.dateStr}) was approved.`
+        : `Your guest booking for ${params.mealName} (${params.dateStr}) was not approved.`,
+      route: '/student/attendance',
+      data: { type: 'guest_decided', approved: String(params.approved) },
+    };
+  }
+
   // ── Event notifications ─────────────────────────────────────────────────────
 
   /**

@@ -142,10 +142,35 @@ export class CorrectionsService {
     if (!meal) throw new NotFoundException('Meal not found');
 
     // Member must be active in the meal's group (FR-ACR-001 preconditions).
-    const isMember = await this.membersRepo.isActiveMember(meal.groupId, userId);
+    //
+    // Live-Test-14 ISSUE-001: the requester's CURRENT role rides this same wave
+    // (never the possibly-stale JWT claim — same discipline as RolesGuard). It
+    // decides admin self-service below, and its `isVacationMode` also serves
+    // the claim_present vacation gate further down, so this Promise.all REPLACES
+    // that later lookup: no net query is added to the request path.
+    const [isMember, requester] = await Promise.all([
+      this.membersRepo.isActiveMember(meal.groupId, userId),
+      this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { role: true, isVacationMode: true },
+      }),
+    ]);
     if (!isMember) {
       throw new ForbiddenException('You are not an active member of this group');
     }
+
+    // ISSUE-001 (user-confirmed rule): an ADMIN / MANAGER correcting their OWN
+    // record needs no approval — "admin no need to any approval". They are the
+    // approving authority, and FR-ACR-010 already forbids self-approval, so
+    // without this an admin's own claim_present could NEVER be actioned (it sat
+    // pending until it expired). Self-service applies the change immediately.
+    //
+    // Nothing else is relaxed: they must still be an active member of THIS
+    // group, the date must still be today (COR-005), the window must still have
+    // closed, preference selections are still fully validated, and a
+    // vacationing admin still cannot claim Present. Org isolation is unchanged
+    // (the meal was resolved org-scoped from the JWT).
+    const selfService = this.isAdmin(requester?.role ?? '');
 
     const orgTz = meal.organization?.timezone ?? 'Asia/Kolkata';
     const todayStr = getTodayInTimezone(orgTz);
@@ -219,17 +244,13 @@ export class CorrectionsService {
     }
 
     // Vacation members cannot claim Present (FR-ACR-001 preconditions).
-    if (dto.requestType === 'claim_present') {
-      const user = await this.prisma.user.findUnique({
-        where: { id: userId },
-        select: { isVacationMode: true },
+    // ISSUE-001: served by the `requester` row already fetched above — the
+    // dedicated lookup that used to live here was removed, not duplicated.
+    if (dto.requestType === 'claim_present' && requester?.isVacationMode) {
+      throw new BadRequestException({
+        message: 'You are on vacation mode — corrections to Present are unavailable',
+        errors: { requestType: 'Disable vacation mode first' },
       });
-      if (user?.isVacationMode) {
-        throw new BadRequestException({
-          message: 'You are on vacation mode — corrections to Present are unavailable',
-          errors: { requestType: 'Disable vacation mode first' },
-        });
-      }
     }
 
     // SRS Module 03 ATT-004/COR-006: when the correction targets Present on a
@@ -370,6 +391,22 @@ export class CorrectionsService {
           requestId,
         });
       }
+    }
+
+    // ISSUE-001: admin / manager self-service. Everything that is a genuine
+    // ATTENDANCE correction applies at once — in practice this is claim_present
+    // (the liability-increasing type that normally waits for another admin);
+    // correct_to_absent and fix_preference already auto-resolved above for
+    // everyone. `dispute_charge` is deliberately EXCLUDED: a charge dispute is a
+    // money conversation resolved through the append-only ledger, not something
+    // an admin silently self-approves.
+    if (selfService && STATUS_CHANGE_TYPES.has(dto.requestType)) {
+      return this.applyDecision(created, {
+        decidedBy: userId,
+        note: 'Auto-applied — admin self-service correction (same day)',
+        auto: true,
+        requestId,
+      });
     }
 
     // Still pending → an admin review is genuinely waiting. Best-effort push

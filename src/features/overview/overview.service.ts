@@ -56,12 +56,18 @@ export class OverviewService {
       date ?? (await this.attendanceService.getOrgToday(organizationId));
 
     // Wave 1 (server-side): groups — identical to GET /groups?page=1&limit=100.
-    const groupsPage = (await this.groupsService.getGroups(
-      userId,
-      role,
-      organizationId,
-      { page: 1, limit: 100 } as QueryGroupsDto,
-    )) as PaginatedResult;
+    // Live-Test-14 ISSUE-002(vi): the organisation's display name rides THIS
+    // wave (Promise.all, not a new await) so the admin dashboard header can show
+    // the real org name instead of the "Your Organisation" placeholder. The
+    // lookup is the 5-min TTL-cached org row `getOrgToday` already uses, so on
+    // any warm request it costs nothing at all.
+    const [groupsPage, orgProfile] = await Promise.all([
+      this.groupsService.getGroups(userId, role, organizationId, {
+        page: 1,
+        limit: 100,
+      } as QueryGroupsDto) as Promise<PaginatedResult>,
+      this.attendanceService.getOrgProfile(organizationId),
+    ]);
     const groups = groupsPage.data ?? [];
 
     // Wave 2 (server-side, parallel): today's meals per group + last-5 history
@@ -123,6 +129,10 @@ export class OverviewService {
       mealSummaries,
       recentActivity,
       date: day,
+      // ISSUE-002(vi) (additive key — existing clients ignore it): the signed-in
+      // admin's organisation, so the dashboard greeting is the real org name.
+      // Empty name = org-less account; the client keeps its own fallback then.
+      organization: { id: organizationId, name: orgProfile.name },
       generatedAt: new Date().toISOString(),
     };
   }

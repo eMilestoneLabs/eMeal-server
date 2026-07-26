@@ -371,6 +371,48 @@ export class NotificationsService {
   }
 
   /**
+   * Live-Test-14 ISSUE-005: push the admin's hosted-guest decision to the HOST.
+   * Same shape and guarantees as [notifyCorrectionDecided] — best-effort, never
+   * throws, silently no-ops when the member has no FCM token (the in-app bell
+   * notice raised alongside it is the reliable channel).
+   */
+  async notifyGuestDecided(params: {
+    organizationId: string;
+    userId: string;
+    approved: boolean;
+    mealName: string;
+    dateStr: string;
+  }): Promise<void> {
+    try {
+      const user = await this.prisma.user.findUnique({
+        where: { id: params.userId },
+        select: { fcmToken: true },
+      });
+      if (!user?.fcmToken) return;
+
+      const payload = this.payloadBuilder.buildGuestDecidedPayload({
+        approved: params.approved,
+        mealName: params.mealName,
+        dateStr: params.dateStr,
+      });
+
+      await this.queue.enqueuePush({
+        organizationId: params.organizationId,
+        userId: params.userId,
+        fcmToken: user.fcmToken,
+        title: payload.title,
+        body: payload.body,
+        route: payload.route,
+        data: payload.data,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `guest-decided push enqueue failed: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  /**
    * SRS FR-TRUST-011 (Pass 7): any change to a member's attendance/billing by
    * anyone other than the member notifies them immediately with the delta and
    * reason. Fire-and-forget — never blocks or fails the write.

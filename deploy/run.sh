@@ -64,6 +64,7 @@ reg system      RO    "System health — CPU, RAM, disk, PM2, docker, logs, TLS,
 reg recovery    RO    "Auto-recovery configuration audit (verify-auto-recovery.sh)"
 reg security    RO    "Security / pen-test probes — auth, isolation, injection, headers (srs/security.sh)"
 reg policy-contracts RO "Policy & contract probes (LT-11) — Bill-Absent snapshot flags, pick counts, group-scoped alerts; slotKey/dup/veg-only/toggle WRITE probes self-clean behind --writes (srs/policy-contracts.sh)"
+reg selfservice RO    "Self-service & decision round-trip — an admin's OWN correction applies with NO approval (FR-ACR-010 self-approval still blocked); unmarked members become System Skip at window close (Pending→0) and that Skip is ₹0 billing-neutral; approve/reject decisions reach the member's bell TARGETED (no cross-member leak); dashboard resolves the REAL organisation name (srs/selfservice.sh — read-only; its single correction write self-cleans and runs only behind --writes)"
 reg srs         RO    "SRS requirement validation — functional+security+performance vs the 664-req manifest (srs/run.sh; read-only unless --writes)"
 reg e2e         WRITE "Full feature end-to-end with SELF-CLEANING test writes (validate-e2e.sh)"
 reg mealcheck   WRITE "MODULE-03 Meal/Attendance/Billing SRS validation, self-cleaning (validate-meal-attendance-billing.sh)"
@@ -83,7 +84,7 @@ usage() {
   echo
   echo "Modules:"
   for m in "${MOD_NAMES[@]}"; do
-    printf "  --%-12s [%-5s] %s\n" "$m" "${MOD_IMPACT[$m]}" "${MOD_DESC[$m]}"
+    printf "  --%-17s [%-5s] %s\n" "$m" "${MOD_IMPACT[$m]}" "${MOD_DESC[$m]}"
   done
   echo
   echo "  --all     = every RO module (+WRITE with --writes, +HEAVY with --load)"
@@ -208,6 +209,7 @@ run_module() { # $1 = name
     srs)         ( WRITE_TESTS=$WRITES bash deploy/srs/run.sh )  2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     security)    ( cd deploy/srs && bash security.sh )          2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     policy-contracts) ( WRITE_TESTS=$WRITES bash deploy/srs/policy-contracts.sh ) 2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
+    selfservice) ( WRITE_TESTS=$WRITES bash deploy/srs/selfservice.sh ) 2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     fixtures)    bash deploy/ensure-test-fixtures.sh            2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     db)          mod_db                                         2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     unidoctor)   bash deploy/uni-index-doctor.sh                2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
@@ -341,6 +343,7 @@ FAILED=0
       certificate) grep -E 'Verdict|CERTIFIED' "$REPORT_DIR/$m.log" | tail -1;;
       srs)         grep -iE 'manifest|requirements|coverage|PASS.*FAIL' "$REPORT_DIR/$m.log" | tail -1;;
       policy-contracts) grep -E 'PASS=|FAIL=' "$REPORT_DIR/$m.log" | tail -1;;
+      selfservice) grep -E 'PASS=|FAIL=' "$REPORT_DIR/$m.log" | tail -1;;
       load)        grep -E 'http_req_duration|checks' "$REPORT_DIR/$m.log" | head -2 | tr '\n' ' ';;
       db)          grep -E 'cache_hit_pct' "$REPORT_DIR/$m.log" | tail -1;;
       system)      grep -E 'unstable=' "$REPORT_DIR/$m.log" | head -1;;

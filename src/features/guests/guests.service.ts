@@ -874,7 +874,7 @@ export class GuestsService {
     _dto: ReviewGuestDto,
     requestId?: string,
   ) {
-    const { guest } = await this.loadGuestWithMeal(id, organizationId);
+    const { guest, meal } = await this.loadGuestWithMeal(id, organizationId);
     this.assertPendingBooked(guest);
     // An ADMIN-created guest awaits the HOST's consent, not another admin's
     // (FR-FAIR-001 — admin identity ≠ member identity).
@@ -884,7 +884,16 @@ export class GuestsService {
         errors: { id: 'Host must confirm' },
       });
     }
-    return this.clearPending(adminId, organizationId, guest, 'approved', requestId);
+    return this.clearPending(
+      adminId,
+      organizationId,
+      guest,
+      'approved',
+      requestId,
+      // ISSUE-005: the host hears the outcome. Only an ADMIN decision notifies
+      // — a host CONFIRMING their own admin-proposed guest already knows.
+      meal.name,
+    );
   }
 
   async rejectGuest(
@@ -894,7 +903,7 @@ export class GuestsService {
     dto: ReviewGuestDto,
     requestId?: string,
   ) {
-    const { guest } = await this.loadGuestWithMeal(id, organizationId);
+    const { guest, meal } = await this.loadGuestWithMeal(id, organizationId);
     this.assertPendingBooked(guest);
     const updated = await this.prisma.$transaction(async (tx) => {
       const u = await tx.mealGuest.update({
@@ -923,6 +932,16 @@ export class GuestsService {
       hostUserId: guest.hostUserId,
       action: 'rejected',
       guestId: id,
+    });
+    // ISSUE-005: a rejection MUST reach the host — otherwise the member keeps
+    // expecting guests the kitchen is not preparing.
+    this.notifyGuestDecision({
+      organizationId,
+      groupId: updated.groupId,
+      hostUserId: guest.hostUserId,
+      mealName: meal.name,
+      dateStr: guest.attendanceDate.toISOString().slice(0, 10),
+      approved: false,
     });
     return this.toResponse(updated);
   }
@@ -1558,6 +1577,9 @@ export class GuestsService {
         id: true,
         groupId: true,
         price: true,
+        // ISSUE-005 (Live-Test-14): the decision notice names the meal. Rides
+        // this existing select — no extra query on any guest path.
+        name: true,
         attendanceWindowOpen: true,
         attendanceWindowClose: true,
         group: {
@@ -1597,6 +1619,12 @@ export class GuestsService {
     },
     decision: 'approved' | 'confirmed',
     requestId?: string,
+    /**
+     * ISSUE-005: when provided, the HOST is notified of the decision. Set only
+     * on the admin-approval path — a host confirming their own admin-proposed
+     * guest is already the actor and needs no notification.
+     */
+    notifyHostForMealName?: string,
   ) {
     const updated = await this.prisma.$transaction(async (tx) => {
       const u = await tx.mealGuest.update({
@@ -1621,6 +1649,16 @@ export class GuestsService {
       action: decision,
       guestId: guest.id,
     });
+    if (notifyHostForMealName) {
+      this.notifyGuestDecision({
+        organizationId,
+        groupId: updated.groupId,
+        hostUserId: guest.hostUserId,
+        mealName: notifyHostForMealName,
+        dateStr: guest.attendanceDate.toISOString().slice(0, 10),
+        approved: true,
+      });
+    }
     return this.toResponse(updated);
   }
 
@@ -1639,6 +1677,57 @@ export class GuestsService {
       action: AuditAction.update,
       metadata: { decision },
       requestId,
+    });
+  }
+
+  /**
+   * Live-Test-14 ISSUE-005: tell the HOST what the admin decided.
+   *
+   * The request direction was already covered (a pending booking raises an
+   * admin bell alert via `createRequestAlert` on the create path), but the
+   * decision direction was not: approve/reject only emitted a realtime event
+   * and an audit row, so a member who was not looking at the screen at that
+   * exact moment never learned the outcome — the reported "guest meal request
+   * came to admin but approved-or-not notification not came back to student".
+   *
+   * Mirrors the correction-decision channel pair exactly:
+   *   • a targeted in-app bell notice (audience 'members' + targetUserId, so
+   *     ONLY the host sees it — no cross-member leakage), and
+   *   • a best-effort push so the outcome lands with the app closed.
+   *
+   * Fire-and-forget with internal try/catch on both sides: a notification can
+   * never fail or delay the decision write that already committed.
+   */
+  private notifyGuestDecision(params: {
+    organizationId: string;
+    groupId: string | null;
+    hostUserId: string;
+    mealName: string;
+    dateStr: string;
+    approved: boolean;
+  }): void {
+    const { approved, mealName, dateStr } = params;
+    if (this.notices) {
+      void this.notices.createMemberAlert({
+        organizationId: params.organizationId,
+        groupId: params.groupId,
+        actorId: params.hostUserId,
+        targetUserId: params.hostUserId,
+        title: approved ? 'Guest request approved' : 'Guest request rejected',
+        body: approved
+          ? `Your guest booking for ${mealName} on ${dateStr} was approved. `
+              + 'The guest plates are counted and will appear on your bill.'
+          : `Your guest booking for ${mealName} on ${dateStr} was not approved. `
+              + 'Nothing has been charged.',
+        priority: 'high',
+      });
+    }
+    void this.notifications.notifyGuestDecided({
+      organizationId: params.organizationId,
+      userId: params.hostUserId,
+      approved,
+      mealName,
+      dateStr,
     });
   }
 

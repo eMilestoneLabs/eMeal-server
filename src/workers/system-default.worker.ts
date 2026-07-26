@@ -1,23 +1,31 @@
 /**
  * system-default.worker.ts — Pass 7 (SRS FR-TRUST-001/002/003, Module 33).
  *
- * Materializes the OPT-OUT trust model: for groups with
- * attendanceDefault='present', once a meal's attendance window has fully
- * closed (close + grace), every active, non-vacation member WITHOUT a record
- * is marked Present with source='system_default' — standing consent under the
- * group's communicated policy.
+ * At window close (close + grace) every active, non-vacation member who has NO
+ * record for the meal gets one written with source='system_default':
+ *   • attendanceDefault='present' groups → PRESENT (the OPT-OUT trust model:
+ *     standing consent under the group's communicated policy);
+ *   • every other group → the existing internal System SKIP, so a non-responder
+ *     moves out of Pending (Live-Test-14 ISSUE-004). No new status is
+ *     introduced, and billing follows the group's existing Skip Billing config:
+ *     ON → the row carries its price snapshot and bills by the existing rules,
+ *     OFF → price is null, i.e. ₹0 in every money path.
  *
- * Fair-opportunity guarantees enforced per meal/member (FR-TRUST-003 —
- * fail-safe direction is always "do NOT auto-bill"):
+ * Fair-opportunity guarantees (FR-TRUST-003 — fail-safe direction is always
+ * "do NOT auto-bill"). These protect the auto-PRESENT claim, which asserts a
+ * member ATE, so they gate 'present' only — the System SKIP records the opposite
+ * (a non-response) and is written unconditionally:
  *   • the window must have been open ≥ minOptOutMinutes (group override or
- *     ATTENDANCE_MIN_OPT_OUT_MINUTES, default 30);
- *   • planner-mode groups: no published entry today = holiday → never billed
- *     (FR-MODE-032);
- *   • members on vacation or inactive are skipped;
+ *     ATTENDANCE_MIN_OPT_OUT_MINUTES, default 30)          [present only];
  *   • if no reminder was dispatched for the meal (Redis
  *     reminder:dispatched:* flag from the reminder worker), only members who
  *     have reminders DISABLED are auto-marked — a member who was promised a
- *     reminder that never arrived is neutralized, not billed.
+ *     reminder that never arrived is neutralized, not billed [present only].
+ *
+ * Applies to BOTH statuses:
+ *   • planner-mode groups: no published entry today = holiday → nothing written
+ *     (FR-MODE-032);
+ *   • members on vacation or inactive are excluded.
  *
  * Idempotency: createMany(skipDuplicates) against the NON-NEGOTIABLE
  * unique(userId, mealId, attendanceDate) — a member's own mark always wins;
@@ -953,18 +961,28 @@ export class SystemDefaultWorker extends WorkerHost {
   }
 
   private async sweep(): Promise<void> {
-    // Two materialization modes share this sweep:
-    //  • opt-out groups (attendanceDefault='present') → unmarked members are
-    //    marked PRESENT at close (FR-TRUST-001/002/003), and
-    //  • SRS Module 03 Bill-Skip groups (billSkippedMeals=true) → unmarked
-    //    members get a SYSTEM-GENERATED SKIP record at close so the internal
-    //    Skip is billable per policy (survey Q17/Q22 — a member cannot gain
-    //    by doing nothing). Opt-out wins when both flags are on.
+    // At window close, a member who never responded gets a record:
+    //   • opt-out groups (attendanceDefault='present') → PRESENT
+    //     (FR-TRUST-001/002/003, unchanged);
+    //   • every other group → the EXISTING internal System SKIP.
+    //
+    // Live-Test-14 ISSUE-004: the group filter used to be
+    // `attendanceDefault='present' OR billSkippedMeals`, so an ordinary group was
+    // never swept — its non-responders stayed record-less and `pendingCount`
+    // (expected − present − absent − skipped) never reached zero. Every active
+    // group is swept now. This adds NO status and NO business rule: it only
+    // assigns the existing System SKIP so members move Pending → Skip.
+    //
+    // Billing follows the group's EXISTING Skip Billing configuration and
+    // nothing else — ON: the Skip carries its scheduled price snapshot and bills
+    // by the existing rules; OFF: price is null, which is ₹0 in every money path
+    // (`price ?? 0` in the summary engine and exports, `_sum: { price: true }`
+    // behind BillingService.billedAttendanceFilter()), so no billing is
+    // generated. Because the decision is snapshotted per row, later ON/OFF flips
+    // never touch prior bills (Live-Test-8 ISSUE-005 date-forward discipline).
+    // Opt-out (auto-Present) still wins when both policies are on.
     const groups = await this.prisma.group.findMany({
-      where: {
-        isActive: true,
-        OR: [{ attendanceDefault: 'present' }, { billSkippedMeals: true }],
-      },
+      where: { isActive: true },
       select: {
         id: true,
         organizationId: true,
@@ -1113,7 +1131,10 @@ export class SystemDefaultWorker extends WorkerHost {
         const dayGroupPrefs =
           hasGroups.has(meal.id) && entry?.preferencesEnabled !== false;
         if (dayFlatPrefs === true || dayGroupPrefs) {
-          if (group.billSkippedMeals !== true) continue;
+          // ISSUE-004: the meal still has to leave Pending, so it falls back to
+          // the system SKIP in EVERY group now (not only Bill-Skip ones). The
+          // Skip stays billing-neutral unless Bill-Skip is ON — decided by the
+          // price snapshot below, never by inventing a preference selection.
           mealStatus = 'skipped';
         }
       }
@@ -1127,8 +1148,19 @@ export class SystemDefaultWorker extends WorkerHost {
       // Only materialize once the window (incl. grace) has fully closed.
       if (getWindowState(nowTime, open, close, grace) !== 'closed') continue;
 
-      // FR-TRUST-003: the opt-out opportunity must have been real.
-      if (windowMinutes(open, close) < floor) continue;
+      // ISSUE-004 (locked rule): the System SKIP is assigned to EVERY member who
+      // did not respond before the window closed — unconditionally. No extra
+      // gate, no exceptions. Whether that Skip costs money is decided solely by
+      // the group's EXISTING Skip Billing configuration, below.
+      //
+      // FR-TRUST-003's fairness gates (fair-opportunity floor here, reminder
+      // check in materializeMeal) belong to the OPT-OUT auto-Present model —
+      // they exist so nobody is recorded as having EATEN without a real chance to
+      // opt out. They are untouched for 'present' and deliberately do not apply
+      // to the System SKIP, which records the opposite (a non-response).
+      if (mealStatus === 'present' && windowMinutes(open, close) < floor) {
+        continue;
+      }
 
       await this.materializeMeal({
         group,
@@ -1137,13 +1169,19 @@ export class SystemDefaultWorker extends WorkerHost {
         slotKey: (meal as any).slotKey ?? null,
         dateUtc,
         dateStr: todayStr,
-        // ISSUE-002: attendance-only windows NEVER bill — meal billing is
-        // meal-system functionality and the meal system is OFF.
-        price: attendanceOnly
-          ? null
-          : entry?.price != null
-            ? entry.price
-            : (meal.price ?? null),
+        // Skip Billing configuration, unchanged:
+        //   Skip Billed ON  → the System SKIP carries the scheduled price
+        //                     snapshot and bills by the existing rules;
+        //   Skip Billed OFF → price null ⇒ ₹0 in every money path, no billing.
+        // ISSUE-002: attendance-only groups never bill at all (meal billing is
+        // meal-system functionality and the meal system is OFF).
+        price:
+          attendanceOnly ||
+          (mealStatus === 'skipped' && group.billSkippedMeals !== true)
+            ? null
+            : entry?.price != null
+              ? entry.price
+              : (meal.price ?? null),
         openTime: open,
         status: mealStatus,
       });
@@ -1160,7 +1198,7 @@ export class SystemDefaultWorker extends WorkerHost {
     dateStr: string;
     price: number | null;
     openTime: string | null;
-    /** 'present' = opt-out policy · 'skipped' = Bill-Skip system Skip. */
+    /** 'present' = opt-out auto-Present policy · 'skipped' = the System SKIP. */
     status: 'present' | 'skipped';
   }): Promise<void> {
     const { group, mealId, dateUtc, dateStr, price, status } = params;
@@ -1174,7 +1212,14 @@ export class SystemDefaultWorker extends WorkerHost {
     // FR-TRUST-003: was a reminder actually dispatched for this meal today?
     // (Flag set by AttendanceReminderWorker, 4h TTL — the sweep runs right
     // after close, well inside it.)
+    // ISSUE-004: this gate neutralizes members who were promised a reminder that
+    // never arrived, so they are not recorded as having EATEN without one. It is
+    // therefore part of the auto-Present model only — the System SKIP records a
+    // non-response and applies unconditionally, otherwise "unmarked ⇒ Skip"
+    // would silently depend on reminder delivery and members would linger in
+    // Pending exactly as reported.
     const reminderSent =
+      status === 'skipped' ||
       (await this.redis.exists(
         `reminder:dispatched:schedule-reminder:${group.organizationId}:${mealId}:30min`,
       )) ||
@@ -1267,10 +1312,14 @@ export class SystemDefaultWorker extends WorkerHost {
         metadata: {
           source: 'system_default',
           status,
+          // FR-TRUST-010 history: the row's own price snapshot says whether it
+          // billed, so the reason is derived from it rather than a second flag.
           reason:
             status === 'present'
               ? 'Group opt-out policy — unmarked at window close'
-              : 'Bill-Skip policy — no attendance submitted before window close',
+              : price != null
+                ? 'System Skip — no attendance submitted before window close (billed per Skip Billing policy)'
+                : 'System Skip — no attendance submitted before window close (not billed)',
         },
       });
     }
