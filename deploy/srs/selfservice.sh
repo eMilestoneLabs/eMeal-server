@@ -86,7 +86,7 @@ else
   CLOSED_IDS="$(jbody '[.data[]? | select(.windowState=="closed") | .id] | .[]')"
   if [ -z "$CLOSED_IDS" ]; then
     skip "ISSUE-004 pending/skip reconciliation" \
-      "no meal window has closed yet today — re-run after a close" "LT14-004-A"
+      "no CLOSED window yet (meals=$(jbody '[.data[]?] | length') states=[$(jbody '[.data[]?.windowState] | join(\",\")')]) — re-run after a close" "LT14-004-A"
   else
     CLOSED_SEEN=0; PENDING_BAD=0; PENDING_DETAIL=""
     while read -r MID; do
@@ -117,27 +117,31 @@ else
     fi
   fi
 
-  # Billing neutrality: with Bill-Skip OFF, skipped rows must contribute ₹0. The
-  # engine's own per-member mealAmount is the authority — compare the group total
-  # against it so a stray priced Skip would show up as a mismatch.
+  # Billing neutrality: with Bill-Skip OFF, skipped rows must contribute ₹0.
+  # Route and field names are taken from attendance.controller.ts (the ADMIN
+  # billing summary lives under /attendance, not /billing) and the per-member row
+  # built in AttendanceService.getBillingSummary (mealCharges / presentCount /
+  # skippedCount). A guessed `/billing/summary` + `mealAmount` produced a 404 FAIL
+  # on 2026-07-26 that looked like a product defect but was a probe bug.
   req GET "/groups/$GID" "" "$ADMIN_TOKEN"
   BILL_SKIP="$(jbody '.data.mealConfig.billSkippedMeals // .mealConfig.billSkippedMeals // false')"
-  req GET "/billing/summary?groupId=$GID" "" "$ADMIN_TOKEN"
+  req GET "/attendance/billing-summary?groupId=$GID" "" "$ADMIN_TOKEN"
   assert_code "billing summary reachable" 200 "$R_CODE" "LT14-004-B"
   if [ "$R_CODE" = "200" ]; then
-    SKIPPED="$(jbody '[.data.members[]?.skipped // 0] | add // 0')"
+    SKIPPED="$(jbody '[(.data.members // .members // [])[]?.skippedCount // 0] | add // 0')"
     if [ "$BILL_SKIP" = "true" ]; then
       skip "Bill-Skip OFF ⇒ system Skips add ₹0" \
         "group policy is ON — Skips bill by design" "LT14-004-C"
     else
-      MEAL_SUM="$(jbody '[.data.members[]?.mealAmount // 0] | add // 0')"
-      PRESENT_SUM="$(jbody '[.data.members[]?.present // 0] | add // 0')"
-      # With Bill-Skip OFF a member with 0 present meals must have 0 mealAmount.
-      BAD="$(jbody '[.data.members[]? | select((.present // 0) == 0 and (.mealAmount // 0) > 0)] | length')"
+      MEAL_SUM="$(jbody '[(.data.members // .members // [])[]?.mealCharges // 0] | add // 0')"
+      PRESENT_SUM="$(jbody '[(.data.members // .members // [])[]?.presentCount // 0] | add // 0')"
+      # With Bill-Skip OFF, a member with 0 Present meals must carry 0 meal
+      # charges — a priced System Skip would surface exactly here.
+      BAD="$(jbody '[(.data.members // .members // [])[]? | select((.presentCount // 0) == 0 and (.mealCharges // 0) > 0)] | length')"
       case "$BAD" in ''|*[!0-9]*) BAD=0 ;; esac
       if [ "$BAD" -eq 0 ]; then
         ok "Bill-Skip OFF ⇒ system Skips add ₹0" \
-          "skipped=$SKIPPED present=$PRESENT_SUM mealAmount=$MEAL_SUM" "LT14-004-C"
+          "skipped=$SKIPPED present=$PRESENT_SUM mealCharges=$MEAL_SUM" "LT14-004-C"
       else
         no "Bill-Skip OFF ⇒ system Skips add ₹0" \
           "$BAD member(s) billed with zero Present meals — a Skip carried a price" "LT14-004-C"
