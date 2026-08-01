@@ -1,11 +1,13 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import {
+  BadRequestException,
   ForbiddenException,
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { VacationsService } from '../vacations.service';
 import { VacationRequestsRepository } from '../repositories/vacation-requests.repository';
 import { AuditService } from '../../../audit/audit.service';
+import { NoticesService } from '../../notices/notices.service';
 
 /**
  * Pass 11 — vacation deep governance:
@@ -130,5 +132,122 @@ describe('VacationsService (Pass 11)', () => {
     await expect(
       service.cancel('intruder', 'student', 'org1', 'vr1', {} as any),
     ).rejects.toThrow(ForbiddenException);
+  });
+
+  // ── Live-Test-15 ISSUE-2B — ended vacation is immutable (USER-LOCKED) ──────
+
+  it('ISSUE-2B: an APPROVED vacation whose endDate has passed cannot be cancelled by the OWNER', async () => {
+    repo.findById.mockResolvedValue(
+      entity({
+        status: 'approved',
+        startDate: new Date('2000-01-01T00:00:00.000Z'),
+        endDate: new Date('2000-01-05T00:00:00.000Z'),
+      }),
+    );
+    await expect(
+      service.cancel('u1', 'student', 'org1', 'vr1', {} as any),
+    ).rejects.toThrow(BadRequestException);
+    expect(repo.updateStatus).not.toHaveBeenCalled();
+  });
+
+  it('ISSUE-2B: an ADMIN cannot cancel an ended vacation either — no role may', async () => {
+    repo.findById.mockResolvedValue(
+      entity({
+        status: 'approved',
+        startDate: new Date('2000-01-01T00:00:00.000Z'),
+        endDate: new Date('2000-01-05T00:00:00.000Z'),
+      }),
+    );
+    await expect(
+      service.cancel('admin1', 'hostelAdmin', 'org1', 'vr1', {} as any),
+    ).rejects.toThrow(BadRequestException);
+    expect(repo.updateStatus).not.toHaveBeenCalled();
+    expect(repo.setUserVacation).not.toHaveBeenCalled();
+  });
+
+  it('ISSUE-2B: a still-running approved vacation REMAINS cancellable', async () => {
+    repo.findById.mockResolvedValue(
+      entity({ status: 'approved', endDate: new Date('2099-01-01T00:00:00.000Z') }),
+    );
+    await service.cancel('u1', 'student', 'org1', 'vr1', {} as any);
+    expect(repo.updateStatus).toHaveBeenCalled();
+  });
+
+  it('ISSUE-2B: an expired PENDING request stays cancellable (never took effect; overlap counts pending)', async () => {
+    repo.findById.mockResolvedValue(
+      entity({
+        status: 'pending',
+        startDate: new Date('2000-01-01T00:00:00.000Z'),
+        endDate: new Date('2000-01-05T00:00:00.000Z'),
+      }),
+    );
+    await service.cancel('u1', 'student', 'org1', 'vr1', {} as any);
+    expect(repo.updateStatus).toHaveBeenCalled();
+  });
+});
+
+// ── Live-Test-15 ISSUE-2A — cancellation notifies the member ─────────────────
+
+describe('VacationsService — cancel notifications (ISSUE-2A)', () => {
+  let service: VacationsService;
+  let repo: any;
+  let notices: { createMemberAlert: jest.Mock; createRequestAlert: jest.Mock };
+
+  const approved = (over: Record<string, unknown> = {}) => ({
+    id: 'vr1',
+    organizationId: 'org1',
+    groupId: null,
+    userId: 'u1',
+    userName: 'Member',
+    startDate: new Date('2098-01-01T00:00:00.000Z'),
+    endDate: new Date('2099-01-01T00:00:00.000Z'),
+    startSlotKey: null,
+    endSlotKey: null,
+    reason: null,
+    status: 'approved',
+    reviewedBy: 'admin1',
+    reviewedAt: new Date(),
+    reviewNote: null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...over,
+  });
+
+  beforeEach(async () => {
+    repo = {
+      getOrgTimezone: jest.fn().mockResolvedValue('Asia/Kolkata'),
+      findById: jest.fn().mockResolvedValue(approved()),
+      updateStatus: jest.fn().mockImplementation(async () => approved({ status: 'cancelled' })),
+      setUserVacation: jest.fn().mockResolvedValue(undefined),
+      hasApprovedCovering: jest.fn().mockResolvedValue(false),
+      getUserPush: jest.fn().mockResolvedValue(null),
+    };
+    notices = {
+      createMemberAlert: jest.fn().mockResolvedValue(undefined),
+      createRequestAlert: jest.fn().mockResolvedValue(undefined),
+    };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        VacationsService,
+        { provide: VacationRequestsRepository, useValue: repo },
+        { provide: AuditService, useValue: { log: jest.fn() } },
+        { provide: NoticesService, useValue: notices },
+      ],
+    }).compile();
+    service = module.get(VacationsService);
+  });
+
+  it('an ADMIN cancelling a member vacation alerts the MEMBER (was silent)', async () => {
+    await service.cancel('admin1', 'hostelAdmin', 'org1', 'vr1', {} as any);
+    expect(notices.createMemberAlert).toHaveBeenCalledTimes(1);
+    const arg = notices.createMemberAlert.mock.calls[0][0];
+    expect(arg.targetUserId).toBe('u1');
+    expect(arg.title).toBe('Vacation cancelled');
+    expect(arg.linkType).toBe('myVacations');
+  });
+
+  it('a SELF-cancel does not alert the person who performed it', async () => {
+    await service.cancel('u1', 'student', 'org1', 'vr1', {} as any);
+    expect(notices.createMemberAlert).not.toHaveBeenCalled();
   });
 });

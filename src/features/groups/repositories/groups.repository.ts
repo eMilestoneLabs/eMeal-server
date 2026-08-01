@@ -389,6 +389,8 @@ export class GroupsRepository {
       vacationModeEnabled: boolean;
       vacationRequiresApproval: boolean;
       billingCycleStartDay: number | null;
+      // Consumes the group's ONE-TIME billing-cycle change (retention anchor).
+      billingCycleChangedAt: Date | null;
       mealPricingEnabled: boolean;
       billSkippedMeals: boolean;
       // Live-Test-7 ISSUE-4: independent Absent policy (null = legacy coupling).

@@ -1082,6 +1082,13 @@ export class BillingService {
       guestAttendanceEnabled?: boolean;
       billNoShowGuests?: boolean;
     },
+    /**
+     * Retention integrity only. `false` FORCES the live recomputation from raw
+     * attendance/guest/ledger rows, bypassing the snapshot shortcut, so the
+     * retention gate can prove the stored snapshot actually matches the raw
+     * data BEFORE that raw data is destroyed. Production paths never pass it.
+     */
+    preferSnapshot = true,
   ): Promise<{ byUser: Map<string, number>; carriedThrough: string | null }> {
     const lastFinal = await this.prisma.billingPeriod.findFirst({
       where: {
@@ -1091,10 +1098,36 @@ export class BillingService {
         periodEnd: { lt: fromDate },
       },
       orderBy: { periodEnd: 'desc' },
-      select: { periodEnd: true },
+      // Retention hardening: the immutable finalize-time snapshot rides the
+      // SAME query that already resolves the period — ZERO extra round trips.
+      select: { periodEnd: true, totalsSnapshot: true },
     });
     if (!lastFinal) return { byUser: new Map(), carriedThrough: null };
     const cutoff = lastFinal.periodEnd;
+
+    // ── SNAPSHOT-FIRST CARRY-FORWARD (retention safety, CREDIT-001) ─────────
+    // The previous period's `closingBalance` was captured IMMUTABLY at
+    // finalize time by buildTotalsSnapshot. Preferring it makes the next
+    // period's opening balance INDEPENDENT of the raw attendance/guest/ledger
+    // rows below — which the retention purge permanently deletes.
+    //
+    // Without this, every retention purge silently reset every member's
+    // carry-forward to zero (the aggregates below summed rows that no longer
+    // exist), erasing real unpaid balances. With it, "previous closing ==
+    // next opening" holds BY CONSTRUCTION rather than by luck.
+    //
+    // Falls back to the live recomputation whenever the snapshot is absent
+    // (periods finalized before snapshots existed), so behaviour for
+    // un-purged historical data is byte-identical to before.
+    const snapshotBalances = preferSnapshot
+      ? BillingService.openingFromSnapshot(lastFinal.totalsSnapshot)
+      : null;
+    if (snapshotBalances) {
+      return {
+        byUser: snapshotBalances,
+        carriedThrough: cutoff.toISOString().slice(0, 10),
+      };
+    }
 
     // Live-Test-7 ISSUE-4: shared resolver — Skip/Absent bill independently.
     // Live-Test-11 ISSUE-017: snapshot-aware billed-row filter keeps the
@@ -1221,6 +1254,31 @@ export class BillingService {
    * resulting closingBalance — so every carry-forward chain is auditable from
    * the locked snapshots alone. Legacy fields keep their exact meaning.
    */
+  /**
+   * Reads per-member closing balances out of an immutable finalize-time
+   * `totalsSnapshot`. Returns null when the snapshot is missing or malformed,
+   * so the caller falls back to the live recomputation.
+   *
+   * Pure + static: no queries, no state — safe to call from any path.
+   * Zero balances are dropped (they carry nothing), matching the live path.
+   */
+  static openingFromSnapshot(snapshot: unknown): Map<string, number> | null {
+    const members = (snapshot as { members?: unknown } | null)?.members;
+    if (!Array.isArray(members)) return null;
+    const byUser = new Map<string, number>();
+    for (const m of members) {
+      const userId = (m as { userId?: unknown })?.userId;
+      const closing = (m as { closingBalance?: unknown })?.closingBalance;
+      // A malformed row invalidates the whole snapshot — never carry a
+      // partial balance forward; fall back to the live computation instead.
+      if (typeof userId !== 'string' || typeof closing !== 'number') {
+        return null;
+      }
+      if (closing !== 0) byUser.set(userId, closing);
+    }
+    return byUser;
+  }
+
   private async buildTotalsSnapshot(
     organizationId: string,
     groupId: string,

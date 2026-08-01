@@ -247,7 +247,24 @@ model Group {
   billingCycleStartDay Int?
   // SRS Module 03 RET-012/013/015: next rolling retention review instant.
   // Null = not yet initialized (first sweep sets createdAt + 3 months).
+  // LEGACY — superseded by retentionPurgeThrough (billing-cycle-aligned
+  // retention). Kept so historical rows/queries are never invalidated.
   retentionReviewAt DateTime?
+
+  // ── Billing-cycle-aligned retention (3 COMPLETE cycles) ────────────────────
+  // FROZEN purge boundary: the last day of the 3rd complete billing cycle of
+  // the current retention window (UTC midnight, inclusive). Everything on or
+  // before it is eligible; the ACTIVE cycle is always excluded.
+  //
+  // It is stored (not derived from `now`) precisely so it CANNOT drift when a
+  // sweep runs late, retries, or crosses into the next cycle. After a
+  // successful purge it advances by exactly 3 cycles.
+  retentionPurgeThrough DateTime?
+
+  // One-time billing-cycle-start-day change (per group). Null = the admin may
+  // still change it once; set = the privilege is permanently consumed.
+  // Server-side truth — reinstalling the app or clearing cache cannot restore it.
+  billingCycleChangedAt DateTime?
   // Additive: when ON, meals carry a ₹ price; shown to students + used for billing/exports
   mealPricingEnabled   Boolean  @default(false)
   // SRS FR-TIME-005 (LOOP-090): per-group grace period (minutes) that extends

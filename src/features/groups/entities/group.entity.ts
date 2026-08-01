@@ -49,6 +49,9 @@ export class GroupEntity {
   vacationRequiresApproval: boolean;
   // Pass 12 (FR-BILLX-020): billing cycle start day (1–28; null = calendar month).
   billingCycleStartDay: number | null;
+  // Billing-cycle retention: when set, the group's ONE-TIME billing-cycle
+  // change has been consumed and the day can never be changed again.
+  billingCycleChangedAt?: Date | null;
   // Additive: ₹ pricing toggle
   mealPricingEnabled: boolean;
   // SRS Module 03 (survey Q17/Q22): Bill-Skip policy (default OFF).

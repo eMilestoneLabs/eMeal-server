@@ -564,7 +564,32 @@ export class GroupsService {
       // Pass 12 (FR-BILLX-020): billing cycle start day (null = calendar
       // month) — validated 1–28 by the DTO, audited below (LOOP-033/GAP-021).
       if (mc.billingCycleStartDay !== undefined) {
-        updateData.billingCycleStartDay = mc.billingCycleStartDay;
+        // ── ONE-TIME billing-cycle change (retention anchor) ────────────────
+        // The billing cycle is the retention anchor: every purge boundary is
+        // derived from it. Letting an admin move it repeatedly would keep
+        // reshaping which dates belong to which cycle, so the change is
+        // allowed exactly ONCE per group and the fact is persisted here —
+        // never in the client. Reinstalling the app, clearing cache or
+        // logging out cannot restore the privilege.
+        //
+        // A no-op write (same value) is NOT a change and never consumes it.
+        const currentDay = (existing as any).billingCycleStartDay ?? null;
+        const nextDay = mc.billingCycleStartDay ?? null;
+        if (nextDay !== currentDay) {
+          if ((existing as any).billingCycleChangedAt) {
+            throw new BadRequestException({
+              message:
+                'The billing cycle start day has already been changed and cannot be changed again',
+              code: 'BILLING_CYCLE_CHANGE_CONSUMED',
+              errors: {
+                billingCycleStartDay:
+                  'This group already used its one-time billing cycle change',
+              },
+            });
+          }
+          updateData.billingCycleStartDay = mc.billingCycleStartDay;
+          updateData.billingCycleChangedAt = new Date();
+        }
       }
       if (mc.mealPricingEnabled !== undefined) updateData.mealPricingEnabled = mc.mealPricingEnabled;
       // SRS Module 03 (survey Q17/Q22): "Bill Skip" policy — audited below.
@@ -1193,6 +1218,9 @@ export class GroupsService {
           status: nextStatus,
           removedAt: null as any,
           removedBy: null as any,
+          // BR-24: a rejoining member must not carry a stale block timestamp.
+          blockedAt: null as any,
+          blockedBy: null as any,
           reviewedBy: null as any,
           reviewedAt: null as any,
           reviewNote: null as any,
@@ -1648,6 +1676,13 @@ export class GroupsService {
       } else if (dto.status === 'removed') {
         updateData.removedAt = new Date();
         updateData.removedBy = actorId;
+        // BR-24: the retention clock reads the field matching the CURRENT
+        // status, so a leftover `blockedAt` from an earlier block must not
+        // linger on a now-REMOVED row (and must never reappear on an ACTIVE
+        // one after a later rejoin). Status is the gate; this keeps the
+        // timestamps honest about the current continuous period.
+        updateData.blockedAt = null;
+        updateData.blockedBy = null;
       } else if (dto.status === 'active') {
         // Unblock — clear block audit fields
         updateData.blockedAt = null;
@@ -1752,6 +1787,9 @@ export class GroupsService {
       status: 'removed',
       removedAt: new Date(),
       removedBy: actorId,
+      // BR-24: a removed row must not carry a stale block timestamp.
+      blockedAt: null as any,
+      blockedBy: null as any,
     });
 
     this.audit.log({
@@ -1815,6 +1853,9 @@ export class GroupsService {
       status: 'removed',
       removedAt: new Date(),
       removedBy: userId, // self
+      // BR-24: keep the retention clock honest about the CURRENT state.
+      blockedAt: null as any,
+      blockedBy: null as any,
     });
 
     if (grp?.organizationId) {
@@ -2004,6 +2045,11 @@ export class GroupsService {
       // Pass 11 (FR-VACX-001) + Pass 12 (FR-BILLX-020).
       vacationRequiresApproval: (group as any).vacationRequiresApproval ?? false,
       billingCycleStartDay: (group as any).billingCycleStartDay ?? null,
+      // Kept in lock-step with GroupSerializer.mealConfig: the same logical
+      // object must never expose different fields depending on which endpoint
+      // served it, or a client reading THIS one would render the cycle-day
+      // control as unlocked after the one-time change was already consumed.
+      billingCycleChangeUsed: !!(group as any).billingCycleChangedAt,
       mealPricingEnabled: group.mealPricingEnabled,
       // SRS Module 03 (survey Q17/Q22): Bill-Skip policy (default OFF).
       billSkippedMeals: (group as any).billSkippedMeals ?? false,

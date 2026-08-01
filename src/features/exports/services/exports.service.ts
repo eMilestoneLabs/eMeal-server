@@ -257,7 +257,13 @@ export class ExportsService {
 
     const [members, statusAgg, guestAgg, ledgerAgg] = await Promise.all([
       this.prisma.groupMember.findMany({
-        where: { groupId: dto.groupId, status: 'active' },
+        // Live-Test-15: widened from `status:'active'` so a member blocked or
+        // removed mid-period exports with their REAL name/email/phone instead
+        // of a raw cuid. Rides the query that already runs (ZERO extra round
+        // trips); WHO is exported is unchanged — `allIds` below still seeds
+        // from the ACTIVE subset only. Keeps the export byte-reconciled with
+        // /attendance/billing-summary, which applies the identical rule.
+        where: { groupId: dto.groupId, status: { not: 'pending' } },
         include: {
           user: { select: { name: true, email: true, phone: true } },
         },
@@ -374,8 +380,12 @@ export class ExportsService {
         },
       ]),
     );
+    // Live-Test-15: seeded from ACTIVE members only (meta now also carries
+    // blocked/removed members purely to resolve their names). A blocked or
+    // removed member therefore appears ONLY when they genuinely have history
+    // in this period — nothing new accrues after the block/remove.
     const allIds = new Set<string>([
-      ...meta.keys(),
+      ...members.filter((m) => m.status === 'active').map((m) => m.userId),
       ...byUser.keys(),
       ...opening.byUser.keys(),
     ]);

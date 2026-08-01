@@ -527,6 +527,72 @@ describe('GroupsService', () => {
     });
   });
 
+  // ── RET-006/007/008/053/054 — one-time billing-cycle change ───────────────
+
+  describe('billing-cycle start day: ONE-TIME change', () => {
+    it('RET-006/053: the FIRST change succeeds and consumes the privilege', async () => {
+      groupsRepo.findById.mockResolvedValue(
+        new GroupEntity({
+          ...mockGroup,
+          billingCycleStartDay: 1,
+          billingCycleChangedAt: null,
+        } as any),
+      );
+
+      groupsRepo.update.mockResolvedValue(new GroupEntity({ ...mockGroup } as any));
+
+      await service.updateGroup('grp_01', 'org_01', 'usr_admin', {
+        mealConfig: { billingCycleStartDay: 15 },
+      } as any);
+
+      const data = groupsRepo.update.mock.calls[0][2];
+      expect(data.billingCycleStartDay).toBe(15);
+      // Server-side truth — survives logout/reinstall/cache clear (RET-008).
+      expect(data.billingCycleChangedAt).toBeInstanceOf(Date);
+    });
+
+    it('RET-053: a SECOND change is rejected by the backend', async () => {
+      groupsRepo.findById.mockResolvedValue(
+        new GroupEntity({
+          ...mockGroup,
+          billingCycleStartDay: 15,
+          billingCycleChangedAt: new Date('2026-07-01T00:00:00.000Z'),
+        } as any),
+      );
+
+      await expect(
+        service.updateGroup('grp_01', 'org_01', 'usr_admin', {
+          mealConfig: { billingCycleStartDay: 10 },
+        } as any),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({
+          code: 'BILLING_CYCLE_CHANGE_CONSUMED',
+        }),
+      });
+      expect(groupsRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('RET-007/054: a NO-OP submit does not consume the privilege', async () => {
+      groupsRepo.findById.mockResolvedValue(
+        new GroupEntity({
+          ...mockGroup,
+          billingCycleStartDay: 1,
+          billingCycleChangedAt: null,
+        } as any),
+      );
+
+      groupsRepo.update.mockResolvedValue(new GroupEntity({ ...mockGroup } as any));
+
+      await service.updateGroup('grp_01', 'org_01', 'usr_admin', {
+        mealConfig: { billingCycleStartDay: 1 },
+      } as any);
+
+      const data = groupsRepo.update.mock.calls[0][2];
+      expect(data.billingCycleChangedAt).toBeUndefined();
+      expect(data.billingCycleStartDay).toBeUndefined();
+    });
+  });
+
   describe('deleteGroup (soft)', () => {
     it('soft-deletes group without destroying member records', async () => {
       groupsRepo.findById.mockResolvedValue(mockGroup);

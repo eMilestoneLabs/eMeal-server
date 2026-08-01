@@ -781,6 +781,10 @@ export class AttendanceRepository {
       phone: string | null;
       // Live-Test-11 ISSUE-003 (additive): avatar for billing member rows.
       avatarUrl: string | null;
+      // Live-Test-15: membership status, so the caller can distinguish WHO
+      // seeds the bill (active) from WHO merely needs a name resolved
+      // (blocked/removed members with history earlier in the period).
+      status: string;
     }>;
     records: Array<{
       userId: string;
@@ -797,7 +801,17 @@ export class AttendanceRepository {
   }> {
     const [members, records] = await Promise.all([
       this.prisma.groupMember.findMany({
-        where: { groupId, status: 'active' },
+        // Live-Test-15: widened from `status:'active'` so a member BLOCKED or
+        // REMOVED mid-period still resolves to a REAL NAME on the bill their
+        // past attendance already earned (they used to render as a raw cuid
+        // with null email/phone/avatar).
+        //
+        // PERF: this rides the query that ALREADY runs — ZERO extra round
+        // trips. It does NOT change WHO is billed: the caller still seeds the
+        // member list from the ACTIVE subset only, so a blocked/removed member
+        // with no activity in the period stays absent from the bill.
+        // 'pending' stays excluded — a join request can never have attendance.
+        where: { groupId, status: { not: 'pending' } },
         include: {
           user: {
             select: {
@@ -839,6 +853,7 @@ export class AttendanceRepository {
         email: m.user?.email ?? null,
         phone: m.user?.phone ?? null,
         avatarUrl: (m.user as any)?.avatarUrl ?? null,
+        status: m.status as string,
       })),
       records: records.map((r) => ({
         userId: r.userId,

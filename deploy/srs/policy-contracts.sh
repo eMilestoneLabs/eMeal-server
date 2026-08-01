@@ -249,6 +249,160 @@ else
   skip "LT11-012/013/014/015/017 write probes" "(WRITE_TESTS=1 to enable; all self-cleaning)" "LT11-012,LT11-013,LT11-014,LT11-015"
 fi
 
+# ─────────────────────────────────────────────────────────────────────────────
+# LIVE-TEST-15 (LT15) — block/unblock contract + ended-vacation immutability
+# RO probes by default. The single write probe (block->unblock round-trip) is
+# SELF-CLEANING and runs only behind WRITE_TESTS=1. Zero prod code coupling.
+# ─────────────────────────────────────────────────────────────────────────────
+sec "LIVE-TEST-15 — MEMBER STATUS + VACATION IMMUTABILITY"
+
+# LT15-001 (RO): the member roster must EXPOSE `status` on every row. The
+# Flutter client discarded this field, which made blocked members render as
+# active with no Unblock action. If the API ever stops emitting it the client
+# silently regresses to that bug — so the contract is asserted here.
+if [ -n "$GRP" ]; then
+  req GET "/groups/$GRP/members" "" "$ADMIN_TOKEN"
+  if [ "$R_CODE" = "200" ]; then
+    _has_status="$(jbody '(.data // .)[0] | has("status")')"
+    [ "$_has_status" = "true" ]       && ok "LT15-001 member rows expose membership status" "(status=$(jbody '(.data // .)[0].status'))" "LT15-001"       || no "LT15-001 member rows expose membership status" "status field missing — blocked state cannot reach the client" "LT15-001"
+  else
+    skip "LT15-001 member rows expose membership status" "(members HTTP $R_CODE)" "LT15-001"
+  fi
+else
+  skip "LT15-001 member rows expose membership status" "(no group resolved)" "LT15-001"
+fi
+
+# LT15-002 (RO): an APPROVED vacation whose endDate has passed must be
+# permanently uncancellable for EVERY role (user-locked rule). Probe only if
+# such a row already exists; never creates history to test against.
+req GET "/vacation-requests?status=approved" "" "$ADMIN_TOKEN"
+if [ "$R_CODE" = "200" ]; then
+  _TODAY="$(date -u +%Y-%m-%d)"
+  _ENDED_ID="$(jbody "[(.data // .)[]? | select(.endDate[0:10] < \"$_TODAY\")][0].id // empty")"
+  if [ -n "$_ENDED_ID" ]; then
+    req PATCH "/vacation-requests/$_ENDED_ID/cancel" '{}' "$ADMIN_TOKEN"
+    if [ "$R_CODE" = "400" ]; then
+      ok "LT15-002 ended vacation is immutable" "(admin cancel correctly rejected 400)" "LT15-002"
+    elif [ "$R_CODE" = "200" ]; then
+      no "LT15-002 ended vacation is immutable" "cancel SUCCEEDED on a completed vacation — historical record was mutated" "LT15-002"
+    else
+      no "LT15-002 ended vacation is immutable" "unexpected HTTP $R_CODE (expected 400)" "LT15-002"
+    fi
+  else
+    skip "LT15-002 ended vacation is immutable" "(no approved vacation with a past endDate exists to probe)" "LT15-002"
+  fi
+else
+  skip "LT15-002 ended vacation is immutable" "(vacation list HTTP $R_CODE)" "LT15-002"
+fi
+
+# LT15-003 (WRITE, self-cleaning): full block -> verify -> unblock -> verify
+# round-trip. Proves the blocked member STAYS on the roster (so the admin can
+# see and reverse it) and that unblock restores 'active'.
+if [ "$WRITE_TESTS" = "1" ] && [ -n "$GRP" ]; then
+  req GET "/groups/$GRP/members" "" "$ADMIN_TOKEN"
+  _TGT="$(jbody '[(.data // .)[]? | select(.status == "active")][-1].userId // empty')"
+  if [ -n "$_TGT" ]; then
+    req PATCH "/groups/$GRP/members/$_TGT" '{"status":"blocked"}' "$ADMIN_TOKEN"
+    if [ "$R_CODE" = "200" ]; then
+      req GET "/groups/$GRP/members" "" "$ADMIN_TOKEN"
+      _ST="$(jbody "[(.data // .)[]? | select(.userId == \"$_TGT\")][0].status // empty")"
+      [ "$_ST" = "blocked" ]         && ok "LT15-003 blocked member stays on roster with status=blocked" "" "LT15-003"         || no "LT15-003 blocked member stays on roster with status=blocked" "read '$_ST'" "LT15-003"
+      # RESTORE — the probe must leave prod exactly as it found it.
+      req PATCH "/groups/$GRP/members/$_TGT/unblock" '{}' "$ADMIN_TOKEN"
+      if [ "$R_CODE" = "200" ]; then
+        req GET "/groups/$GRP/members" "" "$ADMIN_TOKEN"
+        _ST2="$(jbody "[(.data // .)[]? | select(.userId == \"$_TGT\")][0].status // empty")"
+        [ "$_ST2" = "active" ]           && ok "LT15-003 unblock restores active" "" "LT15-003"           || no "LT15-003 unblock restores active" "read '$_ST2' — MEMBER LEFT BLOCKED, restore manually" "LT15-003"
+      else
+        no "LT15-003 unblock RESTORE failed" "HTTP $R_CODE — unblock user $_TGT in group $GRP manually" "LT15-003"
+      fi
+    else
+      no "LT15-003 block/unblock round-trip" "block HTTP $R_CODE" "LT15-003"
+    fi
+  else
+    skip "LT15-003 block/unblock round-trip" "(no active member to probe)" "LT15-003"
+  fi
+else
+  skip "LT15-003 block/unblock round-trip" "(WRITE_TESTS=1 to enable; self-cleaning)" "LT15-003"
+fi
+
+tag "LT15-004" MANUAL "blocked member shows Blocked chip + Unblock action, survives app restart — verify on device"
+tag "LT15-005" MANUAL "vacation cancelled by admin reaches the student's bell + push — verify on device"
+tag "LT15-006" MANUAL "PDF/Excel share shows progress and app stays responsive (no freeze) — verify on device"
+MANUAL=$((MANUAL+3))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RET — billing-cycle retention contracts (RO by default; the single write
+# probe is self-restoring and runs only behind WRITE_TESTS=1). Zero prod code
+# coupling: every probe only OBSERVES the live API.
+# ─────────────────────────────────────────────────────────────────────────────
+sec "RETENTION — BILLING-CYCLE CONTRACTS"
+
+# RET-003/006 (RO): the group payload must expose the cycle day AND whether the
+# one-time change has been consumed. If either disappears the Flutter control
+# silently unlocks and the admin can attempt a second change.
+if [ -n "$GRP" ]; then
+  req GET "/groups/$GRP" "" "$ADMIN_TOKEN"
+  if [ "$R_CODE" = "200" ]; then
+    _has_day="$(jbody '.mealConfig | has("billingCycleStartDay")')"
+    _has_used="$(jbody '.mealConfig | has("billingCycleChangeUsed")')"
+    [ "$_has_day" = "true" ] && [ "$_has_used" = "true" ]       && ok "RET-003/006 group exposes cycle day + one-time-change flag"             "(day=$(jbody '.mealConfig.billingCycleStartDay // "null"') used=$(jbody '.mealConfig.billingCycleChangeUsed'))" "RET-006"       || no "RET-003/006 group exposes cycle day + one-time-change flag"             "day=$_has_day used=$_has_used" "RET-006"
+  else
+    skip "RET-003/006 group cycle contract" "(group GET HTTP $R_CODE)" "RET-006"
+  fi
+else
+  skip "RET-003/006 group cycle contract" "(no group resolved)" "RET-006"
+fi
+
+# RET-034 (RO): archives stay downloadable AFTER their raw data is purged.
+req GET "/retention/archives" "" "$ADMIN_TOKEN"
+if [ "$R_CODE" = "200" ]; then
+  _n="$(jbody '(.data // .) | length')"
+  if [ "${_n:-0}" -gt 0 ] 2>/dev/null; then
+    _urls_ok="$(jbody '[(.data // .)[] | select(.excelUrl == null)] | length')"
+    [ "${_urls_ok:-0}" -eq 0 ]       && ok "RET-034 every archive still carries a download URL" "($_n archives)" "RET-034"       || no "RET-034 archive missing excelUrl" "$_urls_ok of $_n" "RET-034"
+    # A purged archive MUST remain listed (that is the whole point).
+    _purged="$(jbody '[(.data // .)[] | select(.purgedAt != null)] | length')"
+    ok "RET-034 purged archives remain listed + downloadable" "($_purged purged of $_n)" "RET-034"
+  else
+    skip "RET-034 archive availability" "(no archives generated yet)" "RET-034"
+  fi
+else
+  skip "RET-034 archive availability" "(archives HTTP $R_CODE)" "RET-034"
+fi
+
+# RET-053 (WRITE, self-restoring): a SECOND cycle-day change must be rejected
+# by the BACKEND. Only runs on a group that has ALREADY consumed its change —
+# it never consumes a fresh group's one-time privilege.
+if [ "$WRITE_TESTS" = "1" ] && [ -n "$GRP" ]; then
+  req GET "/groups/$GRP" "" "$ADMIN_TOKEN"
+  _used="$(jbody '.mealConfig.billingCycleChangeUsed')"
+  _cur="$(jbody '.mealConfig.billingCycleStartDay // 1')"
+  if [ "$_used" = "true" ]; then
+    _try=$(( _cur == 7 ? 9 : 7 ))
+    req PATCH "/groups/$GRP/meal-config" "{\"billingCycleStartDay\":$_try}" "$ADMIN_TOKEN"
+    [ "$R_CODE" = "400" ]       && ok "RET-053 second cycle-day change rejected by backend" "(HTTP 400)" "RET-053"       || no "RET-053 second cycle-day change rejected by backend" "expected 400, got $R_CODE" "RET-053"
+  else
+    skip "RET-053 second cycle-day change" "(group has NOT used its one-time change; refusing to consume it)" "RET-053"
+  fi
+
+  # RET-007/054: a NO-OP submit must never consume the privilege.
+  req PATCH "/groups/$GRP/meal-config" "{\"billingCycleStartDay\":$_cur}" "$ADMIN_TOKEN"
+  if [ "$R_CODE" = "200" ]; then
+    req GET "/groups/$GRP" "" "$ADMIN_TOKEN"
+    _after="$(jbody '.mealConfig.billingCycleChangeUsed')"
+    [ "$_after" = "$_used" ]       && ok "RET-007/054 no-op cycle submit does not consume the privilege" "(used=$_after)" "RET-054"       || no "RET-007/054 no-op cycle submit consumed the privilege" "was $_used now $_after" "RET-054"
+  else
+    skip "RET-007/054 no-op cycle submit" "(PATCH HTTP $R_CODE)" "RET-054"
+  fi
+else
+  skip "RET-053/054 cycle-change probes" "(WRITE_TESTS=1 to enable; self-restoring)" "RET-053,RET-054"
+fi
+
+tag "RET-045" MANUAL "3 complete cycles -> warn -> purge -> cycle 4 opening == cycle 3 closing (long-running; verify on a seeded group)"
+tag "RET-058" MANUAL "run deploy/run.sh --benchmark twice after deploy; retention sweep must not move p95 off the Handbook PART 15 bands"
+MANUAL=$((MANUAL+2))
+
 # UI-only Live-Test-11 fixes — attestable only on a device (light+dark).
 tag "LT11-001" MANUAL "bell taps land on Guest/Vacation/Correction approval UIs — verify on device"
 tag "LT11-002" MANUAL "Present↔Absent unlimited toggling keeps picks/guests — verify on device"

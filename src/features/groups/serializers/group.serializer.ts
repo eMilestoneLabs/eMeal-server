@@ -123,6 +123,10 @@ export class GroupSerializer {
         // Pass 11 (FR-VACX-001) + Pass 12 (FR-BILLX-020) — additive.
         vacationRequiresApproval: group.vacationRequiresApproval ?? false,
         billingCycleStartDay: group.billingCycleStartDay ?? null,
+        // Additive: lets the client show the cycle-day control as permanently
+        // locked once the one-time change has been used. Backend stays the
+        // authority — this flag is display only.
+        billingCycleChangeUsed: !!group.billingCycleChangedAt,
         mealPricingEnabled: group.mealPricingEnabled,
         // SRS Module 03 (survey Q17/Q22): Bill-Skip policy (default OFF).
         billSkippedMeals: group.billSkippedMeals ?? false,

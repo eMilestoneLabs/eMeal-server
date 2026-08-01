@@ -419,6 +419,40 @@ export class VacationsService {
       });
     }
     const wasApproved = existing.status === 'approved';
+
+    // ── Live-Test-15 ISSUE-2B (USER-LOCKED RULE) ─────────────────────────────
+    // An APPROVED vacation whose end date has passed is HISTORICAL and
+    // FINALIZED: no role — student, admin, manager or any future role — may
+    // cancel it, on any client or API path. Preserved for attendance, billing,
+    // reporting and audit integrity (cancelling would retroactively rewrite the
+    // member's live-computed excused-day count in getUserSummary).
+    //
+    // Scope is deliberately APPROVED-only: a PENDING request never took effect,
+    // has zero attendance/billing footprint, and findOverlapping counts pending
+    // rows — trapping an expired pending request would permanently block any
+    // overlapping future request with nothing to protect.
+    //
+    // Guard order is 404 -> 403 (ownership) -> 400 (already closed) -> 400
+    // (ended): the isolation precedence above must not be weakened.
+    //
+    // PERF: org-today is resolved at most ONCE per cancel and reused by the
+    // flag-resync below — this adds ZERO queries versus the previous code,
+    // which already fetched it on exactly this branch.
+    let todayUtc: Date | null = null;
+    if (wasApproved) {
+      todayUtc = await this.orgToday(organizationId);
+      if (existing.endDate.getTime() < todayUtc.getTime()) {
+        throw new BadRequestException({
+          message: 'This vacation has already ended and can no longer be cancelled',
+          errors: {
+            endDate: `Ended on ${existing.endDate
+              .toISOString()
+              .slice(0, 10)} — completed vacations are permanent records`,
+          },
+        });
+      }
+    }
+
     const updated = await this.repo.updateStatus(id, organizationId, {
       status: 'cancelled',
       reviewedBy: admin ? userId : existing.reviewedBy,
@@ -428,11 +462,12 @@ export class VacationsService {
     // If an approved vacation is cancelled, resync the flag: OFF unless some
     // OTHER approved request still covers today in org time (FR-VACX-006).
     if (wasApproved) {
-      const todayUtc = await this.orgToday(organizationId);
+      // Reuses the date already resolved by the ended-vacation guard above —
+      // one org-timezone read per cancel, exactly as before this change.
       const stillCovered = await this.repo.hasApprovedCovering(
         existing.userId,
         organizationId,
-        todayUtc,
+        todayUtc!,
         id,
       );
       if (!stillCovered) {
@@ -461,9 +496,31 @@ export class VacationsService {
       targetId: id,
       targetType: 'VacationRequest',
       action: 'update',
-      metadata: { status: 'cancelled' },
+      metadata: { status: 'cancelled', wasApproved, byAdmin: admin },
       requestId,
     });
+
+    // ── Live-Test-15 ISSUE-2A ────────────────────────────────────────────────
+    // Cancellation was the ONLY lifecycle transition with no member alert
+    // (create -> admins, approve -> member, reject -> member, cancel -> nobody),
+    // so a member whose approved vacation an admin cancelled was never told —
+    // their meals silently resumed. Notify the OWNER whenever someone else
+    // cancelled; a self-cancel needs no alert to the person who performed it.
+    // Fire-and-forget via the existing helper — never blocks or fails the write.
+    if (existing.userId !== userId) {
+      this.notifyMember(
+        organizationId,
+        existing.userId,
+        'Vacation cancelled',
+        wasApproved
+          ? `Your approved vacation (${existing.startDate
+              .toISOString()
+              .slice(0, 10)} – ${existing.endDate
+              .toISOString()
+              .slice(0, 10)}) was cancelled by your admin. Your meals resume as normal.`
+          : 'Your pending vacation request was cancelled by your admin.',
+      );
+    }
 
     return VacationRequestSerializer.toResponse(updated);
   }

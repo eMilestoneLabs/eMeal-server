@@ -1902,9 +1902,21 @@ export class AttendanceService {
     let openingBalanceTotal = 0;
     for (const v of openingByUser.values()) openingBalanceTotal += v;
 
+    // Live-Test-15: metadata for EVERY non-pending member (active, blocked and
+    // removed) so a member blocked/removed mid-period still shows their real
+    // name, email, phone and avatar on the bill their earlier attendance
+    // earned — instead of a raw cuid with null contact fields.
     const memberMeta = new Map(members.map((m) => [m.userId, m]));
+    // WHO IS BILLED is unchanged and deliberately narrower than the metadata:
+    // only ACTIVE members seed the list. A blocked/removed member appears ONLY
+    // via the union below — i.e. only if they actually have attendance, guest
+    // charges, adjustments or an opening balance in this period. From the
+    // moment they are blocked/removed nothing new accrues (marking is 403'd
+    // and every sweep filters status:'active'), so their bill stops growing
+    // and they drop off entirely once the period no longer contains their
+    // history.
     const allUserIds = new Set<string>([
-      ...members.map((m) => m.userId),
+      ...members.filter((m) => m.status === 'active').map((m) => m.userId),
       ...byUser.keys(),
       ...guestByHost.keys(),
       ...adjustmentsByUser.keys(),
