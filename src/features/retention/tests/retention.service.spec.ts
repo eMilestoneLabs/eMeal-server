@@ -264,6 +264,7 @@ describe('RetentionService (billing-cycle retention)', () => {
   // ── 7-day ADVANCE warning, inside the final cycle ─────────────────────────
 
   it('warns during the final 7 days BEFORE the boundary and deletes nothing', async () => {
+    prisma.attendanceRecord.count.mockResolvedValue(12); // data IS at risk
     prisma.group.findMany.mockResolvedValue([
       group({ retentionPurgeThrough: new Date(Date.now() + 3 * DAY) }),
     ]);
@@ -274,6 +275,7 @@ describe('RetentionService (billing-cycle retention)', () => {
   });
 
   it('warning is deduped to once per day', async () => {
+    prisma.attendanceRecord.count.mockResolvedValue(12);
     redis.setDedup.mockResolvedValue(false);
     prisma.group.findMany.mockResolvedValue([
       group({ retentionPurgeThrough: new Date(Date.now() + 2 * DAY) }),
@@ -283,6 +285,17 @@ describe('RetentionService (billing-cycle retention)', () => {
   });
 
   // ── Destructive phase ─────────────────────────────────────────────────────
+
+  it('EMPTY group: no data at risk → NO false-alarm warning is sent', async () => {
+    prisma.attendanceRecord.count.mockResolvedValue(0); // nothing to lose
+    prisma.group.findMany.mockResolvedValue([
+      group({ retentionPurgeThrough: new Date(Date.now() + 3 * DAY) }),
+    ]);
+    await service.sweep();
+    expect(notices.createRequestAlert).not.toHaveBeenCalled();
+    expect(queue.enqueueBatchPush).not.toHaveBeenCalled();
+    expect(prisma.attendanceRecord.deleteMany).not.toHaveBeenCalled();
+  });
 
   it('boundary passed, nothing eligible → boundary advances 3 cycles, nothing deleted', async () => {
     prisma.attendanceRecord.count.mockResolvedValue(0);
@@ -706,6 +719,7 @@ describe('RetentionService (billing-cycle retention)', () => {
 
     // STEP 2 — inside cycle 3, within the final 7 days: WARN, delete nothing.
     jest.clearAllMocks();
+    prisma.attendanceRecord.count.mockResolvedValue(30); // real data at risk
     prisma.group.findMany.mockResolvedValue([
       group({ retentionPurgeThrough: new Date(Date.now() + 3 * DAY) }),
     ]);

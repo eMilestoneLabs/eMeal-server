@@ -207,6 +207,21 @@ export class RetentionService {
     if (todayUtc < warnStart) return; // not due, and not yet worth warning
     if (todayUtc <= purgeThrough) {
       // Still inside the final cycle — warn once per day and touch nothing.
+      //
+      // ...but only if there is actually something to lose. An empty or
+      // brand-new group has no rows at/before the boundary, so warning that
+      // "historical data is about to be permanently deleted" would be a plain
+      // false alarm — and with several such groups the admin's bell fills with
+      // notices about nothing. Cheap indexed count, and only ever inside the
+      // short warning window.
+      const atRisk = await this.prisma.attendanceRecord.count({
+        where: {
+          groupId: g.id,
+          organizationId: g.organizationId,
+          attendanceDate: { lte: purgeThrough },
+        },
+      });
+      if (atRisk === 0) return;
       await this.sendDailyReminder(g, todayStr, fmt(purgeThrough), purgeThrough);
       return;
     }
