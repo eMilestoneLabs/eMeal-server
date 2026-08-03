@@ -27,7 +27,7 @@ export interface SchedulePublishJobData {
  * SCHEDULE_PUBLISH anywhere in src/, so this processor never runs. It writes
  * `isPublished`/`publishedAt` straight through Prisma, which means it would
  * SKIP two invariants the HTTP publish path enforces:
- *   1. ISSUE-2 — the attendance-window validation (no overlap, minimum gap);
+ *   1. ISSUE-2 — the attendance-window validation (mandatory + same-day);
  *   2. ISSUE-1 — stamping `groups.firstSchedulePublishedAt`, the event that
  *      permanently locks the group's Meal-Pricing mode.
  * Left untouched deliberately: there is no live defect, and rewriting working

@@ -11,11 +11,11 @@
 #     • LT16-004 a same-value echo on a LOCKED group is NOT rejected (the whole
 #                mealConfig is re-sent by the app on every unrelated toggle)
 #
-#   ISSUE-2 (attendance windows: mandatory, same-day, no overlap, >= 1h gap)
+#   ISSUE-2 (attendance windows: mandatory + same-day only)
 #     • LT16-010 every ACTIVE meal of every group carries a window
-#     • LT16-011 no two windows of a group overlap
-#     • LT16-012 consecutive windows keep the configured minimum gap
 #     • LT16-013 no window crosses midnight (close > open)
+#       (overlap / minimum-gap checks were WITHDRAWN 2026-08-03 — any number
+#        of CONCURRENT windows is now allowed by design)
 #       (the implicit `__general__` slot is EXEMPT — it is a system row)
 #
 # PROD-SAFE: 100% READ-ONLY. It performs GETs plus, behind WRITE_TESTS=1, ONE
@@ -35,8 +35,6 @@ if [ -z "$ADMIN_TOKEN" ]; then
   [ "${SRS_SOURCED:-0}" = "1" ] && return 0 2>/dev/null || exit 1
 fi
 
-# Minimum gap in minutes — mirrors MEALS_WINDOW_MIN_GAP_MINUTES (default 60).
-GAP_MIN="${MEALS_WINDOW_MIN_GAP_MINUTES:-60}"
 GENERAL_SLOT='__general__'
 
 echo
@@ -111,7 +109,7 @@ fi
 echo
 echo "── Live-Test-16 · ISSUE-2 — attendance-window invariant ─────────────────"
 
-WIN_MISSING=0; WIN_OVERNIGHT=0; WIN_OVERLAP=0; WIN_GAP=0; WIN_GROUPS=0
+WIN_MISSING=0; WIN_OVERNIGHT=0; WIN_GROUPS=0
 WIN_DETAIL=""
 for g in $GIDS; do
   req GET "/meals?groupId=$g" "" "$ADMIN_TOKEN"
@@ -136,34 +134,13 @@ for g in $GIDS; do
     [ "$cm" -le "$om" ] && { WIN_OVERNIGHT=$((WIN_OVERNIGHT+1)); WIN_DETAIL="$WIN_DETAIL [$g/$n:$o-$c]"; }
   done <<< "$ROWS"
 
-  # LT16-011/012 — pairwise overlap + gap, comparing against the running latest
-  # close so a fully-contained window is caught too.
-  PREV_C=-100000; PREV_N=""
-  while IFS='|' read -r o c n; do
-    { [ -z "$o" ] || [ -z "$c" ]; } && continue
-    om=$(( 10#${o%%:*} * 60 + 10#${o##*:} ))
-    cm=$(( 10#${c%%:*} * 60 + 10#${c##*:} ))
-    [ "$cm" -le "$om" ] && continue   # already counted as overnight
-    if [ -n "$PREV_N" ]; then
-      if [ "$om" -lt "$PREV_C" ]; then
-        WIN_OVERLAP=$((WIN_OVERLAP+1)); WIN_DETAIL="$WIN_DETAIL [$g:$PREV_N~$n overlap]"
-      elif [ $(( om - PREV_C )) -lt "$GAP_MIN" ]; then
-        WIN_GAP=$((WIN_GAP+1)); WIN_DETAIL="$WIN_DETAIL [$g:$PREV_N~$n gap=$(( om - PREV_C ))m]"
-      fi
-    fi
-    [ "$cm" -gt "$PREV_C" ] && { PREV_C=$cm; PREV_N="$n"; }
-  done <<< "$(printf '%s\n' "$ROWS" | sort -t'|' -k1,1)"
 done
 
 if [ "$WIN_GROUPS" -eq 0 ]; then
-  skip "LT16-010..013 attendance-window invariant" "(no meals configured)" "LT16-010,LT16-011,LT16-012,LT16-013"
+  skip "LT16-010/013 attendance-window rules" "(no meals configured)" "LT16-010,LT16-013"
 else
   [ "$WIN_MISSING"   -eq 0 ] && ok "LT16-010 every active meal has a window"      "($WIN_GROUPS groups)" "LT16-010" \
                              || no "LT16-010 every active meal has a window"      "$WIN_MISSING missing:$WIN_DETAIL" "LT16-010"
-  [ "$WIN_OVERLAP"   -eq 0 ] && ok "LT16-011 no overlapping windows"              "" "LT16-011" \
-                             || no "LT16-011 no overlapping windows"              "$WIN_OVERLAP:$WIN_DETAIL" "LT16-011"
-  [ "$WIN_GAP"       -eq 0 ] && ok "LT16-012 windows keep the ${GAP_MIN}m gap"    "" "LT16-012" \
-                             || no "LT16-012 windows keep the ${GAP_MIN}m gap"    "$WIN_GAP:$WIN_DETAIL" "LT16-012"
   [ "$WIN_OVERNIGHT" -eq 0 ] && ok "LT16-013 no window crosses midnight"          "" "LT16-013" \
                              || no "LT16-013 no window crosses midnight"          "$WIN_OVERNIGHT:$WIN_DETAIL" "LT16-013"
 fi
@@ -174,6 +151,7 @@ tag "LT16-021" MANUAL "publish stays disabled until all 3 acknowledgements are t
 tag "LT16-022" MANUAL "'Review / Change Configuration' returns to Meal Config and publishes NOTHING — verify on device"
 tag "LT16-023" MANUAL "a FAILED publish keeps the sheet open and does NOT lock pricing — verify on device"
 tag "LT16-024" MANUAL "locked group shows 'Meal Pricing — Enabled/Disabled 🔒' read-only — verify on device"
-MANUAL=$((MANUAL+5))
+tag "LT16-025" MANUAL "dismiss the sheet (swipe/back) WHILE publishing: if the server still succeeded the success snackbar must appear and Meal Config must paint 🔒 — verify on device"
+MANUAL=$((MANUAL+6))
 
 [ "${SRS_SOURCED:-0}" = "1" ] || summary "LIVE-TEST-16 FIRST-PUBLISH & WINDOWS"

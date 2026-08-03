@@ -96,10 +96,6 @@ describe('MealsService', () => {
             // create/update tests on the happy path.
             countActiveInGroup: jest.fn().mockResolvedValue(0),
             existsByNameInGroup: jest.fn().mockResolvedValue(false),
-            // Live-Test-16 ISSUE-2: sibling attendance windows for the
-            // no-overlap / minimum-gap invariant. Empty = no siblings, so the
-            // pre-existing tests keep exercising their original paths.
-            findActiveWindowsInGroup: jest.fn().mockResolvedValue([]),
           },
         },
         {
@@ -469,6 +465,65 @@ describe('MealsService', () => {
         'org_01',
         expect.objectContaining({ isActive: true }),
       );
+    });
+
+    // Live-Test-16 ISSUE-2 (Q2): re-enabling makes the STORED window live
+    // again, so it must still satisfy the mandate even when the patch never
+    // mentions the window. Only reachable for rows predating the mandate —
+    // without this guard such a meal could be switched back on and bypass it.
+    it('NEGATIVE: re-enabling a meal with NO stored window is rejected', async () => {
+      mealsRepo.findById.mockResolvedValue({
+        ...disabledMeal,
+        attendanceWindowOpen: null,
+        attendanceWindowClose: null,
+      });
+      groupsRepo.findById.mockResolvedValue(mockGroup);
+      mealsRepo.countActiveInGroup.mockResolvedValue(1);
+      mealsRepo.existsByNameInGroup.mockResolvedValue(false);
+
+      await expect(
+        service.updateMeal('meal_01', 'org_01', 'usr_admin', {
+          isEnabled: true,
+        }),
+      ).rejects.toThrow(/needs an attendance window/i);
+      expect(mealsRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('NEGATIVE: re-enabling a meal with an OVERNIGHT stored window is rejected', async () => {
+      mealsRepo.findById.mockResolvedValue({
+        ...disabledMeal,
+        attendanceWindowOpen: '23:00',
+        attendanceWindowClose: '01:00',
+      });
+      groupsRepo.findById.mockResolvedValue(mockGroup);
+      mealsRepo.countActiveInGroup.mockResolvedValue(1);
+      mealsRepo.existsByNameInGroup.mockResolvedValue(false);
+
+      await expect(
+        service.updateMeal('meal_01', 'org_01', 'usr_admin', {
+          isEnabled: true,
+        }),
+      ).rejects.toThrow(/same day/i);
+      expect(mealsRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('CORNER: a NON-enabling patch never re-validates the stored window', async () => {
+      // A window-less legacy meal must stay editable (rename, price, image) —
+      // the guard fires on RE-ENABLE only, never on an unrelated edit.
+      mealsRepo.findById.mockResolvedValue({
+        ...disabledMeal,
+        attendanceWindowOpen: null,
+        attendanceWindowClose: null,
+      });
+      groupsRepo.findById.mockResolvedValue(mockGroup);
+      mealsRepo.update.mockResolvedValue({ ...mockMeal, name: 'Renamed' });
+      mealsRepo.existsByNameInGroup.mockResolvedValue(false);
+
+      await service.updateMeal('meal_01', 'org_01', 'usr_admin', {
+        name: 'Renamed',
+      });
+
+      expect(mealsRepo.update).toHaveBeenCalled();
     });
 
     it('CORNER: enable/disable flips the GROUP planners to draft (snapshot intact)', async () => {

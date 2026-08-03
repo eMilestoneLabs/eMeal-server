@@ -12,7 +12,6 @@ import {
 import { GroupsRepository } from './repositories/groups.repository';
 import { MembersRepository } from './repositories/members.repository';
 import { GroupSerializer } from './serializers/group.serializer';
-import { resolveWindowMinGapMinutes } from '../../config/meals.config';
 import { GroupMemberSerializer } from './serializers/group-member.serializer';
 import { GroupEntity } from './entities/group.entity';
 import { AuditService } from '../../audit/audit.service';
@@ -2094,9 +2093,6 @@ export class GroupsService {
       // endpoint must not render the pricing toggle as editable after the
       // first publish already froze it.
       mealPricingLocked: !!(group as any).firstSchedulePublishedAt,
-      // Live-Test-16 F2: kept in lock-step with GroupSerializer.mealConfig —
-      // the same resolver, so the two endpoints can never disagree.
-      windowMinGapMinutes: resolveWindowMinGapMinutes(),
       // SRS Module 03 (survey Q17/Q22): Bill-Skip policy (default OFF).
       billSkippedMeals: (group as any).billSkippedMeals ?? false,
       // Live-Test-11 ISSUE-017 (survey-locked): independent Bill-Absent

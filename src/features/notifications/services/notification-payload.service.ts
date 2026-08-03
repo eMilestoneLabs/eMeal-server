@@ -54,6 +54,22 @@ export class NotificationPayloadService {
         type: 'attendance_reminder',
         mealSlot: params.mealSlotKey,
         minutesRemaining: String(params.minutesRemaining),
+        // Live-Test-16 ISSUE-2: PER-MEAL collapse identity.
+        // `NotificationSendService.collapseTag` prefers an explicit
+        // `dedupeId ?? tag`, else falls back to
+        // `type : (noticeId ?? date ?? groupId ?? route)` + the title. This
+        // payload carries none of those and its title is a CONSTANT, so every
+        // meal produced the SAME collapse key — Android `collapseKey`/`tag` and
+        // iOS `apns-collapse-id` then REPLACE instead of stacking.
+        //
+        // That was harmless only while the withdrawn 1-hour minimum gap kept
+        // reminders far apart. Now that CONCURRENT windows are allowed, several
+        // meals remind at the same instant and a member would see just ONE of
+        // them. Feeding the slot key into the collapse INPUT keeps the tag
+        // per-meal; the forwarded `dedupeId` stays the hash, so client and OS
+        // identities are unchanged in kind and a re-delivery of the SAME meal
+        // still collapses exactly as before.
+        tag: `attendance_reminder:${params.mealSlotKey}`,
       },
     };
   }

@@ -19,7 +19,6 @@ import type { RealtimeEventsService } from '../../realtime/services/realtime-eve
 import { QuerySchedulesDto } from './dto/query-meals.dto';
 import { PaginatedResponseDto } from '../../common/dto/paginated-response.dto';
 import { RedisService } from '../../redis/redis.service';
-import { ConfigService } from '@nestjs/config';
 import { invalidateTodayMealsCache } from './utils/today-meals-cache.util';
 import {
   assertMealWindowsValid,
@@ -83,18 +82,7 @@ export class SchedulesService {
     @Optional()
     @Inject(RedisService)
     private readonly redis: RedisService | null = null,
-    // Live-Test-16 ISSUE-2: the attendance-window gap is env-configurable
-    // (MEALS_WINDOW_MIN_GAP_MINUTES). @Optional keeps every existing unit test
-    // constructing this service unchanged — the default matches meals.config.
-    @Optional()
-    @Inject(ConfigService)
-    private readonly config: ConfigService | null = null,
   ) {}
-
-  /** Live-Test-16 ISSUE-2: minimum gap between attendance windows (minutes). */
-  private get windowMinGapMinutes(): number {
-    return this.config?.get<number>('meals.windowMinGapMinutes', 60) ?? 60;
-  }
 
   /** Drop the group's cached today-bundles (fail-soft; org-wide if no group). */
   private async invalidateTodayCache(
@@ -476,7 +464,7 @@ export class SchedulesService {
         });
       }
       // Live-Test-16 ISSUE-2 §17: buildEntryData validates the effective
-      // attendance windows per date, so an overlapping / under-gapped week can
+      // attendance windows, so a week with a missing or overnight window can
       // never reach replaceAndPublish.
       const entries = await this.buildEntryData(
         existing.groupId,
@@ -551,7 +539,6 @@ export class SchedulesService {
       this.assertEntryWindows(
         (existing.entries ?? []).map((e: any) => ({
           mealId: e.mealId,
-          date: e.date,
           openTime: e.openTime ?? null,
           closeTime: e.closeTime ?? null,
         })),
@@ -916,31 +903,27 @@ export class SchedulesService {
   private assertEntryWindows(
     entries: ReadonlyArray<{
       mealId: string;
-      date: Date;
       openTime: string | null;
       closeTime: string | null;
     }>,
     byId: Map<string, MealWindowRef>,
   ): void {
     if (entries.length === 0) return;
-    const byDate = new Map<string, MealWindowRef[]>();
-    for (const e of entries) {
-      const master = byId.get(e.mealId);
-      const key = e.date.toISOString().slice(0, 10);
-      const day = byDate.get(key);
-      const ref: MealWindowRef = {
-        mealId: e.mealId,
-        label: master?.label ?? e.mealId,
-        slotKey: master?.slotKey ?? null,
-        openTime: e.openTime ?? master?.openTime ?? null,
-        closeTime: e.closeTime ?? master?.closeTime ?? null,
-      };
-      if (day) day.push(ref);
-      else byDate.set(key, [ref]);
-    }
-    for (const dayWindows of byDate.values()) {
-      assertMealWindowsValid(dayWindows, this.windowMinGapMinutes);
-    }
+    // Windows are validated INDIVIDUALLY (present + same-day). They are never
+    // compared with one another, so concurrent windows on the same date are
+    // allowed and no per-date grouping is needed.
+    assertMealWindowsValid(
+      entries.map((e) => {
+        const master = byId.get(e.mealId);
+        return {
+          mealId: e.mealId,
+          label: master?.label ?? e.mealId,
+          slotKey: master?.slotKey ?? null,
+          openTime: e.openTime ?? master?.openTime ?? null,
+          closeTime: e.closeTime ?? master?.closeTime ?? null,
+        };
+      }),
+    );
   }
 
   /**

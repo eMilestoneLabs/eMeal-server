@@ -64,7 +64,6 @@ describe('Live-Test-16 — publish stamp + merge validation', () => {
       audit,
       realtime,
       redis,
-      null as any,
     );
     return { service, schedulesRepo, groupsRepo, mealsRepo, realtime, mark };
   };
@@ -142,8 +141,8 @@ describe('Live-Test-16 — publish stamp + merge validation', () => {
         meal: {
           slotKey: 'breakfast',
           name: 'Breakfast',
-          attendanceWindowOpen: '07:00',
-          attendanceWindowClose: '09:00',
+          attendanceWindowOpen: null,
+          attendanceWindowClose: null,
         },
       },
     ];
@@ -155,8 +154,8 @@ describe('Live-Test-16 — publish stamp + merge validation', () => {
           name: 'Breakfast',
           slotKey: 'breakfast',
           isActive: true,
-          attendanceWindowOpen: '07:00',
-          attendanceWindowClose: '09:00',
+          attendanceWindowOpen: null,
+          attendanceWindowClose: null,
         },
         {
           id: 'meal_ln',
@@ -169,8 +168,9 @@ describe('Live-Test-16 — publish stamp + merge validation', () => {
       ],
     });
 
-    // Payload mentions ONLY Lunch, at 09:30 — conflicts with the persisted
-    // Breakfast it never mentions. replaceEntries omitted ⇒ merge.
+    // Payload mentions ONLY Lunch. The persisted Breakfast it never mentions
+    // has NO window — invalid — and must still be caught. replaceEntries
+    // omitted ⇒ merge, so that surviving row is validated too.
     await expect(
       service.updateSchedule('sch_01', 'org_01', 'usr_admin', {
         entries: [
@@ -181,7 +181,7 @@ describe('Live-Test-16 — publish stamp + merge validation', () => {
           },
         ],
       } as any),
-    ).rejects.toMatchObject({ response: { code: 'MEAL_WINDOW_CONFLICT' } });
+    ).rejects.toMatchObject({ response: { code: 'MEAL_WINDOW_REQUIRED' } });
   });
 
   // ── Multi-tenant adversarial (§10) ─────────────────────────────────────────
@@ -225,7 +225,7 @@ describe('Live-Test-16 — publish stamp + merge validation', () => {
     );
   });
 
-  it('M1: replaceEntries=true still validates ONLY the payload (no false conflict)', async () => {
+  it('M1: replaceEntries=true still validates ONLY the payload (survivors dropped)', async () => {
     const persisted = [
       {
         mealId: 'meal_bf',
@@ -235,8 +235,8 @@ describe('Live-Test-16 — publish stamp + merge validation', () => {
         meal: {
           slotKey: 'breakfast',
           name: 'Breakfast',
-          attendanceWindowOpen: '07:00',
-          attendanceWindowClose: '09:00',
+          attendanceWindowOpen: null,
+          attendanceWindowClose: null,
         },
       },
     ];
@@ -254,7 +254,7 @@ describe('Live-Test-16 — publish stamp + merge validation', () => {
       ],
     });
 
-    // A full replace wipes Breakfast, so 09:30 is legal.
+    // A full replace wipes the window-less Breakfast, so this is legal.
     await expect(
       service.updateSchedule('sch_01', 'org_01', 'usr_admin', {
         replaceEntries: true,

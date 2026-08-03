@@ -1,5 +1,4 @@
 import { GroupEntity } from '../entities/group.entity';
-import { resolveWindowMinGapMinutes } from '../../../config/meals.config';
 
 /**
  * GroupSerializer — converts domain entity to exact Flutter JSON contract.
@@ -133,10 +132,6 @@ export class GroupSerializer {
         // by the group's FIRST successful schedule publication. Display-only —
         // the backend stays the authority (updateGroup rejects a locked flip).
         mealPricingLocked: !!group.firstSchedulePublishedAt,
-        // Live-Test-16 F2: the EFFECTIVE attendance-window gap (minutes), so
-        // the client validates against the SAME rule the server enforces.
-        // Server-owned/display-only — the client never sends it back.
-        windowMinGapMinutes: resolveWindowMinGapMinutes(),
         // SRS Module 03 (survey Q17/Q22): Bill-Skip policy (default OFF).
         billSkippedMeals: group.billSkippedMeals ?? false,
         // Live-Test-11 ISSUE-017 (survey-locked): the independent Bill-Absent
