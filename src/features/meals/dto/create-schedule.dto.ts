@@ -17,6 +17,22 @@ import { Type } from 'class-transformer';
 /**
  * ScheduleEntryAttendanceWindowDto — per-day timing override inside a schedule entry.
  */
+/**
+ * Live-Test-16 F1 — calendar-date guard.
+ *
+ * Every schedule date is parsed by `parseLocalDate` (`YYYY-MM-DD` → UTC
+ * midnight). `@IsDateString()` alone also accepts a FULL ISO datetime, which
+ * that parser turns into an **Invalid Date** — and an Invalid Date reaches
+ * `toISOString()` and throws a RangeError (HTTP 500) instead of a clean 4xx.
+ *
+ * Guidebook §4 requires malformed date params to be rejected by regex BEFORE
+ * Prisma (400, never 500). This constraint is ADDITIVE — `@IsDateString()`
+ * stays, so the only requests newly rejected are the ones that were already
+ * broken. Every client (Flutter included) sends `YYYY-MM-DD`.
+ */
+export const CALENDAR_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+export const CALENDAR_DATE_MESSAGE = 'date must be YYYY-MM-DD';
+
 class ScheduleEntryWindowDto {
   @IsString()
   @Matches(/^([01]\d|2[0-3]):[0-5]\d$/, {
@@ -47,6 +63,7 @@ export class CreateScheduleEntryDto {
    * Day of week (dayOfWeek integer) is computed from this date.
    */
   @IsDateString()
+  @Matches(CALENDAR_DATE_RE, { message: CALENDAR_DATE_MESSAGE })
   date: string;
 
   /** What's being served on this day (e.g. "Poha", "Dal Rice with Raita") */
@@ -126,6 +143,7 @@ export class CreateScheduleDto {
    * Non-Monday dates are rejected in the service layer.
    */
   @IsDateString()
+  @Matches(CALENDAR_DATE_RE, { message: CALENDAR_DATE_MESSAGE })
   weekStartDate: string;
 
   /** Optional initial entries — can be added/updated later */

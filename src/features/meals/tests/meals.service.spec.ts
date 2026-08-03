@@ -96,6 +96,10 @@ describe('MealsService', () => {
             // create/update tests on the happy path.
             countActiveInGroup: jest.fn().mockResolvedValue(0),
             existsByNameInGroup: jest.fn().mockResolvedValue(false),
+            // Live-Test-16 ISSUE-2: sibling attendance windows for the
+            // no-overlap / minimum-gap invariant. Empty = no siblings, so the
+            // pre-existing tests keep exercising their original paths.
+            findActiveWindowsInGroup: jest.fn().mockResolvedValue([]),
           },
         },
         {
@@ -181,6 +185,26 @@ describe('MealsService', () => {
       ).rejects.toThrow(BadRequestException);
     });
 
+    // L2: `__general__` is a reserved SYSTEM slot (created only by
+    // ensureGeneralSlot, exempt from the meal cap and the window invariant).
+    // Accepting it here would mint a cap-free, window-free meal.
+    it('L2: REJECTS the reserved __general__ slot key', async () => {
+      groupsRepo.findById.mockResolvedValue(mockGroup);
+
+      await expect(
+        service.createMeal('usr_admin', 'org_01', {
+          groupId: 'grp_01',
+          slotKey: '__general__',
+          name: 'Sneaky',
+          attendanceWindow: { openTime: '07:00', closeTime: '09:00' },
+        }),
+      ).rejects.toMatchObject({
+        response: { code: 'MEAL_SLOT_KEY_RESERVED' },
+      });
+
+      expect(mealsRepo.create).not.toHaveBeenCalled();
+    });
+
     it('creates meal with free-form slotKey (not enum)', async () => {
       groupsRepo.findById.mockResolvedValue(mockGroup);
       mealsRepo.create.mockResolvedValue(mockMeal);
@@ -190,6 +214,10 @@ describe('MealsService', () => {
         slotKey: 'iftar',  // custom slot — not in any enum
         name: 'Iftar Meal',
         displayName: 'Iftar',
+        // Live-Test-16 ISSUE-2: an attendance window is now mandatory on every
+        // admin-created meal. Unrelated to what this test asserts (slotKey
+        // passthrough) — supplied so the create reaches the repo.
+        attendanceWindow: { openTime: '18:00', closeTime: '19:30' },
       });
 
       // Verify slotKey passed through as-is (no enum validation)
@@ -206,6 +234,8 @@ describe('MealsService', () => {
         groupId: 'grp_01',
         slotKey: 'breakfast',
         name: 'Test',
+        // Live-Test-16 ISSUE-2: mandatory window (see note above).
+        attendanceWindow: { openTime: '07:00', closeTime: '09:00' },
       });
 
       expect(result).toHaveProperty('isActive', true);
@@ -310,22 +340,43 @@ describe('MealsService', () => {
       );
     });
 
-    it('clears attendanceWindow when null provided', async () => {
+    // L1: disabling a meal AND clearing/breaking its window in one PATCH used
+    // to skip validation entirely (an inactive meal has no siblings to clash
+    // with), so a disabled meal could bank an invalid window that only
+    // surfaced on re-enable. The window itself is now always well-formed.
+    it('L1: REJECTS an invalid window even when the meal is being disabled', async () => {
       mealsRepo.findById.mockResolvedValue(mockMeal);
       mealsRepo.update.mockResolvedValue(mockMeal);
 
-      await service.updateMeal('meal_01', 'org_01', 'usr_admin', {
-        attendanceWindow: null,
+      await expect(
+        service.updateMeal('meal_01', 'org_01', 'usr_admin', {
+          isEnabled: false,
+          attendanceWindow: null,
+        }),
+      ).rejects.toMatchObject({
+        response: { code: 'MEAL_WINDOW_REQUIRED' },
       });
 
-      expect(mealsRepo.update).toHaveBeenCalledWith(
-        'meal_01',
-        'org_01',
-        expect.objectContaining({
-          attendanceWindowOpen: null,
-          attendanceWindowClose: null,
+      expect(mealsRepo.update).not.toHaveBeenCalled();
+    });
+
+    // Live-Test-16 ISSUE-2 (user-locked Q2): clearing a window used to be
+    // allowed and the missing window was then read as "open all day". Every
+    // admin-configured meal now REQUIRES a window, so this previously-positive
+    // test is inverted: the clear must be refused and nothing may be written.
+    it('REJECTS clearing attendanceWindow — a window is mandatory', async () => {
+      mealsRepo.findById.mockResolvedValue(mockMeal);
+      mealsRepo.update.mockResolvedValue(mockMeal);
+
+      await expect(
+        service.updateMeal('meal_01', 'org_01', 'usr_admin', {
+          attendanceWindow: null,
         }),
-      );
+      ).rejects.toMatchObject({
+        response: { code: 'MEAL_WINDOW_REQUIRED' },
+      });
+
+      expect(mealsRepo.update).not.toHaveBeenCalled();
     });
   });
 

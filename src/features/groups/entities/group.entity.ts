@@ -52,6 +52,9 @@ export class GroupEntity {
   // Billing-cycle retention: when set, the group's ONE-TIME billing-cycle
   // change has been consumed and the day can never be changed again.
   billingCycleChangedAt?: Date | null;
+  // Live-Test-16 ISSUE-1: instant of the group's FIRST successful schedule
+  // publication. When set, the Meal-Pricing ON/OFF mode is permanently locked.
+  firstSchedulePublishedAt?: Date | null;
   // Additive: ₹ pricing toggle
   mealPricingEnabled: boolean;
   // SRS Module 03 (survey Q17/Q22): Bill-Skip policy (default OFF).

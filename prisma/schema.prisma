@@ -265,6 +265,17 @@ model Group {
   // still change it once; set = the privilege is permanently consumed.
   // Server-side truth — reinstalling the app or clearing cache cannot restore it.
   billingCycleChangedAt DateTime?
+
+  // Live-Test-16 ISSUE-1: instant of this group's FIRST successful meal
+  // schedule publication. It is the permanent Meal-Pricing locking event —
+  // once set, mealPricingEnabled can never be flipped again (the group's
+  // financial identity is fixed for its whole lifecycle).
+  //
+  // Deliberately a dedicated column rather than "any schedule with
+  // publishedAt != null": a full unpublish (revert hide=true) NULLs
+  // publishedAt, which would otherwise release a permanent financial lock.
+  // Monotonic — written once, never cleared. Null = not yet published.
+  firstSchedulePublishedAt DateTime?
   // Additive: when ON, meals carry a ₹ price; shown to students + used for billing/exports
   mealPricingEnabled   Boolean  @default(false)
   // SRS FR-TIME-005 (LOOP-090): per-group grace period (minutes) that extends

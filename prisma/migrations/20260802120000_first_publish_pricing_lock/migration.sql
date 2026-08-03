@@ -1,0 +1,18 @@
+-- Live-Test-16 ISSUE-1 — First-Publish financial review + permanent Meal-Pricing lock.
+--
+-- "firstSchedulePublishedAt" : instant of the group's FIRST successful meal
+--   schedule publication. This is the permanent Meal-Pricing locking event —
+--   once set, groups.mealPricingEnabled can never be flipped again.
+--
+--   It is a dedicated column rather than a derivation from
+--   meal_schedules.publishedAt because a full unpublish (revert hide=true)
+--   NULLs publishedAt, which would otherwise RELEASE a permanent financial
+--   lock. This column is monotonic: written once, never cleared.
+--
+-- NULLABLE with no default, so every existing row is untouched and NO backfill
+-- is required — existing groups stay unlocked until their next publish, which
+-- is exactly the intended lifecycle. No index is added: the column is only
+-- ever read from a row already fetched by primary key.
+--
+-- Idempotent so a re-run during live testing is safe.
+ALTER TABLE "groups" ADD COLUMN IF NOT EXISTS "firstSchedulePublishedAt" TIMESTAMP(3);

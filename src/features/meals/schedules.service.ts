@@ -19,7 +19,12 @@ import type { RealtimeEventsService } from '../../realtime/services/realtime-eve
 import { QuerySchedulesDto } from './dto/query-meals.dto';
 import { PaginatedResponseDto } from '../../common/dto/paginated-response.dto';
 import { RedisService } from '../../redis/redis.service';
+import { ConfigService } from '@nestjs/config';
 import { invalidateTodayMealsCache } from './utils/today-meals-cache.util';
+import {
+  assertMealWindowsValid,
+  type MealWindowRef,
+} from './utils/window-conflict.util';
 
 /**
  * Compute day of week (0=Monday...6=Sunday) from a Date object.
@@ -78,7 +83,18 @@ export class SchedulesService {
     @Optional()
     @Inject(RedisService)
     private readonly redis: RedisService | null = null,
+    // Live-Test-16 ISSUE-2: the attendance-window gap is env-configurable
+    // (MEALS_WINDOW_MIN_GAP_MINUTES). @Optional keeps every existing unit test
+    // constructing this service unchanged — the default matches meals.config.
+    @Optional()
+    @Inject(ConfigService)
+    private readonly config: ConfigService | null = null,
   ) {}
+
+  /** Live-Test-16 ISSUE-2: minimum gap between attendance windows (minutes). */
+  private get windowMinGapMinutes(): number {
+    return this.config?.get<number>('meals.windowMinGapMinutes', 60) ?? 60;
+  }
 
   /** Drop the group's cached today-bundles (fail-soft; org-wide if no group). */
   private async invalidateTodayCache(
@@ -276,10 +292,40 @@ export class SchedulesService {
 
     let entries: any[] | undefined;
     if (dto.entries !== undefined) {
+      // Live-Test-16 ISSUE-2 §16: a non-replacing PATCH MERGES — the repo
+      // upserts on (schedule, meal, date) and leaves every other row alone. So
+      // the rows that survive must be validated together with the incoming
+      // ones, or a single conflicting entry would slip past a payload-only
+      // check. Rows the payload overwrites (same meal + same date) are dropped
+      // from the surviving set so a meal never conflicts with its own old
+      // window. Built from `existing`, already fetched above — no extra query.
+      const merging = dto.replaceEntries !== true;
+      const incoming = new Set(
+        (dto.entries ?? []).map(
+          (e) => `${e.mealId}|${String(e.date).slice(0, 10)}`,
+        ),
+      );
+      const survivors = merging
+        ? (existing.entries ?? [])
+            .filter((e: any) => {
+              const d =
+                e.date instanceof Date ? e.date : new Date(e.date);
+              return !incoming.has(
+                `${e.mealId}|${d.toISOString().slice(0, 10)}`,
+              );
+            })
+            .map((e: any) => ({
+              mealId: e.mealId,
+              date: e.date instanceof Date ? e.date : new Date(e.date),
+              openTime: e.openTime ?? null,
+              closeTime: e.closeTime ?? null,
+            }))
+        : [];
       entries = await this.buildEntryData(
         existing.groupId,
         organizationId,
         dto.entries,
+        survivors,
       );
     }
 
@@ -321,17 +367,86 @@ export class SchedulesService {
    * chained + fail-safe (unknown ⇒ false = keep preferences) so partial test
    * doubles and legacy groups behave exactly as before.
    */
-  private async groupPreferencesOff(
+  /**
+   * Live-Test-16 ISSUE-1: the SAME fail-soft group load now also carries
+   * `firstSchedulePublishedAt`, so the first-publish lock costs no extra read
+   * (`findByIdConfig` selects the whole row). Returns null when the row cannot
+   * be resolved — every caller then falls back to the pre-existing behaviour.
+   */
+  private async loadGroupForPublish(
     groupId: string,
     organizationId: string,
-  ): Promise<boolean> {
+  ): Promise<Record<string, any> | null> {
     try {
       const g = this.groupsRepo.findByIdConfig
         ? await this.groupsRepo.findByIdConfig(groupId, organizationId)
         : await this.groupsRepo.findById(groupId, organizationId);
-      return (g as any)?.preferencesEnabled === false;
+      return (g as any) ?? null;
     } catch {
-      return false;
+      return null;
+    }
+  }
+
+  /** ISSUE-011: unknown ⇒ false (keep preferences) — unchanged semantics. */
+  private static preferencesOff(group: Record<string, any> | null): boolean {
+    return group?.preferencesEnabled === false;
+  }
+
+  /**
+   * Live-Test-16 ISSUE-1 §7/§8: stamp the group's FIRST successful schedule
+   * publication. This instant is the permanent Meal-Pricing locking event
+   * (`groups.service.updateGroup` reads it), so it is written ONLY after the
+   * publish has actually committed — a failed publish throws before this line
+   * and never consumes the lock.
+   *
+   * Cost: skipped entirely once the group is stamped, so it is one indexed
+   * UPDATE per group per lifetime, never on re-publish. The `null` WHERE
+   * clause makes it idempotent and race-safe under concurrent publishes.
+   */
+  private async stampFirstPublish(
+    group: Record<string, any> | null,
+    groupId: string,
+    organizationId: string,
+    adminId: string,
+    requestId?: string,
+  ): Promise<void> {
+    if (!group || group.firstSchedulePublishedAt) return;
+    // Live-Test-16 user-locked Q4: the Meal-Pricing lock is meaningful ONLY in
+    // Meal-Enabled mode. An Attendance-Only group can still reach publish when
+    // it kept `weeklyMenuEnabled` from a previous meals-ON life (the mode
+    // cascade deliberately preserves those flags while meals are OFF), and
+    // `PRICING_REQUIRES_MEALS` already blocks pricing there — so stamping it
+    // would invent a lock lifecycle with no business meaning.
+    if (group.mealsEnabled !== true) return;
+    try {
+      const stamped = await this.groupsRepo.markFirstSchedulePublished?.(
+        groupId,
+        organizationId,
+      );
+      // false = a concurrent publish won the race; undefined = a test double
+      // without the method. Neither one stamped, so neither is audited.
+      if (stamped !== true) return;
+      this.audit.log({
+        organizationId,
+        actorId: adminId,
+        targetId: groupId,
+        targetType: 'Group',
+        action: 'update',
+        metadata: {
+          firstSchedulePublished: true,
+          mealPricingLocked: true,
+          mealPricingEnabled: group.mealPricingEnabled === true,
+          billingCycleStartDay: group.billingCycleStartDay ?? null,
+        },
+        requestId,
+      });
+    } catch (err) {
+      // Never fail an already-committed publish. Logged (never swallowed
+      // silently) and self-healing: the next publish re-attempts the stamp.
+      this.logger.error(
+        `First-publish stamp failed for group=${groupId} org=${organizationId} — pricing lock not yet consumed; will retry on next publish`,
+        err instanceof Error ? err.stack : String(err),
+      );
     }
   }
 
@@ -348,6 +463,10 @@ export class SchedulesService {
     // the swap commits — no draft / master-config gap. Without entries this is
     // the original idempotent flag-flip publish.
     let schedule;
+    // Live-Test-16 ISSUE-1: resolved once per publish and reused for the
+    // preference strip AND the first-publish stamp (no second group read).
+    let publishGroup: Record<string, any> | null = null;
+    let publishGroupId: string | null = null;
     if (dto?.entries !== undefined) {
       const existing = await this.schedulesRepo.findById(id, organizationId);
       if (!existing) {
@@ -356,6 +475,9 @@ export class SchedulesService {
           errors: { id: 'Schedule does not exist in your organization' },
         });
       }
+      // Live-Test-16 ISSUE-2 §17: buildEntryData validates the effective
+      // attendance windows per date, so an overlapping / under-gapped week can
+      // never reach replaceAndPublish.
       const entries = await this.buildEntryData(
         existing.groupId,
         organizationId,
@@ -364,10 +486,12 @@ export class SchedulesService {
       // ISSUE-011: Global Meal Preferences OFF ⇒ the published snapshot goes
       // out preference-free — the moment members receive this publish, no
       // meal shows/demands preference picks (Global overrides every meal).
-      const stripPrefs = await this.groupPreferencesOff(
+      publishGroupId = existing.groupId;
+      publishGroup = await this.loadGroupForPublish(
         existing.groupId,
         organizationId,
       );
+      const stripPrefs = SchedulesService.preferencesOff(publishGroup);
       schedule = await this.schedulesRepo.replaceAndPublish(
         id,
         organizationId,
@@ -419,11 +543,42 @@ export class SchedulesService {
           });
         }
       }
+      // Live-Test-16 ISSUE-2 §17: the flag-flip publish carries no entries, so
+      // it never passes through buildEntryData — validate the PERSISTED rows
+      // here instead, using the entries already fetched above (each one joins
+      // its master meal's window, so this costs no query). An invalid week can
+      // therefore never become the effective published schedule on ANY path.
+      this.assertEntryWindows(
+        (existing.entries ?? []).map((e: any) => ({
+          mealId: e.mealId,
+          date: e.date,
+          openTime: e.openTime ?? null,
+          closeTime: e.closeTime ?? null,
+        })),
+        new Map(
+          (existing.entries ?? []).map((e: any) => [
+            e.mealId,
+            {
+              mealId: e.mealId,
+              label:
+                e.meal?.displayName?.trim() ||
+                e.meal?.name ||
+                e.mealName ||
+                e.mealId,
+              slotKey: e.meal?.slotKey ?? null,
+              openTime: e.meal?.attendanceWindowOpen ?? null,
+              closeTime: e.meal?.attendanceWindowClose ?? null,
+            } as MealWindowRef,
+          ]),
+        ),
+      );
       // ISSUE-011: same Global-OFF strip on the plain flag-flip publish.
-      const stripPrefs = await this.groupPreferencesOff(
+      publishGroupId = existing.groupId;
+      publishGroup = await this.loadGroupForPublish(
         existing.groupId,
         organizationId,
       );
+      const stripPrefs = SchedulesService.preferencesOff(publishGroup);
       schedule = await this.schedulesRepo.publish(
         id,
         organizationId,
@@ -456,6 +611,24 @@ export class SchedulesService {
     await this.invalidateTodayCache(
       organizationId,
       (schedule as any)?.groupId,
+    );
+
+    // Live-Test-16 ISSUE-1 §8: the publish has COMMITTED — only now may the
+    // permanent Meal-Pricing decision be locked in.
+    //
+    // Deliberately LAST and fail-soft (guidebook §3 pattern 4). An earlier
+    // placement made a stamp failure abort the realtime emit AND the
+    // today-bundle invalidation of an ALREADY-PUBLISHED week — students would
+    // have kept a stale overlay while the admin was told the publish failed.
+    // A missed stamp is self-healing (the next publish re-stamps, because the
+    // UPDATE is guarded by `firstSchedulePublishedAt: null`); a missed cache
+    // invalidation is not. Correctness of the published week wins.
+    await this.stampFirstPublish(
+      publishGroup,
+      publishGroupId ?? (schedule as any)?.groupId,
+      organizationId,
+      adminId,
+      requestId,
     );
 
     return ScheduleSerializer.toResponse(schedule);
@@ -586,6 +759,17 @@ export class SchedulesService {
       menuItems?: string[] | null;
       price?: number | null;
     }>,
+    // Live-Test-16 ISSUE-2 §16: entries that will SURVIVE this write and must
+    // therefore be validated alongside the incoming ones. PATCH /schedules/:id
+    // defaults to `replaceEntries:false` (merge), so validating only the
+    // payload would let a direct API call persist a draft that conflicts with
+    // rows it never mentions. Empty for every replace/create path.
+    mergeWith: ReadonlyArray<{
+      mealId: string;
+      date: Date;
+      openTime: string | null;
+      closeTime: string | null;
+    }> = [],
   ) {
     const validatedEntries: Array<{
       id?: string;
@@ -613,7 +797,10 @@ export class SchedulesService {
     // AFTER the week was drafted is NOT a client error — it is auto-dropped
     // here, so saving/publishing a week can never be permanently blocked by a
     // master-config change. Only a mealId the group has never known rejects.
-    const { active, known } = await this.mealCatalogue(groupId, organizationId);
+    const { active, known, byId } = await this.mealCatalogue(
+      groupId,
+      organizationId,
+    );
 
     for (const entry of entriesDto) {
       const date = parseLocalDate(entry.date);
@@ -651,6 +838,15 @@ export class SchedulesService {
       });
     }
 
+    // Live-Test-16 ISSUE-2: ONE funnel — POST /schedules, POST
+    // /meals/weekly-schedule, PATCH /schedules/:id and the replace-and-publish
+    // path all build their entries here, so validating once covers every one
+    // of them with no duplicated logic and no extra query. `mergeWith` carries
+    // the rows a partial (non-replacing) PATCH would leave in place; `byId` is
+    // the whole group catalogue, so their master windows resolve from the same
+    // map with no additional read.
+    this.assertEntryWindows([...mergeWith, ...validatedEntries], byId);
+
     return validatedEntries;
   }
 
@@ -673,7 +869,15 @@ export class SchedulesService {
   private async mealCatalogue(
     groupId: string,
     organizationId: string,
-  ): Promise<{ active: Set<string>; known: Set<string> }> {
+  ): Promise<{
+    active: Set<string>;
+    known: Set<string>;
+    // Live-Test-16 ISSUE-2: master window + label per meal, riding the SAME
+    // query the catalogue already performs (guidebook §3b rule 3 — "ride the
+    // include"). A day entry with no per-day override inherits these values,
+    // so the effective-window validation needs no extra wave.
+    byId: Map<string, MealWindowRef>;
+  }> {
     const catalogue = await this.mealsRepo.findByGroup(groupId, organizationId, {
       page: 1,
       limit: SchedulesService.MAX_GROUP_MEALS,
@@ -684,7 +888,59 @@ export class SchedulesService {
         catalogue.data.filter((m) => m.isActive).map((m) => m.id),
       ),
       known: new Set(catalogue.data.map((m) => m.id)),
+      byId: new Map(
+        catalogue.data.map((m) => [
+          m.id,
+          {
+            mealId: m.id,
+            label: m.displayName?.trim() || m.name,
+            slotKey: m.slotKey,
+            openTime: m.attendanceWindowOpen ?? null,
+            closeTime: m.attendanceWindowClose ?? null,
+          } as MealWindowRef,
+        ]),
+      ),
     };
+  }
+
+  /**
+   * Live-Test-16 ISSUE-2: assert the attendance-window invariant PER DATE.
+   *
+   * The effective window of a day entry is its per-day override, else the
+   * master meal template window. Validation is linear within each date — the
+   * next calendar date starts a new attendance lifecycle, so today's last
+   * window is never compared against tomorrow's first one (user-locked Q8).
+   *
+   * Pure in-process work over rows the caller already holds: no query.
+   */
+  private assertEntryWindows(
+    entries: ReadonlyArray<{
+      mealId: string;
+      date: Date;
+      openTime: string | null;
+      closeTime: string | null;
+    }>,
+    byId: Map<string, MealWindowRef>,
+  ): void {
+    if (entries.length === 0) return;
+    const byDate = new Map<string, MealWindowRef[]>();
+    for (const e of entries) {
+      const master = byId.get(e.mealId);
+      const key = e.date.toISOString().slice(0, 10);
+      const day = byDate.get(key);
+      const ref: MealWindowRef = {
+        mealId: e.mealId,
+        label: master?.label ?? e.mealId,
+        slotKey: master?.slotKey ?? null,
+        openTime: e.openTime ?? master?.openTime ?? null,
+        closeTime: e.closeTime ?? master?.closeTime ?? null,
+      };
+      if (day) day.push(ref);
+      else byDate.set(key, [ref]);
+    }
+    for (const dayWindows of byDate.values()) {
+      assertMealWindowsValid(dayWindows, this.windowMinGapMinutes);
+    }
   }
 
   /**

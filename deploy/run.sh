@@ -65,6 +65,7 @@ reg recovery    RO    "Auto-recovery configuration audit (verify-auto-recovery.s
 reg security    RO    "Security / pen-test probes — auth, isolation, injection, headers (srs/security.sh)"
 reg policy-contracts RO "Policy & contract probes (LT-11/LT-15/RET) — Bill-Absent snapshot flags, pick counts, group-scoped alerts; member roster exposes membership status and an ENDED vacation is immutable for every role (LT15-001/002); slotKey/dup/veg-only/toggle + block-unblock round-trip WRITE probes self-clean behind --writes + billing-cycle retention contracts: cycle-day/one-time-change exposure, archive-survives-purge, backend rejection of a 2nd cycle change (srs/policy-contracts.sh)"
 reg selfservice RO    "Self-service & decision round-trip — an admin's OWN correction applies with NO approval (FR-ACR-010 self-approval still blocked); unmarked members become System Skip at window close (Pending→0) and that Skip is ₹0 billing-neutral; approve/reject decisions reach the member's bell TARGETED (no cross-member leak); dashboard resolves the REAL organisation name (srs/selfservice.sh — read-only; its single correction write self-cleans and runs only behind --writes)"
+reg firstpublish RO   "Live-Test-16 first-publish & attendance-window contracts — mealPricingLocked exposed on both group payloads (lock-step), a LOCKED group rejects a pricing flip with 400 MEAL_PRICING_LOCKED while a same-value echo still succeeds (WRITE-gated, rejection-only so nothing needs cleanup), and every active meal window is present, same-day, non-overlapping and >= the configured gap (srs/firstpublish-windows.sh; read-only, never publishes and never consumes a lock)"
 reg srs         RO    "SRS requirement validation — functional+security+performance vs the 664-req manifest (srs/run.sh; read-only unless --writes)"
 reg e2e         WRITE "Full feature end-to-end with SELF-CLEANING test writes (validate-e2e.sh)"
 reg mealcheck   WRITE "MODULE-03 Meal/Attendance/Billing SRS validation, self-cleaning (validate-meal-attendance-billing.sh)"
@@ -210,6 +211,7 @@ run_module() { # $1 = name
     security)    ( cd deploy/srs && bash security.sh )          2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     policy-contracts) ( WRITE_TESTS=$WRITES bash deploy/srs/policy-contracts.sh ) 2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     selfservice) ( WRITE_TESTS=$WRITES bash deploy/srs/selfservice.sh ) 2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
+    firstpublish) ( WRITE_TESTS=$WRITES bash deploy/srs/firstpublish-windows.sh ) 2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     fixtures)    bash deploy/ensure-test-fixtures.sh            2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     db)          mod_db                                         2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
     unidoctor)   bash deploy/uni-index-doctor.sh                2>&1 | tee "$log"; rc=${PIPESTATUS[0]};;
@@ -344,6 +346,7 @@ FAILED=0
       srs)         grep -iE 'manifest|requirements|coverage|PASS.*FAIL' "$REPORT_DIR/$m.log" | tail -1;;
       policy-contracts) grep -E 'PASS=|FAIL=' "$REPORT_DIR/$m.log" | tail -1;;
       selfservice) grep -E 'PASS=|FAIL=' "$REPORT_DIR/$m.log" | tail -1;;
+      firstpublish) grep -E 'PASS=|FAIL=' "$REPORT_DIR/$m.log" | tail -1;;
       load)        grep -E 'http_req_duration|checks' "$REPORT_DIR/$m.log" | head -2 | tr '\n' ' ';;
       db)          grep -E 'cache_hit_pct' "$REPORT_DIR/$m.log" | tail -1;;
       system)      grep -E 'unstable=' "$REPORT_DIR/$m.log" | head -1;;

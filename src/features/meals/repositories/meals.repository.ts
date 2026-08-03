@@ -209,6 +209,52 @@ export class MealsRepository {
   }
 
   /**
+   * Live-Test-16 ISSUE-2: the group's ACTIVE meal windows, narrow-selected for
+   * the attendance-window invariant (no overlap, minimum gap).
+   *
+   * Deliberately SEPARATE from `countActiveInGroup` rather than replacing it:
+   * that count is the shipped MMT-001/014 cap guard, so it is left byte-for-
+   * byte alone and `createMeal` runs the two together in one `Promise.all`
+   * (one extra narrow read of at most `cap` rows, no additional latency wave).
+   *
+   * Bounded by the meal cap, so the un-indexed `orderBy` sorts a handful of
+   * rows already filtered by the indexed groupId + organizationId.
+   */
+  async findActiveWindowsInGroup(
+    groupId: string,
+    organizationId: string,
+    opts: { excludeSlotKey?: string; excludeMealId?: string } = {},
+  ): Promise<
+    Array<{
+      id: string;
+      name: string;
+      displayName: string | null;
+      slotKey: string;
+      attendanceWindowOpen: string | null;
+      attendanceWindowClose: string | null;
+    }>
+  > {
+    return this.prisma.meal.findMany({
+      where: {
+        groupId,
+        organizationId, // CRITICAL: tenant isolation
+        isActive: true,
+        ...(opts.excludeSlotKey ? { slotKey: { not: opts.excludeSlotKey } } : {}),
+        ...(opts.excludeMealId ? { id: { not: opts.excludeMealId } } : {}),
+      },
+      select: {
+        id: true,
+        name: true,
+        displayName: true,
+        slotKey: true,
+        attendanceWindowOpen: true,
+        attendanceWindowClose: true,
+      },
+      orderBy: { attendanceWindowOpen: 'asc' },
+    });
+  }
+
+  /**
    * SRS Module 03 MMT-003: meal Name is unique per group (case-insensitive,
    * active meals only — an archived meal's name is reusable).
    */

@@ -373,6 +373,26 @@ export class GroupsRepository {
     return this.buildEntity(group);
   }
 
+  /**
+   * Live-Test-16 ISSUE-1 §8: stamp the group's FIRST successful meal-schedule
+   * publication — the permanent Meal-Pricing locking event.
+   *
+   * The `firstSchedulePublishedAt: null` predicate makes it idempotent AND
+   * race-safe: two concurrent publishes cannot overwrite the original instant,
+   * and a re-publish matches zero rows. Returns false when already stamped.
+   * organizationId is in the WHERE — atomic tenant isolation.
+   */
+  async markFirstSchedulePublished(
+    id: string,
+    organizationId: string,
+  ): Promise<boolean> {
+    const result = await this.prisma.group.updateMany({
+      where: { id, organizationId, firstSchedulePublishedAt: null },
+      data: { firstSchedulePublishedAt: new Date() },
+    });
+    return result.count > 0;
+  }
+
   async update(
     id: string,
     organizationId: string,

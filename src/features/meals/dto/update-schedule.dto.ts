@@ -13,6 +13,11 @@ import {
   Matches,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+// Live-Test-16 F1: one shared calendar-date guard (DRY) — see create-schedule.dto.
+import {
+  CALENDAR_DATE_RE,
+  CALENDAR_DATE_MESSAGE,
+} from './create-schedule.dto';
 
 class ScheduleEntryWindowDto {
   @IsString()
@@ -39,6 +44,7 @@ export class UpdateScheduleEntryDto {
   mealId: string;
 
   @IsDateString()
+  @Matches(CALENDAR_DATE_RE, { message: CALENDAR_DATE_MESSAGE })
   date: string;
 
   @IsOptional()
@@ -110,6 +116,7 @@ export class UpdateScheduleDto {
   /** Optionally shift the week (only valid on drafts) */
   @IsOptional()
   @IsDateString()
+  @Matches(CALENDAR_DATE_RE, { message: CALENDAR_DATE_MESSAGE })
   weekStartDate?: string;
 
   @IsOptional()
@@ -139,6 +146,7 @@ export class CloneScheduleDto {
    * Example: "2026-01-12"
    */
   @IsDateString()
+  @Matches(CALENDAR_DATE_RE, { message: CALENDAR_DATE_MESSAGE })
   targetWeekStartDate: string;
 
   /**

@@ -28,6 +28,10 @@ import {
   getWindowState,
 } from '../../common/utils/date.utils';
 import { hhmmToMinutes } from './utils/entry-chrono.util';
+import {
+  assertMealWindowsValid,
+  type MealWindowRef,
+} from './utils/window-conflict.util';
 import { StorageService } from '../../storage/storage.service';
 import { PreferencesService } from '../preferences/preferences.service';
 import { ConfigService } from '@nestjs/config';
@@ -98,6 +102,29 @@ export class MealsService {
   /** SRS Module 03 MODE-003: Master Attendance Template window cap. */
   private get attendanceMaxWindows(): number {
     return this.config.get<number>('meals.attendanceMaxWindows', 5);
+  }
+
+  /** Live-Test-16 ISSUE-2: minimum gap between attendance windows (minutes). */
+  private get windowMinGapMinutes(): number {
+    return this.config.get<number>('meals.windowMinGapMinutes', 60);
+  }
+
+  /** Narrow meal row → the shape the window invariant validates. */
+  private static toWindowRef(m: {
+    id: string;
+    name: string;
+    displayName?: string | null;
+    slotKey: string;
+    attendanceWindowOpen: string | null;
+    attendanceWindowClose: string | null;
+  }): MealWindowRef {
+    return {
+      mealId: m.id,
+      label: m.displayName?.trim() || m.name,
+      slotKey: m.slotKey,
+      openTime: m.attendanceWindowOpen,
+      closeTime: m.attendanceWindowClose,
+    };
   }
 
   /**
@@ -270,6 +297,21 @@ export class MealsService {
       });
     }
 
+    // L2: `__general__` is a RESERVED system slot — created only by
+    // `ensureGeneralSlot` (which writes through the repository directly) and
+    // deliberately exempt from the meal cap and the window invariant. Accepting
+    // it here would let a crafted request mint a cap-free, window-free meal.
+    // Checked FIRST, before any further query, so a malformed request never
+    // costs a DB round-trip and always gets the accurate reason (guidebook §4).
+    // No client ever sends it.
+    if (dto.slotKey === GENERAL_ATTENDANCE_SLOT_KEY) {
+      throw new BadRequestException({
+        message: 'That meal slot key is reserved by the system',
+        code: 'MEAL_SLOT_KEY_RESERVED',
+        errors: { slotKey: `"${GENERAL_ATTENDANCE_SLOT_KEY}" cannot be used` },
+      });
+    }
+
     // SRS Module 03 MODE-003: Attendance-Only groups use the Master
     // Attendance Template — up to attendanceMaxWindows admin-named windows
     // (name, order, open/close, enabled), auto-applied every day. Windows are
@@ -294,11 +336,20 @@ export class MealsService {
     // slot never counts against either cap.
     const cap = attendanceOnly ? this.attendanceMaxWindows : this.maxMealsPerGroup;
     const capLabel = attendanceOnly ? 'attendance windows' : 'meals';
-    const activeCount = await this.mealsRepo.countActiveInGroup(
-      dto.groupId,
-      organizationId,
-      GENERAL_ATTENDANCE_SLOT_KEY,
-    );
+    // Live-Test-16 ISSUE-2: the cap query is left EXACTLY as it was (it is the
+    // shipped MMT-001/014 guard) and the sibling windows ride the SAME wave via
+    // Promise.all — one extra narrow indexed read of at most `cap` rows, zero
+    // extra latency, and no existing behaviour or test is disturbed.
+    const [activeCount, siblings] = await Promise.all([
+      this.mealsRepo.countActiveInGroup(
+        dto.groupId,
+        organizationId,
+        GENERAL_ATTENDANCE_SLOT_KEY,
+      ),
+      this.mealsRepo.findActiveWindowsInGroup(dto.groupId, organizationId, {
+        excludeSlotKey: GENERAL_ATTENDANCE_SLOT_KEY,
+      }),
+    ]);
     if (activeCount >= cap) {
       throw new BadRequestException({
         message: `A group supports at most ${cap} ${capLabel}`,
@@ -328,6 +379,25 @@ export class MealsService {
     this.assertStandaloneTagCap(
       dto.enabledPreferences,
       dto.preferencesEnabled ?? false,
+    );
+
+    // Live-Test-16 ISSUE-2 (user-locked): every admin-configured window is
+    // mandatory, same-day, and must clear every sibling window by the minimum
+    // gap. Applies to BOTH modes — a Master Attendance Template window is the
+    // same row shape. The implicit `__general__` slot is exempt (filtered
+    // inside the util) and never reaches this path anyway.
+    assertMealWindowsValid(
+      [
+        ...siblings.map((m) => MealsService.toWindowRef(m)),
+        {
+          mealId: 'new',
+          label: dto.displayName?.trim() || dto.name,
+          slotKey: dto.slotKey,
+          openTime: dto.attendanceWindow?.openTime ?? null,
+          closeTime: dto.attendanceWindow?.closeTime ?? null,
+        },
+      ],
+      this.windowMinGapMinutes,
     );
 
     // A base64 data-URI image is uploaded to MinIO AFTER the row exists (the
@@ -1040,6 +1110,26 @@ export class MealsService {
       });
     }
 
+    // Live-Test-16 ISSUE-2: the sibling windows are needed when this patch
+    // changes the window, or when it RE-ACTIVATES a meal (its window rejoins
+    // the effective set). Fetched at most ONCE per request, and ONLY when one
+    // of those is true — a name / price / preference / image edit still costs
+    // zero extra queries.
+    const reEnabling = dto.isEnabled === true && existing.isActive === false;
+    const windowTouched = 'attendanceWindow' in dto;
+    const willBeActive = dto.isEnabled ?? existing.isActive;
+    const siblingWindows =
+      reEnabling || (windowTouched && willBeActive !== false)
+        ? await this.mealsRepo.findActiveWindowsInGroup(
+            existing.groupId,
+            organizationId,
+            {
+              excludeSlotKey: GENERAL_ATTENDANCE_SLOT_KEY,
+              excludeMealId: id,
+            },
+          )
+        : null;
+
     // SRS Module 03 MMT-001/MMT-014 + MODE-003.2: re-enabling an archived
     // meal/window counts against the same cap as creating one.
     if (dto.isEnabled === true && existing.isActive === false) {
@@ -1077,6 +1167,44 @@ export class MealsService {
           errors: { name: 'A meal with this name already exists in this group' },
         });
       }
+    }
+
+    // Live-Test-16 ISSUE-2: validate the EFFECTIVE window this patch produces
+    // against every other active window in the group. A window may never be
+    // cleared (Q2), must stay same-day, and must clear its neighbours by the
+    // configured gap. The implicit `__general__` slot is filtered inside the
+    // util, so patching it (or living alongside it) is unaffected.
+    // L1: when the patch touches the window but the meal will be INACTIVE,
+    // `siblingWindows` is null (an inactive meal competes with nobody, so a
+    // cross-meal gap check would be a false conflict) — but the window itself
+    // must still be well-formed, or a disabled meal could bank an invalid
+    // window that only surfaces later. Validating it ALONE costs no query:
+    // the util checks presence + same-day, then returns at `length < 2`.
+    if (siblingWindows || windowTouched) {
+      const effectiveOpen = windowTouched
+        ? (dto.attendanceWindow?.openTime ?? null)
+        : existing.attendanceWindowOpen;
+      const effectiveClose = windowTouched
+        ? (dto.attendanceWindow?.closeTime ?? null)
+        : existing.attendanceWindowClose;
+      assertMealWindowsValid(
+        [
+          ...(siblingWindows ?? []).map((m) => MealsService.toWindowRef(m)),
+          {
+            mealId: id,
+            // N2: resolve the EFFECTIVE display name — an explicit
+            // `displayName: null` clears it, so `??` would wrongly fall back to
+            // the stored value and quote a stale label in the error message.
+            label:
+              ('displayName' in dto ? dto.displayName : existing.displayName)
+                ?.trim() || (dto.name ?? existing.name),
+            slotKey: existing.slotKey,
+            openTime: effectiveOpen,
+            closeTime: effectiveClose,
+          },
+        ],
+        this.windowMinGapMinutes,
+      );
     }
 
     const updateData: Parameters<typeof this.mealsRepo.update>[2] = {};

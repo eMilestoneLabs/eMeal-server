@@ -12,6 +12,7 @@ import {
 import { GroupsRepository } from './repositories/groups.repository';
 import { MembersRepository } from './repositories/members.repository';
 import { GroupSerializer } from './serializers/group.serializer';
+import { resolveWindowMinGapMinutes } from '../../config/meals.config';
 import { GroupMemberSerializer } from './serializers/group-member.serializer';
 import { GroupEntity } from './entities/group.entity';
 import { AuditService } from '../../audit/audit.service';
@@ -313,7 +314,13 @@ export class GroupsService {
       preferencesEnabled: dto.mealConfig?.preferencesEnabled ?? false,
       enabledPreferences: dto.mealConfig?.enabledPreferences ?? [],
       vacationModeEnabled: dto.mealConfig?.vacationModeEnabled ?? true,
-      mealPricingEnabled: dto.mealConfig?.mealPricingEnabled ?? false,
+      // Live-Test-16 ISSUE-1 §2 (user-locked Q5): EVERY new group starts with
+      // Meal Pricing OFF — deterministically, regardless of what the caller
+      // sends. The admin turns it on deliberately during configuration and
+      // confirms it in the First-Publish Financial Review, so an API creation
+      // parameter can never silently decide a group's permanent financial
+      // identity. The DTO field is retained so existing clients never 422.
+      mealPricingEnabled: false,
       // Module 02 (GRP-003) — extended metadata captured once at creation.
       // Issue 8: India-only release — country defaults to India and currency to
       // INR when the client omits them (both remain overridable/config-ready).
@@ -779,6 +786,38 @@ export class GroupsService {
         // off (no meal UI, no marking, and the auto-sweep skips meals-off
         // groups), and flipping meals back ON restores the prior state.
         delete updateData.mealPricingEnabled;
+      }
+
+      // ── PERMANENT Meal-Pricing lock (Live-Test-16 ISSUE-1 §7/§9) ──────────
+      // The group's FIRST successful schedule publication freezes its
+      // Meal-Pricing identity: ON stays ON, OFF stays OFF, for the whole
+      // lifecycle. Enforced HERE, on the backend, so the lock survives
+      // logout, reinstall, cache clear, another admin device, a direct API
+      // call and any later schedule/template change.
+      //
+      // Evaluated on the FINAL EFFECTIVE value and placed AFTER the meals-OFF
+      // preservation above, so a no-op echo can never trip it: Flutter PATCHes
+      // the WHOLE mealConfig on every unrelated toggle (vacation approval,
+      // meals on/off, guest settings…), and those must keep succeeding.
+      //
+      // Only the ON/OFF MODE is locked — individual meal prices, the Bill-Skip
+      // and Bill-Absent policies and every other pricing value stay editable.
+      if (
+        updateData.mealPricingEnabled !== undefined &&
+        updateData.mealPricingEnabled !== existing.mealPricingEnabled &&
+        existing.firstSchedulePublishedAt
+      ) {
+        throw new BadRequestException({
+          message:
+            'Meal Pricing was finalized when this group published its first meal schedule and can no longer be changed.',
+          code: 'MEAL_PRICING_LOCKED',
+          errors: {
+            mealPricingEnabled:
+              existing.mealPricingEnabled === true
+                ? 'This group is permanently a priced group. Create a new group if you need meals without pricing.'
+                : 'This group is permanently a non-priced group. Create a new group if you need meal pricing.',
+          },
+        });
       }
     }
 
@@ -2051,6 +2090,13 @@ export class GroupsService {
       // control as unlocked after the one-time change was already consumed.
       billingCycleChangeUsed: !!(group as any).billingCycleChangedAt,
       mealPricingEnabled: group.mealPricingEnabled,
+      // Same lock-step rule (Live-Test-16 ISSUE-1): a client reading THIS
+      // endpoint must not render the pricing toggle as editable after the
+      // first publish already froze it.
+      mealPricingLocked: !!(group as any).firstSchedulePublishedAt,
+      // Live-Test-16 F2: kept in lock-step with GroupSerializer.mealConfig —
+      // the same resolver, so the two endpoints can never disagree.
+      windowMinGapMinutes: resolveWindowMinGapMinutes(),
       // SRS Module 03 (survey Q17/Q22): Bill-Skip policy (default OFF).
       billSkippedMeals: (group as any).billSkippedMeals ?? false,
       // Live-Test-11 ISSUE-017 (survey-locked): independent Bill-Absent
