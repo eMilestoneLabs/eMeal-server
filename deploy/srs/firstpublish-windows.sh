@@ -60,7 +60,14 @@ else
   # LT16-002 — the dedicated meal-config endpoint must agree (lock-step rule).
   G1="$(printf '%s\n' $GIDS | head -1)"
   req GET "/groups/$G1/meal-config" "" "$ADMIN_TOKEN"
-  MC_FLAG="$(jbody '.mealPricingLocked // .data.mealPricingLocked')"
+  # NOTE: jq's `//` treats FALSE as a false value, exactly like null — so
+  # `.mealPricingLocked // .data.mealPricingLocked` on a correct `false` falls
+  # through to the alternative and reports "null". An unpublished group is
+  # legitimately false, so this probe must branch on PRESENCE, not truthiness.
+  MC_FLAG="$(jbody 'if has("mealPricingLocked") then .mealPricingLocked
+                    elif (.data? | type) == "object" and (.data | has("mealPricingLocked"))
+                      then .data.mealPricingLocked
+                    else null end')"
   LIST_FLAG="$(printf '%s' "$GROUPS_JSON" \
     | jq -r --arg g "$G1" '((.data // .)[]? | select(.id==$g) | .mealConfig.mealPricingLocked)' 2>/dev/null)"
   if [ "$MC_FLAG" = "$LIST_FLAG" ] && [ -n "$MC_FLAG" ] && [ "$MC_FLAG" != "null" ]; then
@@ -111,7 +118,7 @@ for g in $GIDS; do
   # Active, non-system meals only: "HH:mm|HH:mm|name" per line, sorted by open.
   ROWS="$(printf '%s' "$R_BODY" | jq -r --arg gen "$GENERAL_SLOT" '
     [ (.data // .)[]?
-      | select((.isActive // true) == true)
+      | select(.isActive != false)
       | select((.slotKey // "") != $gen) ]
     | .[] | "\(.attendanceWindow.openTime // "")|\(.attendanceWindow.closeTime // "")|\(.name // "?")"
   ' 2>/dev/null)"
