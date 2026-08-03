@@ -170,6 +170,14 @@ summary(){
   echo; hr; echo "▶ SUMMARY — $*"; hr
   echo "  PASS=$PASS  FAIL=$FAIL  SKIP=$SKIP  MANUAL(device)=$MANUAL"
   if [ "$FAIL" -gt 0 ]; then echo "  Failed:"; printf '    ✗ %s\n' "${FAILED_LABELS[@]}"; fi
-  local pct; pct="$(awk "BEGIN{printf \"%.1f\", ($total>0)?($PASS*100.0/$total):0}")"
-  echo "  Automated pass rate: ${pct}%   (requirements log: $REQLOG)"
+  # GNU awk still evaluates the division inside a printf-argument ternary, so
+  # `(total>0)?(PASS*100/total):0` raised "division by zero attempted" and
+  # printed an empty rate whenever a module skipped EVERY check (PASS=0 and
+  # FAIL=0 — e.g. a probe run against an empty database). Branch in bash so awk
+  # never sees a zero divisor.
+  local pct="n/a"
+  if [ "$total" -gt 0 ]; then
+    pct="$(awk "BEGIN{printf \"%.1f\", $PASS*100.0/$total}")%"
+  fi
+  echo "  Automated pass rate: ${pct}   (requirements log: $REQLOG)"
 }
