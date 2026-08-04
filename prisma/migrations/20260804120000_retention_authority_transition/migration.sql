@@ -1,0 +1,38 @@
+-- Live-Test-17 — RETENTION AUTHORITY TRANSITION (Attendance-Only -> Billing Cycle).
+--
+-- "retentionAnchoredAt" : instant at which this group's retention calendar was
+--   handed over from the Attendance-Only calendar-month lifecycle to its
+--   authoritative BILLING-CYCLE lifecycle — i.e. the first retention sweep
+--   after groups."firstSchedulePublishedAt" was stamped.
+--
+-- WHY A COLUMN AND NOT A DERIVATION
+--   The purge boundary (groups."retentionPurgeThrough") is deliberately FROZEN:
+--   it is stored, never recomputed from now(), so a late/retried sweep can
+--   never drag it forward and the ACTIVE billing cycle stays structurally
+--   unpurgeable. The transition must therefore run EXACTLY ONCE. Without an
+--   explicit marker the sweep cannot distinguish "needs re-anchoring" from
+--   "already re-anchored" and would recompute the frozen boundary on every
+--   pass, destroying that guarantee. Inferring the state instead (e.g. testing
+--   whether the boundary happens to be a valid cycle end) would silently skip
+--   the transition on a coincidental match — unacceptable on a path that ends
+--   in permanent data deletion.
+--
+-- WHAT IT FIXES
+--   A group created 01 Jan in Attendance-Only mode froze its boundary at 31 Mar
+--   (3 calendar months). Publishing its first schedule on 15 Jan with billing
+--   cycle day 15 makes the real financial lifecycle 15 Jan -> 14 Apr (three
+--   COMPLETE cycles). The stale 31 Mar boundary still fired, purging 15-31 Mar
+--   out of the MIDDLE of the active third cycle and fragmenting the historical
+--   record 15 days early. Pre-conversion Attendance-Only history now travels
+--   forward into the authoritative boundary and leaves in the SAME archive as
+--   the cycles that follow it.
+--
+-- NULLABLE with no default, so every existing row is untouched and NO backfill
+-- is required. Already-published groups are re-anchored by the next sweep, and
+-- the sweep's existing adoption guard walks the boundary forward whole cycles
+-- until the mandatory 7-day advance warning fits — so adoption can never cause
+-- a same-day, zero-notice purge. No index: the column is only ever read from
+-- rows the sweep has already loaded.
+--
+-- Idempotent so a re-run during live testing is safe.
+ALTER TABLE "groups" ADD COLUMN IF NOT EXISTS "retentionAnchoredAt" TIMESTAMP(3);

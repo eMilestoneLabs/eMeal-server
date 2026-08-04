@@ -86,6 +86,19 @@ export class RetentionService {
         OR: [
           { retentionPurgeThrough: null }, // bootstrap on first touch
           { retentionPurgeThrough: { lte: warnHorizon } },
+          // Live-Test-17: a group that has published but whose retention
+          // calendar has not yet been handed over to its billing cycle. Without
+          // this branch the transition would only run once the STALE AO
+          // boundary drifted into the warning horizon — i.e. days before the
+          // premature purge it exists to prevent. Matches each group exactly
+          // once (the transition stamps `retentionAnchoredAt`), so after the
+          // initial adoption wave it selects zero rows.
+          {
+            AND: [
+              { firstSchedulePublishedAt: { not: null } },
+              { retentionAnchoredAt: null },
+            ],
+          },
         ],
       },
       select: {
@@ -97,6 +110,10 @@ export class RetentionService {
         mealPricingEnabled: true,
         billingCycleStartDay: true,
         retentionPurgeThrough: true,
+        // Live-Test-17: the AO → billing-cycle retention transition. Two extra
+        // SCALARS on a query that already runs — no new query, no new wave.
+        firstSchedulePublishedAt: true,
+        retentionAnchoredAt: true,
         organization: { select: { timezone: true } },
       },
     });
@@ -147,6 +164,8 @@ export class RetentionService {
     mealPricingEnabled: boolean;
     billingCycleStartDay: number | null;
     retentionPurgeThrough: Date | null;
+    firstSchedulePublishedAt?: Date | null;
+    retentionAnchoredAt?: Date | null;
     organization: { timezone: string | null } | null;
   }): Promise<void> {
     // Never below 1 — a misconfigured 0 would purge the cycle still in use.
@@ -163,6 +182,87 @@ export class RetentionService {
     // "createdAt + 3 months" and never a drifting "now + 3 months".
     const warnDays = Math.max(0, this.cfg('reminderDays', 7));
     const DAY_MS = 24 * 60 * 60 * 1000;
+
+    // ── RETENTION AUTHORITY TRANSITION (Live-Test-17, user-locked) ──────────
+    // "Attendance-Only calendar retention governs until the first successful
+    // Meal schedule publication. At that publication the reviewed Billing Cycle
+    // becomes the authoritative retention calendar."
+    //
+    // Before this existed, a group created 01 Jan (AO) froze its boundary at
+    // 31 Mar (3 calendar months). Publishing on 15 Jan with cycle day 15 made
+    // the real financial lifecycle 15 Jan → 14 Apr — but the stale 31 Mar
+    // boundary still fired, purging 15–31 Mar out of the MIDDLE of the active
+    // third cycle and fragmenting the record 15 days early. The engine's
+    // "the ACTIVE cycle is structurally impossible to purge" guarantee only
+    // holds while the frozen boundary was computed with the cycle day currently
+    // in force; re-anchoring here restores it.
+    //
+    // Runs EXACTLY ONCE per group (guarded by `retentionAnchoredAt`), so the
+    // boundary stays FROZEN afterwards. Mode toggling can never re-run it:
+    // `firstSchedulePublishedAt` is monotonic and is never cleared, so
+    // ON → publish → OFF → ON yields no second transition, no restored AO
+    // clock, and no new 3-cycle countdown.
+    //
+    // Deliberately NOT `MAX(ao, financial)`: once the financial lifecycle is
+    // authoritative the obsolete AO date must not keep governing. Still-retained
+    // AO history is carried forward untouched — `archiveAndPurge` selects purely
+    // by `<= cutoffEnd` with no origin filter, so pre-conversion attendance
+    // leaves in the SAME archive as the cycles that follow it, never separately.
+    if (g.firstSchedulePublishedAt && !g.retentionAnchoredAt) {
+      let boundary = this.cycleEndAfter(
+        fmt(g.firstSchedulePublishedAt),
+        cycleDay,
+        cycles,
+      );
+      // SAME adoption guard as the bootstrap below: never hand a group a
+      // boundary so near/past that the mandatory advance warning cannot fit.
+      // Satisfies "reaching the boundary only creates purge ELIGIBILITY" —
+      // a transition must never cause a same-day, zero-notice purge. Only ever
+      // retains MORE, and the boundary stays a real cycle end.
+      const minBoundary = new Date(todayUtc.getTime() + warnDays * DAY_MS);
+      for (let guard = 0; boundary < minBoundary && guard < 240; guard++) {
+        boundary = this.cycleEndAfter(
+          fmt(new Date(boundary.getTime() + DAY_MS)),
+          cycleDay,
+          1,
+        );
+      }
+      await this.prisma.group.updateMany({
+        // organizationId is in the WHERE as an atomic tenant check, matching
+        // `GroupsRepository.update`. The id alone is a primary key so this is
+        // already exact — but a destructive-path write should never rely on
+        // that alone, and the org is already on the row we loaded, so the
+        // guarantee is free (guidebook §5: every query org-filtered).
+        where: { id: g.id, organizationId: g.organizationId },
+        data: {
+          retentionPurgeThrough: boundary,
+          retentionAnchoredAt: new Date(),
+        },
+      });
+      this.audit.log({
+        organizationId: g.organizationId,
+        targetId: g.id,
+        targetType: 'Group',
+        action: AuditAction.update,
+        metadata: {
+          retentionAuthorityTransition: 'attendanceOnly -> billingCycle',
+          firstSchedulePublishedAt: fmt(g.firstSchedulePublishedAt),
+          billingCycleStartDay: cycleDay,
+          cycles,
+          previousPurgeThrough: g.retentionPurgeThrough
+            ? fmt(g.retentionPurgeThrough)
+            : null,
+          purgeThrough: fmt(boundary),
+        },
+      });
+      this.logger.log(
+        `Retention authority transition group=${g.id} — AO boundary ${
+          g.retentionPurgeThrough ? fmt(g.retentionPurgeThrough) : 'none'
+        } superseded by billing-cycle boundary ${fmt(boundary)} ` +
+          `(published ${fmt(g.firstSchedulePublishedAt)}, cycleDay=${cycleDay ?? 'calendar'})`,
+      );
+      return;
+    }
 
     if (!g.retentionPurgeThrough) {
       let boundary = this.cycleEndAfter(fmt(g.createdAt), cycleDay, cycles);

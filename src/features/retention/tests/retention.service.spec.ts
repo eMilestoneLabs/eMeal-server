@@ -937,4 +937,274 @@ describe('RetentionService (billing-cycle retention)', () => {
     expect(billing.computeOpeningBalances).not.toHaveBeenCalled();
     expect(prisma.attendanceRecord.deleteMany).toHaveBeenCalled();
   });
+  // ── Live-Test-17 — RETENTION AUTHORITY TRANSITION ─────────────────────────
+  //
+  // "Attendance-Only calendar retention governs until the first successful Meal
+  //  schedule publication. At that publication the reviewed Billing Cycle
+  //  becomes the authoritative retention calendar."
+  //
+  // These use the REAL BillingService.resolveCurrentPeriod (the production
+  // calendar engine) instead of the fixed harness mock — re-implementing the
+  // cycle arithmetic inside the test would prove nothing about production.
+  describe('retention authority transition (AO -> billing cycle)', () => {
+    const realPeriod = (todayStr: string, cycleStartDay: number | null) =>
+      (BillingService.prototype as any).resolveCurrentPeriod.call(
+        null,
+        todayStr,
+        cycleStartDay,
+      );
+
+    beforeEach(() => {
+      billing.resolveCurrentPeriod.mockImplementation(realPeriod);
+      jest.useFakeTimers().setSystemTime(new Date('2026-01-16T06:00:00.000Z'));
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    const fmt = (d: Date) => d.toISOString().slice(0, 10);
+
+    it('LT17-RET-01: the canonical 01 Jan -> 14 Apr scenario', async () => {
+      // AO group created 01 Jan froze its boundary at 31 Mar (3 calendar
+      // months). It published its first schedule on 15 Jan with cycle day 15,
+      // so the authoritative lifecycle is 15 Jan -> 14 Apr (three COMPLETE
+      // cycles: 15 Jan-14 Feb, 15 Feb-14 Mar, 15 Mar-14 Apr).
+      prisma.group.findMany.mockResolvedValue([
+        group({
+          createdAt: new Date('2026-01-01T00:00:00.000Z'),
+          billingCycleStartDay: 15,
+          retentionPurgeThrough: new Date('2026-03-31T00:00:00.000Z'),
+          firstSchedulePublishedAt: new Date('2026-01-15T00:00:00.000Z'),
+          retentionAnchoredAt: null,
+        }),
+      ]);
+
+      await service.sweep();
+
+      const data = prisma.group.updateMany.mock.calls[0][0].data;
+      expect(fmt(data.retentionPurgeThrough)).toBe('2026-04-14');
+      expect(data.retentionAnchoredAt).toBeInstanceOf(Date);
+      // The obsolete 31 Mar AO event is superseded, and NOTHING destructive
+      // happens during the handover.
+      expect(prisma.attendanceRecord.deleteMany).not.toHaveBeenCalled();
+      expect(prisma.groupArchive.create).not.toHaveBeenCalled();
+    });
+
+    it('LT17-RET-02: the transition runs EXACTLY ONCE (boundary stays frozen)', async () => {
+      // Already transitioned: the marker must stop it re-running, or the
+      // frozen-boundary guarantee (active cycle unpurgeable) is destroyed.
+      prisma.group.findMany.mockResolvedValue([
+        group({
+          billingCycleStartDay: 15,
+          retentionPurgeThrough: new Date('2026-04-14T00:00:00.000Z'),
+          firstSchedulePublishedAt: new Date('2026-01-15T00:00:00.000Z'),
+          retentionAnchoredAt: new Date('2026-01-16T00:00:00.000Z'),
+        }),
+      ]);
+
+      await service.sweep();
+
+      const reAnchored = prisma.group.updateMany.mock.calls.some(
+        (c: any) => c[0]?.data?.retentionAnchoredAt !== undefined,
+      );
+      expect(reAnchored).toBe(false);
+    });
+
+    it('LT17-RET-03: ON -> publish -> OFF -> ON cannot restart the lifecycle', async () => {
+      // Meals turned OFF after publishing. `firstSchedulePublishedAt` is
+      // monotonic and never cleared, and the group is already anchored — so no
+      // second transition, no restored AO clock, no new 3-cycle countdown.
+      prisma.group.findMany.mockResolvedValue([
+        group({
+          mealPricingEnabled: false, // meals/pricing toggled off afterwards
+          billingCycleStartDay: 15,
+          retentionPurgeThrough: new Date('2026-04-14T00:00:00.000Z'),
+          firstSchedulePublishedAt: new Date('2026-01-15T00:00:00.000Z'),
+          retentionAnchoredAt: new Date('2026-01-16T00:00:00.000Z'),
+        }),
+      ]);
+
+      await service.sweep();
+
+      const touched = prisma.group.updateMany.mock.calls.some(
+        (c: any) => c[0]?.data?.retentionPurgeThrough !== undefined,
+      );
+      expect(touched).toBe(false);
+    });
+
+    it('LT17-RET-04: a DRAFT group keeps its Attendance-Only boundary', async () => {
+      // Meals ON, cycle configured, but never published: toggling meals on is
+      // NOT a financial lifecycle, so the AO clock stays authoritative.
+      prisma.group.findMany.mockResolvedValue([
+        group({
+          billingCycleStartDay: 15,
+          retentionPurgeThrough: new Date('2026-03-31T00:00:00.000Z'),
+          firstSchedulePublishedAt: null,
+          retentionAnchoredAt: null,
+        }),
+      ]);
+
+      await service.sweep();
+
+      const touched = prisma.group.updateMany.mock.calls.some(
+        (c: any) => c[0]?.data?.retentionAnchoredAt !== undefined,
+      );
+      expect(touched).toBe(false);
+    });
+
+    it('LT17-RET-05: adoption never causes a zero-notice purge', async () => {
+      // A group published long ago: the naive boundary lands in the PAST. The
+      // existing adoption guard must walk it forward whole cycles until the
+      // mandatory advance-warning window fits, so raw data is never destroyed
+      // the moment this feature is deployed.
+      prisma.group.findMany.mockResolvedValue([
+        group({
+          createdAt: new Date('2025-01-01T00:00:00.000Z'),
+          billingCycleStartDay: 15,
+          retentionPurgeThrough: new Date('2025-03-31T00:00:00.000Z'),
+          firstSchedulePublishedAt: new Date('2025-01-15T00:00:00.000Z'),
+          retentionAnchoredAt: null,
+        }),
+      ]);
+
+      await service.sweep();
+
+      const boundary = prisma.group.updateMany.mock.calls[0][0].data
+        .retentionPurgeThrough as Date;
+      const minBoundary = new Date(Date.now() + 7 * DAY);
+      expect(boundary.getTime()).toBeGreaterThanOrEqual(minBoundary.getTime());
+      // Still a REAL cycle end: the day after it must be the anchor day.
+      expect(new Date(boundary.getTime() + DAY).getUTCDate()).toBe(15);
+      expect(prisma.attendanceRecord.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('BOUNDARY: cycle day 31 clamps through short months (Feb) via the real engine', async () => {
+      // Anchor-31 published 31 Jan. resolveCurrentPeriod clamps the effective
+      // anchor to each month's last day, so the three cycles must still be
+      // contiguous and land on a real cycle end — no gap, no overlap.
+      prisma.group.findMany.mockResolvedValue([
+        group({
+          createdAt: new Date('2026-01-01T00:00:00.000Z'),
+          billingCycleStartDay: 31,
+          retentionPurgeThrough: new Date('2026-03-31T00:00:00.000Z'),
+          firstSchedulePublishedAt: new Date('2026-01-31T00:00:00.000Z'),
+          retentionAnchoredAt: null,
+        }),
+      ]);
+
+      await service.sweep();
+
+      const boundary = prisma.group.updateMany.mock.calls[0][0].data
+        .retentionPurgeThrough as Date;
+      // The day AFTER the boundary must be the next effective anchor — i.e. the
+      // clamped 31st of that month (28/29/30/31), never an arbitrary date.
+      const next = new Date(boundary.getTime() + DAY);
+      const lastDayOfNextMonth = new Date(
+        Date.UTC(next.getUTCFullYear(), next.getUTCMonth() + 1, 0),
+      ).getUTCDate();
+      expect(next.getUTCDate()).toBe(Math.min(31, lastDayOfNextMonth));
+    });
+
+    it('BOUNDARY: cycle day 1 behaves identically to null (calendar month)', async () => {
+      const run = async (cycleDay: number | null) => {
+        prisma.group.updateMany.mockClear();
+        prisma.group.findMany.mockResolvedValue([
+          group({
+            billingCycleStartDay: cycleDay,
+            retentionPurgeThrough: new Date('2026-03-31T00:00:00.000Z'),
+            firstSchedulePublishedAt: new Date('2026-01-15T00:00:00.000Z'),
+            retentionAnchoredAt: null,
+          }),
+        ]);
+        await service.sweep();
+        return fmt(
+          prisma.group.updateMany.mock.calls[0][0].data.retentionPurgeThrough,
+        );
+      };
+      expect(await run(1)).toBe(await run(null));
+    });
+
+    it('MULTI-TENANT: two groups in different orgs each get their OWN boundary', async () => {
+      prisma.group.findMany.mockResolvedValue([
+        group({
+          id: 'gA',
+          organizationId: 'orgA',
+          billingCycleStartDay: 15,
+          retentionPurgeThrough: new Date('2026-03-31T00:00:00.000Z'),
+          firstSchedulePublishedAt: new Date('2026-01-15T00:00:00.000Z'),
+          retentionAnchoredAt: null,
+        }),
+        group({
+          id: 'gB',
+          organizationId: 'orgB',
+          billingCycleStartDay: 5,
+          retentionPurgeThrough: new Date('2026-03-31T00:00:00.000Z'),
+          firstSchedulePublishedAt: new Date('2026-01-05T00:00:00.000Z'),
+          retentionAnchoredAt: null,
+        }),
+      ]);
+
+      await service.sweep();
+
+      const calls = prisma.group.updateMany.mock.calls;
+      expect(calls).toHaveLength(2);
+      // Each write targets its OWN group id — no cross-group overwrite.
+      expect(calls[0][0].where.id).toBe('gA');
+      expect(calls[1][0].where.id).toBe('gB');
+      // Tenant check is atomic in the WHERE — a group can only ever be
+      // re-anchored within its OWN organization.
+      expect(calls[0][0].where.organizationId).toBe('orgA');
+      expect(calls[1][0].where.organizationId).toBe('orgB');
+      // ...and the boundaries differ, proving each used its own cycle day.
+      expect(fmt(calls[0][0].data.retentionPurgeThrough)).not.toBe(
+        fmt(calls[1][0].data.retentionPurgeThrough),
+      );
+    });
+
+    it('FAIL-CLOSED: after transition, a failed continuity gate still blocks the purge', async () => {
+      // The transition must not weaken any existing destructive-path safeguard.
+      jest.useRealTimers();
+      prisma.attendanceRecord.count.mockResolvedValue(5);
+      finalizedPeriod = {
+        id: 'bp1',
+        periodEnd: new Date(Date.now() + 5 * DAY),
+        totalsSnapshot: null, // missing snapshot => continuity cannot be proven
+      };
+      prisma.group.findMany.mockResolvedValue([
+        group({
+          billingCycleStartDay: 15,
+          retentionPurgeThrough: new Date(Date.now() - 2 * DAY),
+          firstSchedulePublishedAt: new Date('2026-01-15T00:00:00.000Z'),
+          retentionAnchoredAt: new Date('2026-01-16T00:00:00.000Z'), // already transitioned
+        }),
+      ]);
+
+      await service.sweep();
+
+      expect(prisma.attendanceRecord.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('LT17-RET-06: a calendar-month group (no cycle day) transitions too', async () => {
+      // Meals published but the admin never set a cycle day -> calendar month
+      // remains the calendar, anchored from the PUBLISH date, not createdAt.
+      prisma.group.findMany.mockResolvedValue([
+        group({
+          createdAt: new Date('2026-01-01T00:00:00.000Z'),
+          billingCycleStartDay: null,
+          retentionPurgeThrough: new Date('2026-03-31T00:00:00.000Z'),
+          firstSchedulePublishedAt: new Date('2026-01-15T00:00:00.000Z'),
+          retentionAnchoredAt: null,
+        }),
+      ]);
+
+      await service.sweep();
+
+      const boundary = prisma.group.updateMany.mock.calls[0][0].data
+        .retentionPurgeThrough as Date;
+      // Jan + Feb + Mar complete calendar months from the publish month.
+      expect(fmt(boundary)).toBe('2026-03-31');
+      expect(new Date(boundary.getTime() + DAY).getUTCDate()).toBe(1);
+    });
+  });
 });

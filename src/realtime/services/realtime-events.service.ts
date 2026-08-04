@@ -246,7 +246,19 @@ export class RealtimeEventsService {
   emitGroupMemberUpdated(groupId: string, payload: GroupMemberUpdatedPayload): void {
     if (!this.isReady) return;
     this.gateway!.emitToGroup(groupId, 'group.member.updated.v1', payload);
-    this.logger.debug(`group.member.updated.v1 → group:${groupId} action=${payload.action}`);
+    // Live-Test-17 JOIN-01: the AFFECTED member must also receive this in their
+    // OWN room. A member whose join was just approved is by definition NOT in
+    // `group:{groupId}` yet — `AttendanceGateway.handleJoinGroup` requires an
+    // ACTIVE membership, which is exactly what this event announces. Without
+    // the personal room the one person who most needs the transition is the
+    // only one who never learns about it, and their app stays on the
+    // "not joined" screen until it is manually rebuilt.
+    //
+    // Same shape as `emitMemberBlocked` above (group room + user room), same
+    // payload, so no existing subscriber sees anything new: a socket in BOTH
+    // rooms simply receives the frame twice and every consumer is debounced.
+    this.gateway!.emitToUser(payload.userId, 'group.member.updated.v1', payload);
+    this.logger.debug(`group.member.updated.v1 → group:${groupId} + user:${payload.userId} action=${payload.action}`);
   }
 
   /**

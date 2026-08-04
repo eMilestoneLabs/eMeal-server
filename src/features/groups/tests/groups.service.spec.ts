@@ -527,18 +527,23 @@ describe('GroupsService', () => {
     });
   });
 
-  // ── RET-006/007/008/053/054 — one-time billing-cycle change ───────────────
+  // ── LT17-BC — billing cycle: DRAFT-unlimited → first publish → LOCKED ─────
+  //
+  // Supersedes the former one-time `billingCycleChangedAt` privilege (RET-053).
+  // The mandatory First-Publish financial review is now the single decision
+  // gate, so a second post-publish change opportunity no longer exists.
 
-  describe('billing-cycle start day: ONE-TIME change', () => {
-    it('RET-006/053: the FIRST change succeeds and consumes the privilege', async () => {
-      groupsRepo.findById.mockResolvedValue(
-        new GroupEntity({
-          ...mockGroup,
-          billingCycleStartDay: 1,
-          billingCycleChangedAt: null,
-        } as any),
-      );
+  describe('billing-cycle start day: draft-unlimited, locked at first publish', () => {
+    const draftGroup = (day: number | null) =>
+      new GroupEntity({
+        ...mockGroup,
+        mealsEnabled: true,
+        billingCycleStartDay: day,
+        firstSchedulePublishedAt: null,
+      } as any);
 
+    it('LT17-BC-01: a DRAFT group may change the cycle freely (no privilege consumed)', async () => {
+      groupsRepo.findById.mockResolvedValue(draftGroup(1));
       groupsRepo.update.mockResolvedValue(new GroupEntity({ ...mockGroup } as any));
 
       await service.updateGroup('grp_01', 'org_01', 'usr_admin', {
@@ -547,16 +552,96 @@ describe('GroupsService', () => {
 
       const data = groupsRepo.update.mock.calls[0][2];
       expect(data.billingCycleStartDay).toBe(15);
-      // Server-side truth — survives logout/reinstall/cache clear (RET-008).
-      expect(data.billingCycleChangedAt).toBeInstanceOf(Date);
+      // The one-time marker must NO LONGER be written — writing it would
+      // silently re-lock the draft phase on the very next change.
+      expect(data.billingCycleChangedAt).toBeUndefined();
     });
 
-    it('RET-053: a SECOND change is rejected by the backend', async () => {
+    it('LT17-BC-02: a SECOND draft change is still allowed (unlimited while draft)', async () => {
+      // Simulates the group AFTER BC-01: cycle already moved once, never
+      // published. Under the old rule this was a hard 400.
+      groupsRepo.findById.mockResolvedValue(draftGroup(15));
+      groupsRepo.update.mockResolvedValue(new GroupEntity({ ...mockGroup } as any));
+
+      await service.updateGroup('grp_01', 'org_01', 'usr_admin', {
+        mealConfig: { billingCycleStartDay: 8 },
+      } as any);
+
+      expect(groupsRepo.update.mock.calls[0][2].billingCycleStartDay).toBe(8);
+    });
+
+    it('LT17-BC-03: a legacy group that consumed the OLD privilege is draft again', async () => {
+      // `billingCycleChangedAt` is retained for API/DB compatibility but must
+      // no longer gate anything, or client and server would disagree.
       groupsRepo.findById.mockResolvedValue(
         new GroupEntity({
           ...mockGroup,
+          mealsEnabled: true,
           billingCycleStartDay: 15,
           billingCycleChangedAt: new Date('2026-07-01T00:00:00.000Z'),
+          firstSchedulePublishedAt: null,
+        } as any),
+      );
+      groupsRepo.update.mockResolvedValue(new GroupEntity({ ...mockGroup } as any));
+
+      await service.updateGroup('grp_01', 'org_01', 'usr_admin', {
+        mealConfig: { billingCycleStartDay: 10 },
+      } as any);
+
+      expect(groupsRepo.update.mock.calls[0][2].billingCycleStartDay).toBe(10);
+    });
+
+    it('LT17-BC-04: after the FIRST publish the cycle is permanently locked', async () => {
+      groupsRepo.findById.mockResolvedValue(
+        new GroupEntity({
+          ...mockGroup,
+          mealsEnabled: true,
+          billingCycleStartDay: 15,
+          firstSchedulePublishedAt: new Date('2026-08-01T00:00:00.000Z'),
+        } as any),
+      );
+
+      await expect(
+        service.updateGroup('grp_01', 'org_01', 'usr_admin', {
+          mealConfig: { billingCycleStartDay: 10 },
+        } as any),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'BILLING_CYCLE_LOCKED' }),
+      });
+      expect(groupsRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('LT17-BC-05: a NO-OP echo on a LOCKED group still succeeds', async () => {
+      // THE critical regression guard: Flutter PATCHes the WHOLE mealConfig on
+      // every unrelated toggle. If the lock were presence-based instead of
+      // comparison-based, every vacation/guest/meals edit on a published group
+      // would 400.
+      groupsRepo.findById.mockResolvedValue(
+        new GroupEntity({
+          ...mockGroup,
+          mealsEnabled: true,
+          billingCycleStartDay: 15,
+          firstSchedulePublishedAt: new Date('2026-08-01T00:00:00.000Z'),
+        } as any),
+      );
+      groupsRepo.update.mockResolvedValue(new GroupEntity({ ...mockGroup } as any));
+
+      await service.updateGroup('grp_01', 'org_01', 'usr_admin', {
+        mealConfig: { billingCycleStartDay: 15, vacationModeEnabled: false },
+      } as any);
+
+      const data = groupsRepo.update.mock.calls[0][2];
+      expect(data.billingCycleStartDay).toBeUndefined();
+      expect(data.vacationModeEnabled).toBe(false);
+    });
+
+    it('LT17-BC-06: an Attendance-Only group has NO billing cycle', async () => {
+      groupsRepo.findById.mockResolvedValue(
+        new GroupEntity({
+          ...mockGroup,
+          mealsEnabled: false,
+          billingCycleStartDay: null,
+          firstSchedulePublishedAt: null,
         } as any),
       );
 
@@ -566,30 +651,123 @@ describe('GroupsService', () => {
         } as any),
       ).rejects.toMatchObject({
         response: expect.objectContaining({
-          code: 'BILLING_CYCLE_CHANGE_CONSUMED',
+          code: 'BILLING_CYCLE_NOT_APPLICABLE',
         }),
       });
       expect(groupsRepo.update).not.toHaveBeenCalled();
     });
 
-    it('RET-007/054: a NO-OP submit does not consume the privilege', async () => {
+    it('LT17-BC-07: the AO gate reads the EFFECTIVE mode, not the stored one', async () => {
+      // meals ON in the DB, turned OFF in this same patch → the group ends up
+      // Attendance-Only, so the cycle change must be rejected.
+      groupsRepo.findById.mockResolvedValue(draftGroup(1));
+
+      await expect(
+        service.updateGroup('grp_01', 'org_01', 'usr_admin', {
+          mealConfig: { mealsEnabled: false, billingCycleStartDay: 10 },
+        } as any),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({
+          code: 'BILLING_CYCLE_NOT_APPLICABLE',
+        }),
+      });
+    });
+
+    it('BOUNDARY: cycle day 1 and 28 are both accepted while draft', async () => {
+      for (const day of [1, 28]) {
+        groupsRepo.update.mockClear();
+        groupsRepo.findById.mockResolvedValue(draftGroup(15));
+        groupsRepo.update.mockResolvedValue(new GroupEntity({ ...mockGroup } as any));
+        await service.updateGroup('grp_01', 'org_01', 'usr_admin', {
+          mealConfig: { billingCycleStartDay: day },
+        } as any);
+        expect(groupsRepo.update.mock.calls[0][2].billingCycleStartDay).toBe(day);
+      }
+    });
+
+    it('BOUNDARY: null (calendar month) -> a day, and back to null, both work while draft', async () => {
+      // null is a REAL configured value (calendar month), not "unset".
+      groupsRepo.findById.mockResolvedValue(draftGroup(null));
+      groupsRepo.update.mockResolvedValue(new GroupEntity({ ...mockGroup } as any));
+      await service.updateGroup('grp_01', 'org_01', 'usr_admin', {
+        mealConfig: { billingCycleStartDay: 15 },
+      } as any);
+      expect(groupsRepo.update.mock.calls[0][2].billingCycleStartDay).toBe(15);
+    });
+
+    it('CORNER: null -> null is a NO-OP even on a locked group', async () => {
+      // Both sides normalise through `?? null`, so an undefined/null echo from a
+      // calendar-month group must not read as a change.
       groupsRepo.findById.mockResolvedValue(
         new GroupEntity({
           ...mockGroup,
-          billingCycleStartDay: 1,
-          billingCycleChangedAt: null,
+          mealsEnabled: true,
+          billingCycleStartDay: null,
+          firstSchedulePublishedAt: new Date('2026-08-01T00:00:00.000Z'),
         } as any),
       );
-
       groupsRepo.update.mockResolvedValue(new GroupEntity({ ...mockGroup } as any));
 
       await service.updateGroup('grp_01', 'org_01', 'usr_admin', {
-        mealConfig: { billingCycleStartDay: 1 },
+        mealConfig: { billingCycleStartDay: null },
       } as any);
 
-      const data = groupsRepo.update.mock.calls[0][2];
-      expect(data.billingCycleChangedAt).toBeUndefined();
-      expect(data.billingCycleStartDay).toBeUndefined();
+      expect(groupsRepo.update).toHaveBeenCalled();
+      expect(groupsRepo.update.mock.calls[0][2].billingCycleStartDay).toBeUndefined();
+    });
+
+    it('CORNER: ON -> publish -> OFF -> ON keeps the cycle LOCKED (no draft reset)', async () => {
+      // The toggle-abuse bypass. `firstSchedulePublishedAt` is monotonic, so a
+      // meals OFF/ON round trip must never mint a second draft phase.
+      groupsRepo.findById.mockResolvedValue(
+        new GroupEntity({
+          ...mockGroup,
+          mealsEnabled: true, // toggled back ON after the publish
+          billingCycleStartDay: 15,
+          firstSchedulePublishedAt: new Date('2026-08-01T00:00:00.000Z'),
+        } as any),
+      );
+
+      await expect(
+        service.updateGroup('grp_01', 'org_01', 'usr_admin', {
+          mealConfig: { mealsEnabled: true, billingCycleStartDay: 9 },
+        } as any),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'BILLING_CYCLE_LOCKED' }),
+      });
+    });
+
+    it('MULTI-TENANT: the org from the JWT is what reaches the repository', async () => {
+      groupsRepo.findById.mockResolvedValue(draftGroup(1));
+      groupsRepo.update.mockResolvedValue(new GroupEntity({ ...mockGroup } as any));
+
+      await service.updateGroup('grp_01', 'org_01', 'usr_admin', {
+        mealConfig: { billingCycleStartDay: 15 },
+      } as any);
+
+      expect(groupsRepo.findById).toHaveBeenCalledWith('grp_01', 'org_01');
+      expect(groupsRepo.update.mock.calls[0][1]).toBe('org_01');
+    });
+
+    it('LT17-BC-08: a NO-OP echo from an AO group is never rejected', async () => {
+      // A legacy AO group that still stores a cycle day keeps re-sending it on
+      // every unrelated toggle — that must not 400.
+      groupsRepo.findById.mockResolvedValue(
+        new GroupEntity({
+          ...mockGroup,
+          mealsEnabled: false,
+          billingCycleStartDay: 12,
+          firstSchedulePublishedAt: null,
+        } as any),
+      );
+      groupsRepo.update.mockResolvedValue(new GroupEntity({ ...mockGroup } as any));
+
+      await service.updateGroup('grp_01', 'org_01', 'usr_admin', {
+        mealConfig: { billingCycleStartDay: 12, vacationModeEnabled: true },
+      } as any);
+
+      expect(groupsRepo.update).toHaveBeenCalled();
+      expect(groupsRepo.update.mock.calls[0][2].billingCycleStartDay).toBeUndefined();
     });
   });
 

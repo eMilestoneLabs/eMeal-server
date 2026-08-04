@@ -570,31 +570,66 @@ export class GroupsService {
       // Pass 12 (FR-BILLX-020): billing cycle start day (null = calendar
       // month) — validated 1–28 by the DTO, audited below (LOOP-033/GAP-021).
       if (mc.billingCycleStartDay !== undefined) {
-        // ── ONE-TIME billing-cycle change (retention anchor) ────────────────
-        // The billing cycle is the retention anchor: every purge boundary is
-        // derived from it. Letting an admin move it repeatedly would keep
-        // reshaping which dates belong to which cycle, so the change is
-        // allowed exactly ONCE per group and the fact is persisted here —
-        // never in the client. Reinstalling the app, clearing cache or
-        // logging out cannot restore the privilege.
+        // ── DRAFT-UNLIMITED → FIRST PUBLISH → PERMANENTLY LOCKED ────────────
+        // Live-Test-17 ISSUE-3 (user-locked lifecycle). The billing cycle is
+        // the group's financial + retention anchor:
         //
-        // A no-op write (same value) is NOT a change and never consumes it.
+        //   • While the group has NEVER published a meal schedule the whole
+        //     financial configuration is a DRAFT — the admin may re-configure
+        //     the cycle as many times as needed. No finalized history exists
+        //     to reinterpret, and the mandatory First-Publish review is the
+        //     one deliberate confirmation gate.
+        //   • The FIRST successful publish is the irreversible financial
+        //     milestone: from that instant the cycle is permanent, exactly
+        //     like the Meal-Pricing ON/OFF mode it was reviewed alongside.
+        //     Both locks read the SAME monotonic `firstSchedulePublishedAt`
+        //     stamp, so a Meals OFF→ON toggle can never mint a second draft
+        //     phase (the stamp is never cleared — see
+        //     GroupsRepository.markFirstSchedulePublished).
+        //   • Attendance-Only groups have NO financial billing cycle at all;
+        //     their retention follows the calendar-month lifecycle instead.
+        //
+        // This REPLACES the former one-time `billingCycleChangedAt` privilege
+        // (two decision opportunities defeated the purpose of the mandatory
+        // review). The column is retained for API/DB compatibility and is
+        // still serialized as `billingCycleChangeUsed`; it is simply no longer
+        // written and no longer gates anything.
+        //
+        // A no-op write (same value) is NOT a change and never trips a gate —
+        // the Flutter client PATCHes the WHOLE mealConfig on every unrelated
+        // toggle, so this comparison MUST come first.
         const currentDay = (existing as any).billingCycleStartDay ?? null;
         const nextDay = mc.billingCycleStartDay ?? null;
         if (nextDay !== currentDay) {
-          if ((existing as any).billingCycleChangedAt) {
+          // Evaluated on the FINAL EFFECTIVE mode (patch value ?? stored), so
+          // a single PATCH that turns meals OFF *and* moves the cycle is
+          // judged by the mode the group actually ends up in.
+          const effMealsEnabled =
+            (updateData.mealsEnabled as boolean | undefined) ??
+            existing.mealsEnabled;
+          if (effMealsEnabled !== true) {
             throw new BadRequestException({
               message:
-                'The billing cycle start day has already been changed and cannot be changed again',
-              code: 'BILLING_CYCLE_CHANGE_CONSUMED',
+                'Attendance-Only groups have no billing cycle. Enable the meal system first.',
+              code: 'BILLING_CYCLE_NOT_APPLICABLE',
               errors: {
                 billingCycleStartDay:
-                  'This group already used its one-time billing cycle change',
+                  'A billing cycle applies only to meal-enabled groups',
+              },
+            });
+          }
+          if ((existing as any).firstSchedulePublishedAt) {
+            throw new BadRequestException({
+              message:
+                'The billing cycle was finalized when this group published its first meal schedule and can no longer be changed.',
+              code: 'BILLING_CYCLE_LOCKED',
+              errors: {
+                billingCycleStartDay:
+                  'This group reviewed and confirmed its billing cycle before its first publish; it is now permanent',
               },
             });
           }
           updateData.billingCycleStartDay = mc.billingCycleStartDay;
-          updateData.billingCycleChangedAt = new Date();
         }
       }
       if (mc.mealPricingEnabled !== undefined) updateData.mealPricingEnabled = mc.mealPricingEnabled;

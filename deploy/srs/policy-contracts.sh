@@ -371,32 +371,42 @@ else
   skip "RET-034 archive availability" "(archives HTTP $R_CODE)" "RET-034"
 fi
 
-# RET-053 (WRITE, self-restoring): a SECOND cycle-day change must be rejected
-# by the BACKEND. Only runs on a group that has ALREADY consumed its change —
-# it never consumes a fresh group's one-time privilege.
+# RET-053 (WRITE, self-restoring): SUPERSEDED BY Live-Test-17 ISSUE-3.
+# The one-time `billingCycleChangeUsed` privilege no longer gates anything:
+# the cycle is DRAFT (freely changeable) until the group's first successful
+# schedule publish, then PERMANENTLY locked. The authority flag is therefore
+# `mealPricingLocked` (both locks are the same firstSchedulePublishedAt event).
 if [ "$WRITE_TESTS" = "1" ] && [ -n "$GRP" ]; then
   req GET "/groups/$GRP" "" "$ADMIN_TOKEN"
-  _used="$(jbody '.mealConfig.billingCycleChangeUsed')"
+  _locked="$(jbody '.mealConfig.mealPricingLocked')"
+  _meals="$(jbody '.mealConfig.mealsEnabled')"
   _cur="$(jbody '.mealConfig.billingCycleStartDay // 1')"
-  if [ "$_used" = "true" ]; then
-    _try=$(( _cur == 7 ? 9 : 7 ))
+  _try=$(( _cur == 7 ? 9 : 7 ))
+  if [ "$_meals" != "true" ]; then
+    # LT17-BC-06: an Attendance-Only group has NO billing cycle at all.
     req PATCH "/groups/$GRP/meal-config" "{\"billingCycleStartDay\":$_try}" "$ADMIN_TOKEN"
-    [ "$R_CODE" = "400" ]       && ok "RET-053 second cycle-day change rejected by backend" "(HTTP 400)" "RET-053"       || no "RET-053 second cycle-day change rejected by backend" "expected 400, got $R_CODE" "RET-053"
+    [ "$R_CODE" = "400" ]       && ok "LT17-BC-06 AO group rejects a billing-cycle change" "(HTTP 400)" "RET-053"       || no "LT17-BC-06 AO group rejects a billing-cycle change" "expected 400, got $R_CODE" "RET-053"
+  elif [ "$_locked" = "true" ]; then
+    # LT17-BC-04: published group -> permanently locked.
+    req PATCH "/groups/$GRP/meal-config" "{\"billingCycleStartDay\":$_try}" "$ADMIN_TOKEN"
+    [ "$R_CODE" = "400" ]       && ok "LT17-BC-04 published group rejects a cycle change" "(HTTP 400 BILLING_CYCLE_LOCKED)" "RET-053"       || no "LT17-BC-04 published group rejects a cycle change" "expected 400, got $R_CODE" "RET-053"
   else
-    skip "RET-053 second cycle-day change" "(group has NOT used its one-time change; refusing to consume it)" "RET-053"
+    # LT17-BC-02: draft group -> unlimited changes. Self-restoring: move it and
+    # immediately move it back, so the group's configuration is unchanged.
+    req PATCH "/groups/$GRP/meal-config" "{\"billingCycleStartDay\":$_try}" "$ADMIN_TOKEN"
+    _first="$R_CODE"
+    req PATCH "/groups/$GRP/meal-config" "{\"billingCycleStartDay\":$_cur}" "$ADMIN_TOKEN"
+    _second="$R_CODE"
+    { [ "$_first" = "200" ] || [ "$_first" = "201" ]; } && { [ "$_second" = "200" ] || [ "$_second" = "201" ]; }       && ok "LT17-BC-02 draft group allows repeated cycle changes" "(restored to $_cur)" "RET-053"       || no "LT17-BC-02 draft group allows repeated cycle changes" "first=$_first second=$_second" "RET-053"
   fi
 
-  # RET-007/054: a NO-OP submit must never consume the privilege.
+  # LT17-BC-05 / RET-007/054: a NO-OP echo must ALWAYS succeed. Flutter resends
+  # the whole mealConfig on every unrelated toggle, so a presence-based lock
+  # here would 400 every vacation/guest/meals edit on a published group.
   req PATCH "/groups/$GRP/meal-config" "{\"billingCycleStartDay\":$_cur}" "$ADMIN_TOKEN"
-  if [ "$R_CODE" = "200" ]; then
-    req GET "/groups/$GRP" "" "$ADMIN_TOKEN"
-    _after="$(jbody '.mealConfig.billingCycleChangeUsed')"
-    [ "$_after" = "$_used" ]       && ok "RET-007/054 no-op cycle submit does not consume the privilege" "(used=$_after)" "RET-054"       || no "RET-007/054 no-op cycle submit consumed the privilege" "was $_used now $_after" "RET-054"
-  else
-    skip "RET-007/054 no-op cycle submit" "(PATCH HTTP $R_CODE)" "RET-054"
-  fi
+  { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; }     && ok "LT17-BC-05 no-op cycle echo always accepted" "(HTTP $R_CODE)" "RET-054"     || no "LT17-BC-05 no-op cycle echo always accepted" "expected 200, got $R_CODE" "RET-054"
 else
-  skip "RET-053/054 cycle-change probes" "(WRITE_TESTS=1 to enable; self-restoring)" "RET-053,RET-054"
+  skip "LT17-BC cycle-lifecycle probes" "(WRITE_TESTS=1 to enable; self-restoring)" "RET-053,RET-054"
 fi
 
 tag "RET-045" MANUAL "3 complete cycles -> warn -> purge -> cycle 4 opening == cycle 3 closing (long-running; verify on a seeded group)"

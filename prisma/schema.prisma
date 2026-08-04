@@ -261,10 +261,28 @@ model Group {
   // successful purge it advances by exactly 3 cycles.
   retentionPurgeThrough DateTime?
 
-  // One-time billing-cycle-start-day change (per group). Null = the admin may
-  // still change it once; set = the privilege is permanently consumed.
-  // Server-side truth — reinstalling the app or clearing cache cannot restore it.
+  // Live-Test-17 ISSUE-3: SUPERSEDED. Recorded the former one-time
+  // billing-cycle-change privilege. The lifecycle is now DRAFT-unlimited until
+  // the first successful publish, then permanently locked, so this no longer
+  // gates anything. RETAINED (never dropped, never backfilled) so historical
+  // rows stay intact and `mealConfig.billingCycleChangeUsed` keeps serializing
+  // for older app builds.
   billingCycleChangedAt DateTime?
+
+  // ── RETENTION AUTHORITY TRANSITION (Live-Test-17) ──────────────────────────
+  // Instant at which this group's retention calendar was re-anchored from the
+  // Attendance-Only calendar-month lifecycle to its authoritative BILLING-CYCLE
+  // lifecycle, i.e. the first sweep after `firstSchedulePublishedAt` was set.
+  //
+  // Null = the transition has not happened yet (AO calendar still governs).
+  // It exists so the transition is performed EXACTLY ONCE: without an explicit
+  // marker the sweep could not distinguish "needs re-anchoring" from "already
+  // re-anchored", and would recompute the FROZEN boundary on every pass —
+  // destroying the freeze guarantee that makes the active cycle unpurgeable.
+  //
+  // Additive, nullable, no backfill, no index (it is only ever read on rows the
+  // sweep has already loaded).
+  retentionAnchoredAt DateTime?
 
   // Live-Test-16 ISSUE-1: instant of this group's FIRST successful meal
   // schedule publication. It is the permanent Meal-Pricing locking event —
