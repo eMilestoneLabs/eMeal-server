@@ -393,6 +393,8 @@ if [ "$WRITE_TESTS" = "1" ] && [ -n "$GRP" ]; then
   _cur="$(jbody '.mealConfig.billingCycleStartDay')"
   [ -z "$_cur" ] && _cur=null
   _cur_num="$(jbody '.mealConfig.billingCycleStartDay // 1')"
+  _vac="$(jbody '.mealConfig.vacationModeEnabled')"
+  { [ "$_vac" = "true" ] || [ "$_vac" = "false" ]; } || _vac=false
   _try=$(( _cur_num == 7 ? 9 : 7 ))
   if [ "$_meals" != "true" ]; then
     # LT17-BC-06: an Attendance-Only group has NO billing cycle at all.
@@ -415,8 +417,16 @@ if [ "$WRITE_TESTS" = "1" ] && [ -n "$GRP" ]; then
   # LT17-BC-05 / RET-007/054: a NO-OP echo must ALWAYS succeed. Flutter resends
   # the whole mealConfig on every unrelated toggle, so a presence-based lock
   # here would 400 every vacation/guest/meals edit on a published group.
-  req PATCH "/groups/$GRP/meal-config" "{\"billingCycleStartDay\":$_cur}" "$ADMIN_TOKEN"
-  { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; }     && ok "LT17-BC-05 no-op cycle echo always accepted" "(HTTP $R_CODE)" "RET-054"     || no "LT17-BC-05 no-op cycle echo always accepted" "expected 200, got $R_CODE" "RET-054"
+  # Mirror what the CLIENT actually sends: Flutter PATCHes the WHOLE mealConfig
+  # on every unrelated toggle, so the cycle day always travels ALONGSIDE other
+  # fields. A body whose ONLY field is a no-op leaves `updateData` empty, and
+  # `GroupsRepository.update` maps a 0-row updateMany to NotFoundException (404).
+  # That is a PRE-EXISTING edge of the repo contract, unreachable from the app —
+  # probing it would test an artefact of the probe, not the lock. Echo the cycle
+  # day together with vacationModeEnabled at its CURRENT value: nothing changes,
+  # and the real client-shaped path is exercised.
+  req PATCH "/groups/$GRP/meal-config" "{\"billingCycleStartDay\":$_cur,\"vacationModeEnabled\":$_vac}" "$ADMIN_TOKEN"
+  { [ "$R_CODE" = "200" ] || [ "$R_CODE" = "201" ]; }     && ok "LT17-BC-05 no-op cycle echo always accepted" "(HTTP $R_CODE, client-shaped body)" "RET-054"     || no "LT17-BC-05 no-op cycle echo always accepted" "expected 200, got $R_CODE" "RET-054"
 else
   skip "LT17-BC cycle-lifecycle probes" "(WRITE_TESTS=1 to enable; self-restoring)" "RET-053,RET-054"
 fi
