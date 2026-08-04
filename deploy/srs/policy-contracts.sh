@@ -167,7 +167,12 @@ if [ "$WRITE_TESTS" = "1" ] && [ -n "$GRP" ]; then
   SUF="$RANDOM"
 
   # LT11-015: slotKey normalization (trim + whitespace-collapse + lowercase).
-  req POST /meals "{\"groupId\":\"$GRP\",\"slotKey\":\"  LT11  NORM $SUF \",\"name\":\"LT11 Norm $SUF\"}" "$ADMIN_TOKEN"
+  # Live-Test-16 made the attendance window MANDATORY on meal create (commit
+  # 2af3c4d). This LT-11 probe predates that rule and was still posting a
+  # window-less meal, so the 422 it received was the product correctly
+  # enforcing a NEWER rule — a stale-probe FALSE FAIL, not a defect
+  # (guidebook §9 rule 11). Same-day window added; slotKey assertion unchanged.
+  req POST /meals "{\"groupId\":\"$GRP\",\"slotKey\":\"  LT11  NORM $SUF \",\"name\":\"LT11 Norm $SUF\",\"attendanceWindow\":{\"openTime\":\"07:00\",\"closeTime\":\"09:00\"}}" "$ADMIN_TOKEN"
   TMP_MEAL=""
   if [ "$R_CODE" = "201" ] || [ "$R_CODE" = "200" ]; then
     TMP_MEAL="$(jbody '.id // .data.id // empty')"
@@ -380,8 +385,15 @@ if [ "$WRITE_TESTS" = "1" ] && [ -n "$GRP" ]; then
   req GET "/groups/$GRP" "" "$ADMIN_TOKEN"
   _locked="$(jbody '.mealConfig.mealPricingLocked')"
   _meals="$(jbody '.mealConfig.mealsEnabled')"
-  _cur="$(jbody '.mealConfig.billingCycleStartDay // 1')"
-  _try=$(( _cur == 7 ? 9 : 7 ))
+  # jq's `//` treats NULL as "missing" and substitutes the fallback — so on a
+  # calendar-month group (day = null) `// 1` yields 1, and echoing 1 back is a
+  # REAL change (null -> 1), not the no-op this probe intends. That produced a
+  # FALSE FAIL against a correctly-locked group. Keep the raw value for the
+  # echo; use the numeric fallback ONLY to pick a different day to attempt.
+  _cur="$(jbody '.mealConfig.billingCycleStartDay')"
+  [ -z "$_cur" ] && _cur=null
+  _cur_num="$(jbody '.mealConfig.billingCycleStartDay // 1')"
+  _try=$(( _cur_num == 7 ? 9 : 7 ))
   if [ "$_meals" != "true" ]; then
     # LT17-BC-06: an Attendance-Only group has NO billing cycle at all.
     req PATCH "/groups/$GRP/meal-config" "{\"billingCycleStartDay\":$_try}" "$ADMIN_TOKEN"
