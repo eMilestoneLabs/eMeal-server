@@ -30,6 +30,12 @@ describe('BillingService adjustments (Pass 12)', () => {
         findFirst: jest.fn().mockResolvedValue({
           id: 'g1',
           organization: { timezone: 'Asia/Kolkata' },
+          // Live-Test-15 ISSUE-2: these adjustment cases all model a BILLABLE
+          // group. Meal Pricing is now the master gate for meal billing, so the
+          // fixture must state it explicitly — otherwise every case would fail
+          // on BILLING_NOT_APPLICABLE, which is a fixture gap, not a defect.
+          mealsEnabled: true,
+          mealPricingEnabled: true,
         }),
       },
       groupMember: { findFirst: jest.fn().mockResolvedValue({ userId: 'u1' }) },

@@ -21,6 +21,9 @@
  *      date (true date-based / Day-Wise planning).
  *   2. Fallback: the most recent published schedule → entries matching the
  *      weekday (SCH-011 recurring weekly continuation).
+ *   2b. DAY-WISE GROUPS ONLY (Live-Test-15 ISSUE-1): the latest published
+ *      calendar day strictly before the date — the rolling Day-Wise
+ *      carry-forward baseline. Never reached by Weekly groups.
  * Rows published before the snapshot column existed (null snapshot) fall back
  * to their live entries — safe, because before snapshots a published row
  * could not also hold an unsynced draft (live == published).
@@ -28,6 +31,71 @@
  * Prisma is passed in (same pattern as vacation-coverage.util) so workers,
  * repositories and services can all share it without new DI wiring.
  */
+
+/**
+ * P-01 (Live-Test-15) — CONFIGURATION-FROZEN MARKER.
+ *
+ * `configurationFrozen: true` means this published entry carries the COMPLETE
+ * effective configuration resolved at publish time — including the preference
+ * block below — so no reader ever needs live Master state for it.
+ *
+ * Entries WITHOUT the marker predate full snapshotting: no earlier build ever
+ * froze preference configuration, and there is NO authoritative historical
+ * source from which it could be recovered (audit logs store deltas only;
+ * AttendancePreferenceSelection records what members CHOSE, never what was
+ * OFFERED). Those entries therefore keep resolving exactly as they always
+ * have — they are never reconstructed from today's Master, which would
+ * fabricate historical Published truth. Only an explicit admin
+ * Publish/Republish freezes a schedule's configuration.
+ */
+
+/** One frozen preference option — mirrors PreferenceOption at publish time. */
+export interface PublishedPreferenceOption {
+  /** PreferenceOption row id — the Flutter option model parses it. */
+  id: string;
+  key: string;
+  label: string;
+  emoji: string | null;
+  color: string | null;
+  isVeg: boolean;
+  priceDelta: number;
+  minQty: number;
+  maxQty: number;
+  order: number;
+}
+
+/** One frozen preference group — mirrors EffectivePreferenceGroup at publish time. */
+export interface PublishedPreferenceGroup {
+  id: string;
+  label: string;
+  /** Student-facing helper text — part of the rendered payload. */
+  description: string | null;
+  order: number;
+  selectionType: string;
+  minSelect: number;
+  maxSelect: number;
+  required: boolean;
+  quantityEnabled: boolean;
+  vegOnly: boolean;
+  visibleWhen: { groupId: string; optionKey: string } | null;
+  options: PublishedPreferenceOption[];
+}
+
+/**
+ * The complete effective preference configuration of ONE published meal-day,
+ * resolved at publish time (master ⊕ per-day override) and frozen. Readers use
+ * this INSTEAD of re-resolving against live master state.
+ */
+export interface PublishedPreferenceSnapshot {
+  /** Effective per-day on/off (entry override ?? master meal flag). */
+  enabled: boolean;
+  /** 'group' = ≥1 active preference group bound; 'standalone' = flat tags. */
+  mode: 'group' | 'standalone';
+  /** Flat standalone tags (empty in group mode or when disabled). */
+  tags: string[];
+  /** Fully resolved groups incl. options, pick rules and price deltas. */
+  groups: PublishedPreferenceGroup[];
+}
 
 /** Frozen master-meal metadata captured inside the published snapshot. */
 export interface PublishedDayMealSnapshot {
@@ -58,6 +126,25 @@ export interface PublishedDayEntry {
   price: number | null;
   /** Master-meal metadata frozen at publish time (null on legacy live rows without join). */
   meal: PublishedDayMealSnapshot | null;
+  /**
+   * P-01: true when this entry carries the COMPLETE effective configuration
+   * frozen at publish time. Readers MUST branch on this:
+   *   true  → resolve every published-effective field from the snapshot;
+   *   false → predates full snapshotting, keep the historical resolution.
+   */
+  configurationFrozen: boolean;
+  /** Frozen effective preference configuration — null when not frozen. */
+  preference: PublishedPreferenceSnapshot | null;
+  /**
+   * P-01: the planner mode this day was PUBLISHED in. Recorded alongside the
+   * frozen configuration so the Day-Wise carry-forward is decided by the
+   * PUBLISHED schedule rather
+   * than the group's LIVE mode flag — the flag flips the moment an admin
+   * switches modes, i.e. BEFORE the new mode is published, and letting it
+   * drive published resolution is the same leak P-01 exists to close.
+   * Null on entries that predate the freeze, which keep the live-flag path.
+   */
+  plannerMode: 'WEEKLY' | 'DAY_WISE' | null;
 }
 
 /** Meal join used for legacy (null-snapshot) rows — mirrors snapshotFromEntries. */
@@ -76,6 +163,11 @@ const LEGACY_MEAL_SELECT = {
 
 type PrismaLike = {
   mealSchedule: {
+    findFirst: (args: unknown) => Promise<any>;
+  };
+  /** Optional so partial test doubles (and legacy callers) still work: an
+   *  absent delegate simply skips the Day-Wise carry-forward step. */
+  group?: {
     findFirst: (args: unknown) => Promise<any>;
   };
 };
@@ -116,6 +208,15 @@ function normalizeEntry(raw: any): PublishedDayEntry & {
     menuItems: raw.menuItems ?? [],
     price: raw.price ?? null,
     meal: normalizeMeal(raw.meal),
+    // P-01: the entry is self-describing.
+    // Both conditions are required — the marker alone must never promote an
+    // entry whose configuration block failed to resolve.
+    configurationFrozen: raw.configurationFrozen === true && !!raw.preference,
+    preference: raw.preference ?? null,
+    plannerMode:
+      raw.plannerMode === 'WEEKLY' || raw.plannerMode === 'DAY_WISE'
+        ? raw.plannerMode
+        : null,
   };
 }
 
@@ -128,6 +229,33 @@ function publishedEntriesOf(row: any): Array<ReturnType<typeof normalizeEntry>> 
 }
 
 /**
+ * Live-Test-15 ISSUE-1 (user-locked) — DAY-WISE CARRY-FORWARD.
+ *
+ * Pure selector: from [candidates], return every entry belonging to the LATEST
+ * published calendar date STRICTLY BEFORE [beforeMs]. That day is the group's
+ * current carry-forward baseline:
+ *
+ *   "NO NEW PUBLISHED CHANGE → LAST EFFECTIVE PUBLISHED DAY CONTINUES FORWARD.
+ *    NEW PUBLISHED CHANGE  → THAT DAY BECOMES THE NEW BASELINE."
+ *
+ * Entries with no resolvable date (legacy weekday-only rows) are ignored — they
+ * are already served by the weekday-recurring fallback. No query, no I/O; the
+ * caller supplies rows it has already fetched.
+ */
+function carryForwardEntries(
+  candidates: ReadonlyArray<ReturnType<typeof normalizeEntry>>,
+  beforeMs: number,
+): Array<ReturnType<typeof normalizeEntry>> {
+  let baselineMs: number | null = null;
+  for (const e of candidates) {
+    if (e.dateMs === null || e.dateMs >= beforeMs) continue;
+    if (baselineMs === null || e.dateMs > baselineMs) baselineMs = e.dateMs;
+  }
+  if (baselineMs === null) return [];
+  return candidates.filter((e) => e.dateMs === baselineMs);
+}
+
+/**
  * Resolve the published day entries for (group, date) as Map<mealId, entry>.
  * Empty map = no published schedule governs the date (caller falls back to
  * master meal config — unchanged behaviour for non-planner groups).
@@ -136,7 +264,22 @@ function publishedEntriesOf(row: any): Array<ReturnType<typeof normalizeEntry>> 
  */
 export async function resolvePublishedDayEntries(
   prisma: PrismaLike,
-  params: { groupId: string; organizationId: string; dateStr: string },
+  params: {
+    groupId: string;
+    organizationId: string;
+    dateStr: string;
+    /**
+     * OPTIONAL, purely additive: the group's planner mode when the CALLER
+     * already holds it. Supplied ⇒ the miss-path group lookup below is skipped
+     * entirely. Omitted ⇒ identical behaviour to before this parameter existed,
+     * so every existing call site is unaffected.
+     *
+     * Worth passing wherever the group row is already in hand — most of all in
+     * the sweeps, which call this once PER GROUP inside a loop, so a redundant
+     * lookup there multiplies by the number of groups in the org.
+     */
+    dayWiseMealsEnabled?: boolean | null;
+  },
 ): Promise<Map<string, PublishedDayEntry>> {
   const { groupId, organizationId, dateStr } = params;
   const [yy, mm, dd] = dateStr.split('-').map(Number);
@@ -159,13 +302,100 @@ export async function resolvePublishedDayEntries(
 
   // 2) Fallback: most recent published schedule, matched by weekday (recurring)
   // — byte-identical to the /meals/today overlay's historical fallback.
+  let latestRow: any = null;
   if (entries.length === 0) {
-    const latest = await prisma.mealSchedule.findFirst({
+    latestRow = await prisma.mealSchedule.findFirst({
       where: { groupId, organizationId, publishedAt: { not: null } },
       orderBy: { weekStart: 'desc' },
       include,
     });
-    entries = publishedEntriesOf(latest).filter((e) => e.dayOfWeek === dow);
+    entries = publishedEntriesOf(latestRow).filter((e) => e.dayOfWeek === dow);
+  }
+
+  // 2b) DAY-WISE CARRY-FORWARD (Live-Test-15 ISSUE-1, user-locked rule).
+  //
+  // Day-Wise mode publishes a ROLLING Today+Tomorrow window. Once the calendar
+  // advances past the last published date the admin must NOT be forced to
+  // re-publish merely to keep an unchanged menu running, so the day inherits
+  // the latest effective PUBLISHED day before it. Publishing a new Tomorrow
+  // automatically makes that day the new baseline for every later day.
+  //
+  // WEEKLY IS PROVABLY UNTOUCHED — this is gated on the group's Day-Wise flag
+  // AND only reached when steps 1 and 2 both found nothing. A weekly day that
+  // was deliberately published with no meals therefore stays empty, exactly as
+  // before. Test doubles without the `group` relation optional-chain to
+  // `undefined` ⇒ false ⇒ this step is skipped ⇒ legacy behaviour preserved.
+  //
+  // DRAFT WALL: reads `publishedSnapshot` only (via publishedEntriesOf), so an
+  // unpublished Tomorrow edit can never become the carry-forward baseline.
+  //
+  // COST: reuses the two rows already loaded above — ZERO extra queries.
+  // Both are considered because the baseline may sit in the target's own week
+  // row (past-date reads) or in the most recent published week (the normal
+  // rolling case).
+  if (entries.length === 0) {
+    // COST NOTE (measured against the real client, not assumed): this project
+    // runs Prisma 5.10 WITHOUT the `relationJoins` preview feature, so a
+    // relation `select` inside an `include` is executed as a SEPARATE QUERY,
+    // never as a SQL JOIN. Carrying the group's planner mode on the include
+    // above would therefore have added a round-trip to EVERY resolver call —
+    // /meals/today, attendance marking, guest booking, vacation coverage and
+    // four worker sweeps — breaking the one-wave read law (guidebook §3b).
+    //
+    // So the mode is read HERE instead: only after steps 1 and 2 both missed,
+    // which is precisely the path that was about to fall back to the Master
+    // template anyway. A Weekly group with a published day never reaches this
+    // line, so the hot path costs exactly what it did before this feature.
+    // Guard the METHOD, not just the delegate. Several callers (workers,
+    // repositories, test doubles) pass a PARTIAL prisma-like object that
+    // defines `group.findMany` but no `findFirst`; `prisma.group?.findFirst()`
+    // would then throw "not a function" and take the whole sweep down with it.
+    // An absent delegate simply skips the Day-Wise step — the same fail-safe
+    // the rest of this resolver uses.
+    // ORDER MATTERS. Resolve the ANSWER first, the MODE second. carryForward
+    // reads only rows already in memory, and returns [] whenever no published
+    // day precedes the target date — the case for every group that has never
+    // published at all (attendance-only, brand-new, or simply not using the
+    // planner). For those the mode cannot change the outcome, so asking the
+    // database for it is pure waste on a read path shared by /meals/today,
+    // attendance marking, guest booking, vacation coverage and the sweeps.
+    const carried = carryForwardEntries(
+      [...publishedEntriesOf(weekRow), ...publishedEntriesOf(latestRow)],
+      dateUtc.getTime(),
+    );
+    if (carried.length > 0) {
+      // ── P-01: the PUBLISHED mode decides, not the live group flag ─────────
+      // `dayWiseMealsEnabled` flips when the admin SWITCHES modes, which is
+      // BEFORE the new mode is published. Driving carry-forward from it meant
+      // that switching Weekly → Day-Wise immediately resurrected meals onto a
+      // published Weekly day the admin had deliberately left empty
+      // (FR-MODE-032 holiday) — a published-schedule change caused by a mode
+      // switch, exactly what the locked invariant forbids.
+      //
+      // A frozen snapshot records the mode it was published in, so the
+      // decision is made from the published baseline itself. Bonus: it skips
+      // the group lookup entirely (one query less on the miss path). Entries
+      // without a recorded mode keep the live-flag behaviour verbatim.
+      const publishedMode =
+        carried.find((e) => e.plannerMode != null)?.plannerMode ?? null;
+      if (publishedMode != null) {
+        if (publishedMode === 'DAY_WISE') entries = carried;
+      } else {
+        // Caller already knows the mode → no query at all.
+        let dayWise = params.dayWiseMealsEnabled === true;
+        if (params.dayWiseMealsEnabled == null) {
+          const canReadGroup = typeof prisma.group?.findFirst === 'function';
+          const group = canReadGroup
+            ? await prisma.group!.findFirst({
+                where: { id: groupId, organizationId }, // org-scoped
+                select: { dayWiseMealsEnabled: true },
+              })
+            : null;
+          dayWise = group?.dayWiseMealsEnabled === true;
+        }
+        if (dayWise) entries = carried;
+      }
+    }
   }
 
   const map = new Map<string, PublishedDayEntry>();

@@ -1373,6 +1373,15 @@ export class GuestsService {
     });
     const entry = dayEntries.get(mealId);
     if (!entry) return pgGroups;
+    // P-01: a fully frozen published day already carries the FULLY RESOLVED
+    // group set (master ⊕ per-day subset, frozen at publish). Use it directly —
+    // narrowing the LIVE master groups again would re-admit exactly the leak
+    // this fix closes (a Standalone↔Group switch would change what a guest
+    // booking demands on an already-published day). Days that predate the freeze keep the
+    // historical narrowing.
+    if (entry.configurationFrozen) {
+      return (entry.preference?.groups ?? []) as unknown as typeof pgGroups;
+    }
     return this.preferences.applyDayOverride(pgGroups, entry);
   }
 
@@ -1401,12 +1410,28 @@ export class GuestsService {
       dateStr,
     });
     const entry = dayEntries.get(meal.id);
+    // P-01 (Live-Test-15): on a fully frozen published day the inherited
+    // window/price come from the configuration FROZEN AT PUBLISH, never from
+    // live master — identical rule to AttendanceService.resolveEffectiveWindow.
+    // Guest charges snapshot this price, so a master edit before Publish would
+    // otherwise change what a guest is billed on an already-published day.
+    // Entries that predate the freeze keep the historical live-master fallback verbatim.
+    const frozen = entry?.configurationFrozen ? entry.meal : null;
     return {
       // Live-Test-11 ISSUE-005: effective open time rides along so vacation
       // boundary math runs on the same clock the member sees.
-      openTime: entry?.openTime ? entry.openTime : meal.attendanceWindowOpen,
-      closeTime: entry?.openTime ? entry.closeTime : meal.attendanceWindowClose,
-      price: entry?.price != null ? entry.price : meal.price,
+      openTime: entry?.openTime
+        ? entry.openTime
+        : (frozen?.attendanceWindowOpen ?? meal.attendanceWindowOpen),
+      closeTime: entry?.openTime
+        ? entry.closeTime
+        : (frozen?.attendanceWindowClose ?? meal.attendanceWindowClose),
+      price:
+        entry?.price != null
+          ? entry.price
+          : frozen
+            ? (frozen.price ?? null)
+            : meal.price,
     };
   }
 

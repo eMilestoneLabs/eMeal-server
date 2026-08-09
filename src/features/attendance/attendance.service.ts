@@ -29,7 +29,11 @@ import {
   AttendanceWindowState,
 } from '../../common/utils/date.utils';
 import { getVacationCoveredUserIds } from '../../common/utils/vacation-coverage.util';
-import { resolvePublishedDayEntries } from '../../common/utils/published-day.util';
+import {
+  resolvePublishedDayEntries,
+  type PublishedPreferenceGroup,
+} from '../../common/utils/published-day.util';
+import { assertBillingApplicable } from '../../common/utils/billing-applicability.util';
 import {
   AttendanceSerializer,
   AttendanceSummarySerializer,
@@ -278,6 +282,13 @@ export class AttendanceService {
      *  exact group set /meals/today rendered for this day. */
     preferencesEnabled: boolean | null;
     enabledPreferenceGroupIds: string[];
+    /**
+     * P-01: the preference groups FROZEN into this published day, already
+     * resolved (master ⊕ per-day subset) at publish time. Null when the day's
+     * configuration was never frozen — the caller then keeps the historical
+     * live-master narrowing.
+     */
+    frozenPreferenceGroups: PublishedPreferenceGroup[] | null;
   }> {
     // Live-Test-9 ISSUE-003: resolve through the shared PUBLISHED-day helper
     // (frozen publishedSnapshot, publishedAt-gated) — the exact same source
@@ -292,13 +303,26 @@ export class AttendanceService {
       dateStr,
     });
     const entry = dayEntries.get(mealId) ?? null;
+    // P-01 (Live-Test-15): when the published day is a frozen snapshot,
+    // the inherited values come from the configuration FROZEN AT PUBLISH, not
+    // from live master. Without this a Master price/window edit changed the
+    // operational published day before the admin ever pressed Publish.
+    // Entries that predate the freeze keep the historical live-master fallback verbatim —
+    // their configuration was never frozen and must not be reinvented.
+    const frozen = entry?.configurationFrozen ? entry.meal : null;
+    const baseOpen = frozen?.attendanceWindowOpen ?? master.openTime;
+    const baseClose = frozen?.attendanceWindowClose ?? master.closeTime;
+    const basePrice = frozen ? (frozen.price ?? null) : master.price;
     return {
-      openTime: entry?.openTime ? entry.openTime : master.openTime,
-      closeTime: entry?.openTime ? entry.closeTime : master.closeTime,
-      price: entry?.price != null ? entry.price : master.price,
+      openTime: entry?.openTime ? entry.openTime : baseOpen,
+      closeTime: entry?.openTime ? entry.closeTime : baseClose,
+      price: entry?.price != null ? entry.price : basePrice,
       scheduledToday: !!entry,
       preferencesEnabled: entry?.preferencesEnabled ?? null,
       enabledPreferenceGroupIds: entry?.enabledPreferenceGroupIds ?? [],
+      frozenPreferenceGroups: entry?.configurationFrozen
+        ? (entry.preference?.groups ?? [])
+        : null,
     };
   }
 
@@ -604,7 +628,13 @@ export class AttendanceService {
       // master group made Present un-markable for members AND admin self-marks
       // (client sends the day set, server demanded the master set → 422).
       // The override rode the resolveEffectiveWindow query above: zero cost.
-      if (plannerActive && effective.scheduledToday) {
+      if (effective.frozenPreferenceGroups) {
+        // P-01: this published day carries its OWN fully resolved group set.
+        // Narrowing the LIVE master groups again would re-admit the leak — a
+        // Standalone↔Group switch in Master would change what the ALREADY
+        // PUBLISHED day demands from a member before any Publish.
+        pgGroups = effective.frozenPreferenceGroups as unknown as typeof pgGroups;
+      } else if (plannerActive && effective.scheduledToday) {
         pgGroups = this.preferencesService.applyDayOverride(
           pgGroups,
           effective,
@@ -1151,7 +1181,10 @@ export class AttendanceService {
         meal?.group?.mealsEnabled !== false &&
         (meal?.group?.weeklyMenuEnabled === true ||
           meal?.group?.dayWiseMealsEnabled === true);
-      if (plannerActive && effective.scheduledToday) {
+      if (effective.frozenPreferenceGroups) {
+        // P-01: same rule as markAttendance — the frozen published day wins.
+        pgGroups = effective.frozenPreferenceGroups as unknown as typeof pgGroups;
+      } else if (plannerActive && effective.scheduledToday) {
         pgGroups = this.preferencesService.applyDayOverride(
           pgGroups,
           effective,
@@ -1670,6 +1703,11 @@ export class AttendanceService {
         // Live-Test-7 ISSUE-4: independent Bill-Absent policy (NULL = legacy
         // coupling — Absent follows Bill-Skip, the exact pre-split rule).
         billAbsentMeals: true,
+        // Live-Test-15 ISSUE-2: Meal Pricing is the MASTER GATE for the whole
+        // meal-billing subsystem. Rides this existing select — zero extra
+        // queries (guidebook §3b rule 3).
+        mealsEnabled: true,
+        mealPricingEnabled: true,
         organization: { select: { timezone: true } },
       },
     });
@@ -1679,6 +1717,15 @@ export class AttendanceService {
     if (!groupPolicy) {
       throw new NotFoundException('Group not found');
     }
+
+    // Live-Test-15 ISSUE-2/3 (user-approved): Meal Pricing OFF ⇒ this group has
+    // NO financial meal-billing subsystem. Returning a ₹0 summary was the old
+    // behaviour and is exactly what the requirement rejects — the feature must
+    // not exist for the group, not merely render as zero. Enforced HERE, on the
+    // backend, so the rule survives a stale client, a cached screen or a direct
+    // API call. Attendance, meals, preferences, vacation and corrections are
+    // untouched: only the FINANCIAL subsystem disappears.
+    assertBillingApplicable(groupPolicy, query.groupId);
 
     // FR-BILLX-020/041: no explicit range → the group's CURRENT billing
     // period in ORG TIME (cycle start day, or calendar month), replacing the
@@ -2096,19 +2143,28 @@ export class AttendanceService {
     // scoped) group summary are independent — ONE parallel wave. The 403
     // still fires before anything is returned; only the caller's own row
     // ever leaves the server.
-    const [membership, summary] = (await Promise.all([
+    // Live-Test-15 ISSUE-2: allSettled (not all) so the MEMBERSHIP gate keeps
+    // strict precedence. getBillingSummary can now reject a pricing-OFF group
+    // with BILLING_NOT_APPLICABLE; with Promise.all that rejection would win
+    // the race and tell a NON-MEMBER whether the group has pricing. Settling
+    // both and checking the 403 first preserves the 404→403→data ordering the
+    // read-path law requires, and still costs exactly one parallel wave.
+    const [membershipRes, summaryRes] = await Promise.allSettled([
       this.prisma.groupMember.findFirst({
         where: { groupId: query.groupId, userId, status: 'active' },
         select: { userId: true },
       }),
       this.getBillingSummary(organizationId, query),
-    ])) as [unknown, any];
-    if (!membership) {
+    ]);
+    if (membershipRes.status === 'rejected') throw membershipRes.reason;
+    if (!membershipRes.value) {
       throw new ForbiddenException({
         message: 'You are not an active member of this group',
         errors: { groupId: 'No active membership' },
       });
     }
+    if (summaryRes.status === 'rejected') throw summaryRes.reason;
+    const summary = summaryRes.value as any;
     const mine = (summary.members as any[]).find((m) => m.userId === userId);
 
     const totalBill = mine?.totalBill ?? 0; // meal + guest (pre-adjustment)
@@ -2160,6 +2216,20 @@ export class AttendanceService {
         errors: { groupId: 'Provide a groupId query parameter' },
       });
     }
+    // Live-Test-15 ISSUE-2: billing ANALYTICS is part of the financial
+    // subsystem, so it obeys the same master gate as the summary. Checked
+    // BEFORE the read-cache lookup below — otherwise a series cached while the
+    // group was priced could still be served after pricing was turned off.
+    // Costs one indexed PK lookup on an admin analytics endpoint (never a
+    // member-facing or hot read path); the summary path pays nothing extra
+    // because its gate rides a select it already performs.
+    const seriesGroup = await this.prisma.group.findFirst({
+      where: { id: query.groupId, organizationId },
+      select: { mealsEnabled: true, mealPricingEnabled: true },
+    });
+    if (!seriesGroup) throw new NotFoundException('Group not found');
+    assertBillingApplicable(seriesGroup, query.groupId);
+
     const bucket = query.bucket ?? 'day';
     const toDate = query.toDate ? toUtcMidnight(query.toDate) : new Date();
     const fromDate = query.fromDate

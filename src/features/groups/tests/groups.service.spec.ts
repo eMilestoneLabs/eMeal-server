@@ -538,6 +538,7 @@ describe('GroupsService', () => {
       new GroupEntity({
         ...mockGroup,
         mealsEnabled: true,
+        mealPricingEnabled: true,
         billingCycleStartDay: day,
         firstSchedulePublishedAt: null,
       } as any);
@@ -577,6 +578,7 @@ describe('GroupsService', () => {
         new GroupEntity({
           ...mockGroup,
           mealsEnabled: true,
+          mealPricingEnabled: true,
           billingCycleStartDay: 15,
           billingCycleChangedAt: new Date('2026-07-01T00:00:00.000Z'),
           firstSchedulePublishedAt: null,
@@ -596,6 +598,7 @@ describe('GroupsService', () => {
         new GroupEntity({
           ...mockGroup,
           mealsEnabled: true,
+          mealPricingEnabled: true,
           billingCycleStartDay: 15,
           firstSchedulePublishedAt: new Date('2026-08-01T00:00:00.000Z'),
         } as any),
@@ -620,6 +623,7 @@ describe('GroupsService', () => {
         new GroupEntity({
           ...mockGroup,
           mealsEnabled: true,
+          mealPricingEnabled: true,
           billingCycleStartDay: 15,
           firstSchedulePublishedAt: new Date('2026-08-01T00:00:00.000Z'),
         } as any),
@@ -702,6 +706,7 @@ describe('GroupsService', () => {
         new GroupEntity({
           ...mockGroup,
           mealsEnabled: true,
+          mealPricingEnabled: true,
           billingCycleStartDay: null,
           firstSchedulePublishedAt: new Date('2026-08-01T00:00:00.000Z'),
         } as any),
@@ -723,6 +728,7 @@ describe('GroupsService', () => {
         new GroupEntity({
           ...mockGroup,
           mealsEnabled: true, // toggled back ON after the publish
+          mealPricingEnabled: true,
           billingCycleStartDay: 15,
           firstSchedulePublishedAt: new Date('2026-08-01T00:00:00.000Z'),
         } as any),

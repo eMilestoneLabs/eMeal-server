@@ -60,6 +60,11 @@ export class ScheduleEntryEntity {
     // before this field existed simply fall back to `order`.
     attendanceWindowOpen?: string | null;
     attendanceWindowClose?: string | null;
+    // P-01 (Live-Test-15): master preference state, needed at PUBLISH time to
+    // resolve the frozen preference block. Optional — earlier snapshots and
+    // test doubles that never selected them stay valid.
+    preferencesEnabled?: boolean;
+    enabledPreferences?: string[];
   };
 
   constructor(partial: Partial<ScheduleEntryEntity> & Pick<ScheduleEntryEntity, 'id' | 'scheduleId' | 'mealId' | 'dayOfWeek' | 'date'>) {
@@ -104,6 +109,15 @@ export class MealScheduleEntity {
 
   entries: ScheduleEntryEntity[];
 
+  /**
+   * P-01: this row IS published but its configuration was never frozen, so its
+   * published preference configuration cannot be recovered from any
+   * authoritative source. It is LABELLED, never silently reconstructed from
+   * today's Master. An explicit Publish/Republish freezes it. False for drafts
+   * and for rows whose configuration is already frozen.
+   */
+  requiresRepublish: boolean;
+
   createdAt: Date;
   updatedAt: Date;
 
@@ -115,6 +129,7 @@ export class MealScheduleEntity {
     this.isPublished = partial.isPublished ?? false;
     this.publishedAt = partial.publishedAt ?? null;
     this.entries = partial.entries ?? [];
+    this.requiresRepublish = partial.requiresRepublish ?? false;
     this.createdAt = partial.createdAt ?? new Date();
     this.updatedAt = partial.updatedAt ?? new Date();
   }

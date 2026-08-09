@@ -18,6 +18,7 @@ import {
   toUtcMidnight,
   getTodayInTimezone,
 } from '../../common/utils/date.utils';
+import { assertBillingApplicable } from '../../common/utils/billing-applicability.util';
 import { FinalizePeriodDto, ReopenPeriodDto } from './dto/billing-period.dto';
 import {
   CreateAdjustmentDto,
@@ -103,9 +104,19 @@ export class BillingService {
 
     const group = await this.prisma.group.findFirst({
       where: { id: dto.groupId, organizationId },
-      select: { id: true, organization: { select: { timezone: true } } },
+      select: {
+        id: true,
+        organization: { select: { timezone: true } },
+        // Live-Test-15 ISSUE-2: billing applicability rides this existing
+        // select — zero extra queries.
+        mealsEnabled: true,
+        mealPricingEnabled: true,
+      },
     });
     if (!group) throw new NotFoundException('Group not found');
+    // Meal Pricing is the master gate: a group with no financial subsystem
+    // must not be able to finalize a billing period.
+    assertBillingApplicable(group, dto.groupId);
 
     // "Future" is relative to the ORG's calendar day, not the server's UTC
     // day. Computing today in UTC wrongly rejected a period ending today when
@@ -356,6 +367,10 @@ export class BillingService {
       select: {
         id: true,
         organization: { select: { timezone: true } },
+        // Live-Test-15 ISSUE-2: billing applicability rides this existing
+        // select — zero extra queries.
+        mealsEnabled: true,
+        mealPricingEnabled: true,
         // REF-001 (survey 2026-07-13): billing policy for the refund cap —
         // the member's true net position depends on what the group bills.
         billSkippedMeals: true,
@@ -365,6 +380,9 @@ export class BillingService {
       },
     });
     if (!group) throw new NotFoundException('Group not found');
+    // Live-Test-15 ISSUE-2: no financial subsystem ⇒ no ledger adjustments
+    // (charges, credits or refunds) may be posted against this group.
+    assertBillingApplicable(group, dto.groupId);
 
     const membership = await this.prisma.groupMember.findFirst({
       where: { groupId: dto.groupId, userId: dto.userId },

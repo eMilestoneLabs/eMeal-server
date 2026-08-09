@@ -63,6 +63,9 @@ export class ScheduleSerializer {
       organizationId: schedule.organizationId ?? null,
       isPublished: schedule.isPublished,
       publishedAt: schedule.publishedAt?.toISOString() ?? null,
+      // P-01 (additive; older clients ignore it): this published schedule
+      // predates full snapshotting — Publish once to lock it.
+      requiresRepublish: schedule.requiresRepublish ?? false,
       createdAt: schedule.createdAt.toISOString(),
       days,
     };

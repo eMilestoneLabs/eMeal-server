@@ -35,6 +35,10 @@ import { NoticesService } from '../notices/notices.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RedisService } from '../../redis/redis.service';
 import { invalidateTodayMealsCache } from '../meals/utils/today-meals-cache.util';
+import { PlannerModeConversionService } from '../meals/services/planner-mode-conversion.service';
+// Auto-draft trigger #3 (Global Meal Preference). Reuses the SAME repository
+// method the delete/disable triggers use — no duplicated business logic.
+import { SchedulesRepository } from '../meals/repositories/schedules.repository';
 
 /**
  * Module 22 (FR-HG-020): guest-config columns that are nullable in the schema
@@ -85,6 +89,20 @@ export class GroupsService {
     // constructing the service unchanged.
     @Optional() @Inject(RedisService)
     private readonly redis: RedisService | null = null,
+    // Live-Test-15 ISSUE-1: rebuilds the planner DRAFT when the group flips
+    // between Weekly and Day-Wise Meal Mode. @Optional + explicit token (see
+    // the CRITICAL note above) so every existing unit test keeps constructing
+    // this service unchanged; a null instance simply skips the conversion.
+    @Optional() @Inject(PlannerModeConversionService)
+    private readonly plannerModeConversion: PlannerModeConversionService | null = null,
+    // PERMANENT_ARCH auto-draft trigger #3. @Optional + explicit token follows
+    // the convention already used for realtime/Redis in this constructor.
+    // A null instance would silently skip the draft flip (published isolation
+    // is unaffected either way, but the admin would lose the republish
+    // signal), so `publish-freeze-wiring.spec.ts` asserts the real instance
+    // is injected. Do not delete that guard.
+    @Optional() @Inject(SchedulesRepository)
+    private readonly schedulesRepo: SchedulesRepository | null = null,
   ) {}
 
   /** Typed access to the `groups.*` configuration namespace (CFG-001). */
@@ -618,6 +636,31 @@ export class GroupsService {
               },
             });
           }
+          // Live-Test-15 ISSUE-3 (user-locked): the billing cycle is a
+          // FINANCIAL configuration — it exists only when Meal Pricing exists.
+          // Meals ON + Pricing OFF has no financial billing lifecycle at all
+          // (its retention follows the calendar-month boundary instead), so a
+          // cycle value must not be settable.
+          //
+          // Read from the PATCH BODY (`mc`), not `updateData`: this block runs
+          // before `mealPricingEnabled` is copied into `updateData`, so using
+          // that would have rejected the single PATCH — the one the Flutter
+          // client actually sends — that turns Meal Pricing ON and sets the
+          // cycle together. `?? existing` keeps a partial patch judged on the
+          // group's stored state.
+          const effPricingForCycle =
+            mc.mealPricingEnabled ?? existing.mealPricingEnabled;
+          if (effPricingForCycle !== true) {
+            throw new BadRequestException({
+              message:
+                'Meal Pricing is disabled for this group, so it has no billing cycle. Enable Meal Pricing first.',
+              code: 'BILLING_CYCLE_NOT_APPLICABLE',
+              errors: {
+                billingCycleStartDay:
+                  'A billing cycle applies only to groups with Meal Pricing enabled',
+              },
+            });
+          }
           if ((existing as any).firstSchedulePublishedAt) {
             throw new BadRequestException({
               message:
@@ -889,6 +932,82 @@ export class GroupsService {
         }
       } catch {
         /* fail-soft — schedule revert must never block the config save */
+      }
+    }
+
+    // ── PLANNER MODE CONVERSION (Live-Test-15 ISSUE-1, user-locked) ─────────
+    // Weekly Meal Mode and Day-Wise Meal Mode are mutually exclusive. Flipping
+    // between them creates a DRAFT in the target mode; it must NEVER replace
+    // the group's currently effective published schedule, which stays
+    // operational for students, attendance, billing, vacation, corrections,
+    // reports, analytics, exports and notifications until the admin publishes.
+    //
+    // Keyed on an ACTUAL value change, never on "field present in the patch":
+    // the Flutter client PATCHes the WHOLE mealConfig on every unrelated
+    // toggle, so a presence check would rebuild — and therefore CLOBBER — the
+    // admin's in-progress draft on every vacation/guest/pricing tap.
+    //
+    // Awaited (not fire-and-forget) because the admin navigates straight into
+    // the planner after switching: the draft must already be there. The
+    // service is internally fail-soft, so it can never break this save.
+    {
+      const weeklyChanged =
+        updateData.weeklyMenuEnabled !== undefined &&
+        updateData.weeklyMenuEnabled !== (existing as any).weeklyMenuEnabled;
+      const dayWiseChanged =
+        updateData.dayWiseMealsEnabled !== undefined &&
+        updateData.dayWiseMealsEnabled !== (existing as any).dayWiseMealsEnabled;
+      const effMealsOn =
+        (updateData.mealsEnabled ?? existing.mealsEnabled) === true;
+      if (effMealsOn && (weeklyChanged || dayWiseChanged)) {
+        await this.plannerModeConversion?.convertOnModeChange({
+          groupId: id,
+          organizationId,
+          actorId,
+          targetMode:
+            updateData.dayWiseMealsEnabled === true ? 'DAY_WISE' : 'WEEKLY',
+          requestId,
+        });
+      }
+    }
+
+    // ── AUTO-DRAFT TRIGGER #3: GLOBAL MEAL PREFERENCE (PERMANENT_ARCH) ──────
+    // The permanent architecture names exactly three unconditional auto-draft
+    // triggers: master meal DELETE, master meal DISABLE, and GLOBAL MEAL
+    // PREFERENCE ON/OFF. The first two are wired in `MealsService`; this is
+    // the third.
+    //
+    // Isolation was already correct without it — Global OFF is applied to the
+    // snapshot AT PUBLISH (`stripSnapshotPreferences`), so members never saw a
+    // mid-flight change. What was missing is the REVIEW STEP: the planner kept
+    // reporting "Published — students can see this schedule" while the toggle
+    // sat unpublished, so an admin had no signal that a republish was needed
+    // and the change could linger indefinitely.
+    //
+    // Group-scoped and keyed on an ACTUAL value change (never field presence):
+    // the Flutter client PATCHes the whole mealConfig on every unrelated
+    // toggle, so a presence check would flip the planner to draft on each
+    // vacation/guest/pricing tap.
+    //
+    // `publishedSnapshot` / `publishedAt` are untouched — only the admin-facing
+    // `isPublished` flag moves, exactly like the delete/disable triggers.
+    if (
+      updateData.preferencesEnabled !== undefined &&
+      updateData.preferencesEnabled !== (existing as any).preferencesEnabled &&
+      (updateData.mealsEnabled ?? existing.mealsEnabled) === true
+    ) {
+      try {
+        await this.schedulesRepo?.revertPublishedForGroup?.(id, organizationId);
+      } catch (err) {
+        // Fail-soft by design: the config change has already committed, so a
+        // draft-flag failure must never fail the save. But it is NOT silent —
+        // if this throws, the planner keeps reporting "Published" while the
+        // global preference actually changed, and the admin never gets the
+        // republish signal. That has to be visible in the logs.
+        this.logger.warn(
+          `Auto-draft (global meal preference) failed for group=${id}: ` +
+            `${(err as Error).message}`,
+        );
       }
     }
 

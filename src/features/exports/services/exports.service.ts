@@ -8,6 +8,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Response } from 'express';
+import { assertBillingApplicable } from '../../../common/utils/billing-applicability.util';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AuditService } from '../../../audit/audit.service';
 import { BillingService } from '../../billing/billing.service';
@@ -232,6 +233,10 @@ export class ExportsService {
         // export reconciles with the split-toggle engine line by line.
         billAbsentMeals: true,
         guestAttendanceEnabled: true,
+        // Live-Test-15 ISSUE-2: applicability rides this EXISTING select —
+        // zero extra queries.
+        mealsEnabled: true,
+        mealPricingEnabled: true,
       },
     });
     if (!group) {
@@ -240,6 +245,12 @@ export class ExportsService {
         errors: { groupId: 'Group does not exist in your organization' },
       });
     }
+    // Live-Test-15 ISSUE-2: this is the DEDICATED per-member billing rollup —
+    // a billing-specific report. Meal Pricing is the master gate, so a group
+    // with no financial subsystem must not be able to export one. (The
+    // ATTENDANCE export is deliberately NOT gated: it stays available and
+    // simply drops its ₹ columns.)
+    assertBillingApplicable(group, dto.groupId);
 
     const fromDate = parseLocalDate(dto.fromDate);
     const toDate = parseLocalDate(dto.toDate);

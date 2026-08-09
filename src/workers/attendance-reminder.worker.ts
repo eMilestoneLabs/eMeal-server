@@ -138,7 +138,13 @@ export class AttendanceReminderWorker extends WorkerHost {
         organizationId,
         dateStr: getTodayInTimezone(tz),
       });
-      effOpen = dayEntries.get(mealId)?.openTime ?? effOpen;
+      // P-01: prefer the per-day override, then the window FROZEN at publish
+      // on a frozen snapshot, and only then live master.
+      const de = dayEntries.get(mealId);
+      const frozenOpen = de?.configurationFrozen
+        ? (de.meal?.attendanceWindowOpen ?? null)
+        : null;
+      effOpen = de?.openTime ?? frozenOpen ?? effOpen;
     } catch {
       /* master fallback */
     }

@@ -312,6 +312,9 @@ export class SystemDefaultWorker extends WorkerHost {
         groupId: group.id,
         organizationId: group.organizationId,
         dateStr: todayStr,
+        // The sweep's group query already selects this, and this runs once PER
+        // GROUP — passing it removes a redundant per-group lookup.
+        dayWiseMealsEnabled: group.dayWiseMealsEnabled,
       }),
     ]);
     if (!meals.length) return;
@@ -788,10 +791,16 @@ export class SystemDefaultWorker extends WorkerHost {
       // applyDayOverride rule /meals/today renders and marking validates),
       // so such days auto-mark normally. Master flags gate only when the day
       // entry doesn't override them.
-      const dayFlatPrefs =
-        entry?.preferencesEnabled ?? meal.preferencesEnabled;
-      const dayGroupPrefs =
-        hasGroups.has(meal.id) && entry?.preferencesEnabled !== false;
+      // P-01: see the identical rule in the materialize sweep below — a
+      // fully frozen published day decides from its FROZEN preference block.
+      const dayFlatPrefs = entry?.configurationFrozen
+        ? entry.preference?.enabled === true &&
+          entry.preference?.mode === 'standalone'
+        : (entry?.preferencesEnabled ?? meal.preferencesEnabled);
+      const dayGroupPrefs = entry?.configurationFrozen
+        ? entry.preference?.enabled === true &&
+          entry.preference?.mode === 'group'
+        : hasGroups.has(meal.id) && entry?.preferencesEnabled !== false;
       if (dayFlatPrefs === true || dayGroupPrefs) {
         continue;
       }
@@ -1126,10 +1135,18 @@ export class SystemDefaultWorker extends WorkerHost {
       // preference selection); otherwise they simply stay unmarked.
       let mealStatus = materializeStatus;
       if (materializeStatus === 'present') {
-        const dayFlatPrefs =
-          entry?.preferencesEnabled ?? meal.preferencesEnabled;
-        const dayGroupPrefs =
-          hasGroups.has(meal.id) && entry?.preferencesEnabled !== false;
+        // P-01: a fully frozen published day decides from its FROZEN
+        // preference block — switching a meal Standalone↔Group in Master no
+        // longer changes auto-attendance eligibility for an already-published
+        // day. Days that predate the freeze keep the live-binding rule verbatim.
+        const dayFlatPrefs = entry?.configurationFrozen
+          ? entry.preference?.enabled === true &&
+            entry.preference?.mode === 'standalone'
+          : (entry?.preferencesEnabled ?? meal.preferencesEnabled);
+        const dayGroupPrefs = entry?.configurationFrozen
+          ? entry.preference?.enabled === true &&
+            entry.preference?.mode === 'group'
+          : hasGroups.has(meal.id) && entry?.preferencesEnabled !== false;
         if (dayFlatPrefs === true || dayGroupPrefs) {
           // ISSUE-004: the meal still has to leave Pending, so it falls back to
           // the system SKIP in EVERY group now (not only Bill-Skip ones). The

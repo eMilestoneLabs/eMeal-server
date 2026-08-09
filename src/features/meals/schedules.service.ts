@@ -8,7 +8,13 @@ import {
   Optional,
   Inject,
 } from '@nestjs/common';
-import { SchedulesRepository } from './repositories/schedules.repository';
+import {
+  SchedulesRepository,
+  PublishPreferenceContext,
+  EffectivePublishedGroup,
+  PublishedPlannerMode,
+} from './repositories/schedules.repository';
+import { PreferencesService } from '../preferences/preferences.service';
 import { MealsRepository } from './repositories/meals.repository';
 import { GroupsRepository } from '../groups/repositories/groups.repository';
 import { ScheduleSerializer } from './serializers/schedule.serializer';
@@ -82,7 +88,52 @@ export class SchedulesService {
     @Optional()
     @Inject(RedisService)
     private readonly redis: RedisService | null = null,
+    // P-01 (Live-Test-15): the ONE effective-preference resolver (Module 36),
+    // reused at publish time so the frozen snapshot is built by the same code
+    // that renders preferences — no duplicated business logic.
+    //
+    // @Optional + explicit @Inject follows the established convention here
+    // (REALTIME_GATEWAY, RedisService above) — the `| null` union erases
+    // `design:paramtypes`, so the token is mandatory, not decorative.
+    //
+    // CAVEAT, deliberately recorded: unlike realtime/Redis this is NOT a
+    // degraded-env side-effect — it is CORE to publishing. If it were ever
+    // unwired, Nest would inject null, `publishPreferenceResolver()` would
+    // return undefined, and the whole P-01 freeze would silently stop running
+    // with no error. `publish-freeze-wiring.spec.ts` exists solely to make
+    // that failure loud in CI; do not delete it.
+    @Optional()
+    @Inject(PreferencesService)
+    private readonly preferences: PreferencesService | null = null,
   ) {}
+
+  /**
+   * P-01: publish-time resolver handed to the repository. ONE batched query
+   * per Publish (an admin action), zero cost on every read path. Returns
+   * undefined when Module 36 is not wired, which leaves the snapshot at
+   * legacy semantics rather than freezing an empty preference config.
+   */
+  private publishPreferenceResolver(
+    organizationId: string,
+  ): PublishPreferenceContext | undefined {
+    const prefs = this.preferences;
+    if (!prefs?.getEffectiveGroupsForMeals) return undefined;
+    return {
+      resolve: async (mealIds: string[]) =>
+        (await prefs.getEffectiveGroupsForMeals(
+          mealIds,
+          organizationId,
+        )) as unknown as Map<string, EffectivePublishedGroup[]>,
+      // DRY: the per-day narrowing rule has exactly ONE implementation
+      // (Module 36). The publish path borrows it rather than re-stating it,
+      // so the freeze can never drift from what the read path renders.
+      narrowByDay: (groups, override) =>
+        prefs.applyDayOverride(
+          groups as any,
+          override,
+        ) as unknown as typeof groups,
+    };
+  }
 
   /** Drop the group's cached today-bundles (fail-soft; org-wide if no group). */
   private async invalidateTodayCache(
@@ -381,6 +432,22 @@ export class SchedulesService {
   }
 
   /**
+   * P-01: the planner mode being published, frozen into the snapshot so the
+   * Day-Wise carry-forward is decided by the PUBLISHED schedule instead of the
+   * group's LIVE mode flag (which flips at mode-switch, before publish).
+   * Undefined when the group row is unavailable — the snapshot then records no
+   * mode and the resolver keeps its historical live-flag behaviour.
+   */
+  private static plannerModeOf(
+    group: Record<string, any> | null,
+  ): PublishedPlannerMode | undefined {
+    if (!group) return undefined;
+    if (group.dayWiseMealsEnabled === true) return 'DAY_WISE';
+    if (group.weeklyMenuEnabled === true) return 'WEEKLY';
+    return undefined;
+  }
+
+  /**
    * Live-Test-16 ISSUE-1 §7/§8: stamp the group's FIRST successful schedule
    * publication. This instant is the permanent Meal-Pricing locking event
    * (`groups.service.updateGroup` reads it), so it is written ONLY after the
@@ -485,6 +552,8 @@ export class SchedulesService {
         organizationId,
         entries,
         stripPrefs,
+        this.publishPreferenceResolver(organizationId),
+        SchedulesService.plannerModeOf(publishGroup),
       );
     } else {
       // SRS Module 03 MMT-011 (publish-blocked bug): entries referencing a
@@ -570,6 +639,8 @@ export class SchedulesService {
         id,
         organizationId,
         stripPrefs,
+        this.publishPreferenceResolver(organizationId),
+        SchedulesService.plannerModeOf(publishGroup),
       );
     }
 

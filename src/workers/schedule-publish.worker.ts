@@ -26,14 +26,21 @@ export interface SchedulePublishJobData {
  * As of 2026-08-03 NOTHING enqueues to this queue: `.add()` is never called on
  * SCHEDULE_PUBLISH anywhere in src/, so this processor never runs. It writes
  * `isPublished`/`publishedAt` straight through Prisma, which means it would
- * SKIP two invariants the HTTP publish path enforces:
+ * SKIP three invariants the HTTP publish path enforces:
  *   1. ISSUE-2 — the attendance-window validation (mandatory + same-day);
  *   2. ISSUE-1 — stamping `groups.firstSchedulePublishedAt`, the event that
- *      permanently locks the group's Meal-Pricing mode.
+ *      permanently locks the group's Meal-Pricing mode;
+ *   3. P-01 (Live-Test-15) — capturing `publishedSnapshot`, i.e. FREEZING the
+ *      complete effective configuration. Setting `publishedAt` without it
+ *      produces a schedule that is student-VISIBLE but NOT frozen: every
+ *      operational read falls back to live Master, so master edits leak
+ *      straight into the published schedule — the exact defect P-01 closed.
+ *      `requiresRepublish` would report true for such a row, which is the
+ *      only reason it would be noticeable at all.
  * Left untouched deliberately: there is no live defect, and rewriting working
  * (if unused) code would be an unjustified change. BEFORE wiring any producer
  * to this queue, route the publish through `SchedulesService.publishSchedule`
- * so both invariants still hold.
+ * so all three invariants still hold.
  */
 @Processor(QUEUE_NAMES.SCHEDULE_PUBLISH, { concurrency: 2 })
 export class SchedulePublishWorker extends WorkerHost {

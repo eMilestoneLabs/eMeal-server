@@ -365,6 +365,20 @@ export class MealsRepository {
   }
 
   /**
+   * GAP 3 (historical identity integrity): how many attendance records already
+   * reference this meal. Org-scoped. Called ONLY when an identity rename is
+   * actually attempted, so it costs nothing on any other patch or read.
+   */
+  async countHistoricalRecords(
+    mealId: string,
+    organizationId: string,
+  ): Promise<number> {
+    return this.prisma.attendanceRecord.count({
+      where: { mealId, organizationId },
+    });
+  }
+
+  /**
    * Resolve an organization's IANA timezone (defaults to Asia/Kolkata).
    * Used by the price-lock guard to compute "now" in the org's local time.
    */

@@ -183,7 +183,16 @@ export async function getVacationCoveredUserIds(
     // truth, LT-9) win over the master window. Master remains the fallback
     // for non-planner groups / unscheduled meals; failures keep the master
     // path (fail-safe direction unchanged).
-    let dayEntries: Map<string, { openTime: string | null }> = new Map();
+    // P-01: a fully frozen published day supplies its own frozen master
+    // window, so boundary math never falls back to live master for it.
+    let dayEntries: Map<
+      string,
+      {
+        openTime: string | null;
+        configurationFrozen?: boolean;
+        meal?: { attendanceWindowOpen: string | null } | null;
+      }
+    > = new Map();
     try {
       dayEntries = (await resolvePublishedDayEntries(prisma as any, {
         groupId,
@@ -194,7 +203,11 @@ export async function getVacationCoveredUserIds(
       /* master fallback */
     }
     for (const m of slotMeals) {
-      const effOpen = dayEntries.get(m.id)?.openTime ?? m.attendanceWindowOpen;
+      const de = dayEntries.get(m.id);
+      const frozenOpen = de?.configurationFrozen
+        ? (de.meal?.attendanceWindowOpen ?? null)
+        : null;
+      const effOpen = de?.openTime ?? frozenOpen ?? m.attendanceWindowOpen;
       slotOpens.set(m.slotKey, hhmmToMinutes(effOpen));
     }
   }

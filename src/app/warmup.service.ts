@@ -136,7 +136,17 @@ export class WarmupService implements OnApplicationBootstrap {
     const [adminGroup, studentGroup] = await Promise.all([
       admin?.organizationId
         ? this.prisma.group.findFirst({
-            where: { organizationId: admin.organizationId, isActive: true },
+            // Live-Test-15 ISSUE-2: `adminGroup` is used ONLY to warm the two
+            // billing reads below, and billing now rejects a group without a
+            // financial subsystem (BILLING_NOT_APPLICABLE). Selecting a
+            // BILLABLE group here keeps the warm-up doing real work instead of
+            // logging a settled rejection every boot — same single query.
+            where: {
+              organizationId: admin.organizationId,
+              isActive: true,
+              mealsEnabled: true,
+              mealPricingEnabled: true,
+            },
             select: { id: true },
           })
         : Promise.resolve(null),

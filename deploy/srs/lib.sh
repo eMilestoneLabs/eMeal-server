@@ -89,6 +89,22 @@ req(){
 }
 jbody(){ printf '%s' "$R_BODY" | jq -r "$1" 2>/dev/null; }
 
+# billable_gid → id of the first group in the LAST `GET /groups` body that
+# ACTUALLY has billing, or empty when the org has none. Reads $R_BODY, exactly
+# like jbody above — so it costs no extra request.
+#
+# Meal Pricing is the master switch for the whole Billing feature: a group with
+# pricing OFF answers 400 BILLING_NOT_APPLICABLE instead of a meaningless Rs.0
+# body. That is the intended contract — but it means an assertion pointed at an
+# ARBITRARY group (the org's first, which may well be attendance-only) reports a
+# FALSE failure and times an error path, which is not valid perf evidence.
+# Same precedent as functional.sh's MEAL_GID hunt ("the first group may be
+# empty"): resolve the group that actually exercises the feature under test.
+billable_gid(){
+  jbody '[(.data // .)[]? | select(.mealConfig.mealsEnabled == true
+                               and .mealConfig.mealPricingEnabled == true)][0].id // empty'
+}
+
 # req_settle METHOD PATH [BODY] [TOKEN] — like req, but if the response is a
 # transient 429 (a prior load test saturated the burst throttle) it backs off
 # and retries so the caller sees the TRUE verdict (e.g. RBAC 403), not a rate-

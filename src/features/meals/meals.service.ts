@@ -862,13 +862,50 @@ export class MealsService {
    */
   private static applyDayEntryToMeal(m: any, o: any): any {
     const next: any = { ...m };
+    // ── P-01 (Live-Test-15): PUBLISHED BASELINE REBASE ───────────────────────
+    // `m` is the LIVE master card. For a fully frozen published day the card
+    // must be rebased onto the configuration FROZEN AT PUBLISH, otherwise a
+    // Master edit (rename, price, window, menu, image, preference mode) became
+    // operational for students before the admin pressed Publish — the exact
+    // P-01 leak. Per-day overrides are applied AFTER this, unchanged.
+    //
+    // Legacy  entries skip this entirely: their preference configuration
+    // was never frozen and there is no authoritative source to recover it, so
+    // they keep their historical resolution until an explicit re-Publish.
+    if (o.configurationFrozen) {
+      const fm = o.meal;
+      if (fm) {
+        next.name = fm.name;
+        next.displayName = fm.displayName ?? fm.name;
+        next.slotKey = fm.slotKey;
+        next.order = fm.order;
+        next.menuItems = fm.menuItems ?? [];
+        next.imageUrl = fm.imageUrl ?? null;
+        next.description = fm.description ?? null;
+        next.price = fm.price ?? null;
+        next.attendanceWindow = {
+          openTime: fm.attendanceWindowOpen ?? null,
+          closeTime: fm.attendanceWindowClose ?? null,
+        };
+      }
+      // The frozen block is ALREADY the fully resolved effective preference
+      // config (master ⊕ per-day override ⊕ subset filter, resolved at publish),
+      // so the legacy narrowing below is skipped for it — re-applying entry
+      // fields on top would double-apply and could contradict the freeze.
+      const p = o.preference;
+      if (p) {
+        next.preferencesEnabled = p.enabled;
+        next.enabledPreferences = p.tags ?? [];
+        next.preferenceGroups = p.groups ?? [];
+      }
+    }
     if (o.openTime) {
       next.attendanceWindow = {
         openTime: o.openTime,
         closeTime: o.closeTime ?? null,
       };
     }
-    if (o.preferencesEnabled !== null) {
+    if (!o.configurationFrozen && o.preferencesEnabled !== null) {
       next.preferencesEnabled = o.preferencesEnabled;
       if (o.enabledPreferences.length > 0) {
         next.enabledPreferences = o.enabledPreferences;
@@ -887,6 +924,7 @@ export class MealsService {
     // list narrows the meal's groups to just those IDs for this
     // day; empty = inherit ALL master groups (unchanged behaviour).
     if (
+      !o.configurationFrozen &&
       o.enabledPreferenceGroupIds &&
       o.enabledPreferenceGroupIds.length > 0 &&
       Array.isArray(next.preferenceGroups)
@@ -1153,6 +1191,43 @@ export class MealsService {
     // SRS Module 03 MMT-002: the Slot Key is IMMUTABLE after creation — it is
     // the analytics/billing continuity key (per-slot rollups, snapshots). A
     // slotKey in the patch body is ignored; the Flutter app never sends one.
+    // ── GAP 3: HISTORICAL IDENTITY INTEGRITY ────────────────────────────────
+    // Attendance/export/analytics read the meal label through a LIVE join
+    // (`attendance.serializer`: displayName ?? name; `attendance.repository`:
+    // meal.slotKey). There is no per-record name snapshot and no schema change
+    // is authorised, so a rename would RETROACTIVELY relabel every historical
+    // record — January's "Breakfast" would silently become "Morning
+    // Breakfast" in past attendance, exports and reports.
+    //
+    // The locked rule is that changing meal identity must create a NEW identity
+    // for FUTURE records while history stays attached to the old one. Without
+    // identity versioning the only way to honour it is to stop the destructive
+    // rename at the API and tell the admin to create a new meal — which IS the
+    // new identity, with the old meal keeping its records.
+    //
+    // Deliberately scoped: the rename stays FREE until the meal has history
+    // (typo fixes on a fresh meal are unaffected), and the count query runs
+    // ONLY when a rename is actually attempted — zero cost on every other
+    // patch. This mirrors the existing slotKey rule (MMT-002).
+    const identityRename =
+      (dto.name !== undefined && dto.name !== existing.name) ||
+      ('displayName' in dto &&
+        (dto.displayName ?? null) !== (existing.displayName ?? null));
+    if (identityRename) {
+      const historyCount =
+        (await this.mealsRepo.countHistoricalRecords?.(id, organizationId)) ?? 0;
+      if (historyCount > 0) {
+        throw new ConflictException({
+          message:
+            'This meal already has attendance history, so its name is locked — renaming it would relabel past attendance, billing and reports. Create a new meal instead; this one keeps its records.',
+          code: 'MEAL_IDENTITY_LOCKED',
+          errors: {
+            name: `Locked by ${historyCount} historical attendance record(s)`,
+          },
+        });
+      }
+    }
+
     if (dto.name !== undefined)       updateData.name = dto.name;
     if ('displayName' in dto)         updateData.displayName = dto.displayName ?? null;
     if (dto.order !== undefined)      updateData.order = dto.order;
