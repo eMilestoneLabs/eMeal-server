@@ -7,6 +7,12 @@
  *   joinToken  → joinCode    (M-06 fix: DB internal name vs API key)
  *   flat cols  → mealConfig  (M-07 fix: nested in API, flat in DB)
  */
+/** Raw per-group member setting overrides; null on a field = inherit user. */
+export interface MemberSettingOverrides {
+  isVacationMode: boolean | null;
+  isDefaultAttendance: boolean | null;
+}
+
 export class GroupEntity {
   id: string;
   organizationId: string;
@@ -108,6 +114,21 @@ export class GroupEntity {
   functionalRoleOf(userId: string): string | null {
     return this.memberFunctionalRoles?.get(userId) ?? null;
   }
+
+  // userId → that member's RAW per-group setting overrides. `null` on a field
+  // means "inherit the user-level flag" — the client already holds those in
+  // its session, so it resolves `override ?? userFlag` without another call.
+  // INTERNAL — never serialized wholesale (it would leak every member's state).
+  memberSettings?: Map<string, MemberSettingOverrides>;
+
+  /** The requester's own overrides, or null when they are not a member. */
+  memberSettingsOf(userId: string): MemberSettingOverrides | null {
+    return this.memberSettings?.get(userId) ?? null;
+  }
+
+  // Additive: populated per-request on the detail read path with the
+  // REQUESTER's own overrides only. Not a DB column on Group.
+  myMemberSettings?: MemberSettingOverrides | null;
 
   // Additive (ISSUE 2): populated only on the detail read path so members can
   // see who runs the group and which organization it belongs to. Not stored on

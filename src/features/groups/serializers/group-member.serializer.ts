@@ -1,4 +1,5 @@
 import { GroupMemberEntity } from '../entities/group-member.entity';
+import { resolveMemberFlag } from '../../../common/utils/member-settings.util';
 
 /**
  * GroupMemberSerializer — member record response shape.
@@ -27,7 +28,21 @@ export class GroupMemberSerializer {
             const { emailVerifiedAt, ...rest } = member.user as typeof member.user & {
               emailVerifiedAt?: Date | null;
             };
-            return { ...rest, emailVerified: !!emailVerifiedAt };
+            return {
+              ...rest,
+              emailVerified: !!emailVerifiedAt,
+              // Same key, same type — but this response IS a group's roster, so
+              // the value must be THIS group's effective vacation state. The
+              // raw user flag would badge a member "on vacation" here because
+              // they are on vacation in a DIFFERENT group. Resolved from the
+              // membership row the list query already returns: no extra query,
+              // no response-shape change.
+              isVacationMode: resolveMemberFlag(
+                member,
+                member.user,
+                'isVacationMode',
+              ),
+            };
           })()
         : null,
     };

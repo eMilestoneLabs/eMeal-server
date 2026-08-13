@@ -50,6 +50,10 @@ import {
 } from '../common/utils/date.utils';
 import { getVacationCoveredUserIds } from '../common/utils/vacation-coverage.util';
 import {
+  memberFlagWhere,
+  resolveMemberFlag,
+} from '../common/utils/member-settings.util';
+import {
   resolvePublishedDayEntries,
   PublishedDayEntry,
 } from '../common/utils/published-day.util';
@@ -524,10 +528,21 @@ export class SystemDefaultWorker extends WorkerHost {
     const lo = new Date(now.getTime() - 2 * 86_400_000);
     const hi = new Date(now.getTime() + 2 * 86_400_000);
 
-    const [flaggedUsers, activeRequests] = await Promise.all([
+    const [flaggedUsers, flaggedMembers, activeRequests] = await Promise.all([
       this.prisma.user.findMany({
         where: { isVacationMode: true },
         select: { id: true, organizationId: true },
+      }),
+      // The MEMBERSHIP counterpart of `flaggedUsers`, and it earns its place
+      // the same way: it is the in-memory guard that stops the sweep writing
+      // when nothing changed. Without it every group holding a live
+      // group-scoped vacation issued a no-op `updateMany` on EVERY tick —
+      // N wasted statements per tick, growing with group count. One read in
+      // the wave that already runs replaces all of them, so this adds no
+      // round trip and strictly reduces work.
+      this.prisma.groupMember.findMany({
+        where: { isVacationMode: true },
+        select: { userId: true, groupId: true },
       }),
       (this.prisma as any).vacationRequest.findMany({
         where: {
@@ -541,6 +556,9 @@ export class SystemDefaultWorker extends WorkerHost {
           organizationId: true,
           startDate: true,
           endDate: true,
+          // A-full: WHICH group this leave is for. One free column on a select
+          // this sweep already makes. `null` = org-level (governs every group).
+          groupId: true,
         },
       }) as Promise<
         Array<{
@@ -548,6 +566,7 @@ export class SystemDefaultWorker extends WorkerHost {
           organizationId: string;
           startDate: Date;
           endDate: Date;
+          groupId: string | null;
         }>
       >,
     ]);
@@ -579,11 +598,31 @@ export class SystemDefaultWorker extends WorkerHost {
     };
 
     // Activations: covered today but flag OFF.
+    //
+    // A-full: an ORG-LEVEL request (groupId null) governs every group, so the
+    // ACCOUNT flag stays its home — unchanged. A GROUP-SCOPED request has no
+    // room in that single bit; writing it there marked the member on vacation
+    // in every group they belong to, so it targets ITS membership row instead.
     const flaggedSet = new Set(flaggedUsers.map((u) => u.id));
-    const toActivate = new Map<string, string>(); // userId → orgId
+    const flaggedMemberSet = new Set(
+      flaggedMembers.map((m) => `${m.userId}:${m.groupId}`),
+    );
+    const toActivate = new Map<string, string>(); // userId → orgId (ORG-LEVEL only)
+    // groupId → (userId → orgId). The orgId rides along so the group-scoped
+    // changes are AUDITED exactly like the account-flag ones (FR-VACX-006
+    // observability): a vacation state change must never be silent.
+    const memberActivate = new Map<string, Map<string, string>>();
     for (const r of activeRequests) {
-      if (coversToday(r) && !flaggedSet.has(r.userId)) {
-        toActivate.set(r.userId, r.organizationId);
+      if (!coversToday(r)) continue;
+      if (r.groupId == null) {
+        if (!flaggedSet.has(r.userId)) toActivate.set(r.userId, r.organizationId);
+      } else if (!flaggedMemberSet.has(`${r.userId}:${r.groupId}`)) {
+        // Already active — skip, exactly as `flaggedSet` does for the account
+        // flag. The `not: true` predicate on the write is still the safety
+        // net; this is the cost guard.
+        const m = memberActivate.get(r.groupId) ?? new Map<string, string>();
+        m.set(r.userId, r.organizationId);
+        memberActivate.set(r.groupId, m);
       }
     }
 
@@ -595,11 +634,18 @@ export class SystemDefaultWorker extends WorkerHost {
     // mid-vacation. A recently-ended request is the only legitimate
     // auto-resume trigger (identical rule to the read-time sync); the extra
     // query is gone with it.
+    // Both sets gate the ACCOUNT flag, so both consider ORG-LEVEL requests
+    // ONLY. A group-scoped request owns its own membership row (handled by
+    // memberActivate / memberResume below) and must never hold the account
+    // flag open: an expired ORG-LEVEL vacation would then stay switched on
+    // just because an unrelated group's vacation started — re-creating, via
+    // the resume path, the exact cross-group spill A-full removed.
+    const orgLevelRequests = activeRequests.filter((r) => r.groupId == null);
     const coveredNow = new Set(
-      activeRequests.filter(coversToday).map((r) => r.userId),
+      orgLevelRequests.filter(coversToday).map((r) => r.userId),
     );
     const recentlyEnded = new Set(
-      activeRequests
+      orgLevelRequests
         .filter((r) => {
           const today = todayByOrg.get(r.organizationId);
           return today !== undefined && r.endDate.getTime() < today;
@@ -613,6 +659,76 @@ export class SystemDefaultWorker extends WorkerHost {
         !toActivate.has(u.id) &&
         recentlyEnded.has(u.id),
     ) as Array<{ id: string; organizationId: string }>;
+
+    // A-full group-scoped resume: a membership activated by a GROUP-SCOPED
+    // request whose range has now ended goes back to NULL (inherit) — never
+    // `false`, which would be an explicit override permanently shadowing any
+    // later org-wide vacation for that group.
+    //
+    // Same LT-8 ISSUE-007 guard as the account flag, applied per group: only a
+    // request FOR THAT GROUP that recently ended may resume it. Membership
+    // pairs still covered today are excluded so an overlapping range cannot
+    // resume a live vacation.
+    const coveredPairs = new Set(
+      activeRequests
+        .filter((r) => coversToday(r) && r.groupId != null)
+        .map((r) => `${r.userId}:${r.groupId}`),
+    );
+    const memberResume = new Map<string, Map<string, string>>(); // groupId → (userId → orgId)
+    for (const r of activeRequests) {
+      if (r.groupId == null) continue;
+      const today = todayByOrg.get(r.organizationId);
+      if (today === undefined || r.endDate.getTime() >= today) continue;
+      if (coveredPairs.has(`${r.userId}:${r.groupId}`)) continue;
+      // Only a membership that is actually ON can be resumed — same guard, so
+      // an ended request for a group that was never activated writes nothing.
+      if (!flaggedMemberSet.has(`${r.userId}:${r.groupId}`)) continue;
+      const m = memberResume.get(r.groupId) ?? new Map<string, string>();
+      m.set(r.userId, r.organizationId);
+      memberResume.set(r.groupId, m);
+    }
+
+    // Both member writes are guarded by the CURRENT value in the WHERE clause,
+    // which is what makes them safe and free:
+    //   • activate matches `isVacationMode: { not: true }` — idempotent for
+    //     rows already active, while still letting a NEW approved request
+    //     re-activate a group the member once returned early from (the
+    //     account-flag path has always recovered that way). Return Early is
+    //     protected by its request being ENDED, not by the column value;
+    //   • resume matches `isVacationMode: true` — only rows a request actually
+    //     activated.
+    // No read of current state is needed, so the sweep adds ZERO queries.
+    // TENANT ISOLATION: each (groupId, userIds) pair is built from ONE
+    // request row, so the group and its members always belong to the same
+    // organization — a request's groupId is validated against the member's own
+    // membership at creation. The sweep is deliberately global (it serves every
+    // org), and no predicate here can address a row outside the pair's own org.
+    // ONE parallel wave, never a sequential await per group (guidebook §7:
+    // zero awaits-in-loops). Grouping by groupId keeps each statement on the
+    // (groupId, userId) index; firing them together keeps the sweep at a
+    // single round trip regardless of how many groups activate on a day.
+    await Promise.all([
+      ...[...memberActivate].map(([groupId, byUser]) =>
+        this.prisma.groupMember.updateMany({
+          where: {
+            groupId,
+            userId: { in: [...byUser.keys()] },
+            isVacationMode: { not: true },
+          },
+          data: { isVacationMode: true },
+        }),
+      ),
+      ...[...memberResume].map(([groupId, byUser]) =>
+        this.prisma.groupMember.updateMany({
+          where: {
+            groupId,
+            userId: { in: [...byUser.keys()] },
+            isVacationMode: true,
+          },
+          data: { isVacationMode: null },
+        }),
+      ),
+    ]);
 
     if (toActivate.size) {
       await this.prisma.user.updateMany({
@@ -645,9 +761,36 @@ export class SystemDefaultWorker extends WorkerHost {
         metadata: { isVacationMode: false, reason: 'vacation sweep — approved range ended (FR-VACX-006)' },
       });
     }
-    if (toActivate.size || toResume.length) {
+    // Audit parity for the GROUP-SCOPED changes — same shape as the
+    // account-flag entries above, plus the group the leave belongs to.
+    for (const [groupId, byUser] of memberActivate) {
+      for (const [userId, orgId] of byUser) {
+        this.audit.log({
+          organizationId: orgId,
+          targetId: userId,
+          targetType: 'User',
+          action: AuditAction.update,
+          metadata: { isVacationMode: true, groupId, reason: 'vacation sweep — approved group-scoped range started (FR-VACX-006)' },
+        });
+      }
+    }
+    for (const [groupId, byUser] of memberResume) {
+      for (const [userId, orgId] of byUser) {
+        this.audit.log({
+          organizationId: orgId,
+          targetId: userId,
+          targetType: 'User',
+          action: AuditAction.update,
+          metadata: { isVacationMode: false, groupId, reason: 'vacation sweep — approved group-scoped range ended (FR-VACX-006)' },
+        });
+      }
+    }
+    const memberChanges =
+      [...memberActivate.values()].reduce((n, m) => n + m.size, 0) +
+      [...memberResume.values()].reduce((n, m) => n + m.size, 0);
+    if (toActivate.size || toResume.length || memberChanges) {
       this.logger.log(
-        `Vacation sweep: activated=${toActivate.size} resumed=${toResume.length}`,
+        `Vacation sweep: activated=${toActivate.size} resumed=${toResume.length} groupScoped=${memberChanges}`,
       );
     }
   }
@@ -664,9 +807,14 @@ export class SystemDefaultWorker extends WorkerHost {
   // materializes exactly once (Redis dedup); a member enabling the toggle
   // mid-window starts from the NEXT window ("window has just opened").
   private async autoAttendanceSweep(): Promise<void> {
-    // Only groups that actually have opted-in active members.
+    // Only groups that actually have opted-in active members. Auto-attendance
+    // is a PER-GROUP setting, so opting in for one group must not enrol the
+    // member's other groups — the effective value decides, per membership.
     const optedIn = await this.prisma.groupMember.findMany({
-      where: { status: 'active', user: { isDefaultAttendance: true } },
+      where: {
+        status: 'active',
+        ...memberFlagWhere('isDefaultAttendance', true),
+      },
       select: { groupId: true },
       distinct: ['groupId'],
     });
@@ -858,10 +1006,13 @@ export class SystemDefaultWorker extends WorkerHost {
         where: {
           groupId: group.id,
           status: 'active',
-          user: { isDefaultAttendance: true },
+          ...memberFlagWhere('isDefaultAttendance', true),
         },
         select: {
           userId: true,
+          // Per-group override rides the SAME row; the user flag stays as the
+          // inherited fallback. No extra query, one boolean more on the wire.
+          isVacationMode: true,
           user: { select: { isVacationMode: true } },
         },
       }),
@@ -881,7 +1032,7 @@ export class SystemDefaultWorker extends WorkerHost {
       mealSlotKey: params.slotKey ?? null,
       candidates: members.map((m) => ({
         userId: m.userId,
-        isVacationMode: m.user.isVacationMode === true,
+        isVacationMode: resolveMemberFlag(m, m.user, 'isVacationMode'),
       })),
     });
 
@@ -1252,6 +1403,9 @@ export class SystemDefaultWorker extends WorkerHost {
         },
         select: {
           userId: true,
+          // Per-group override rides the SAME row (no extra query); the user
+          // flag below stays as the inherited fallback.
+          isVacationMode: true,
           user: {
             select: {
               remindersEnabled: true,
@@ -1279,7 +1433,7 @@ export class SystemDefaultWorker extends WorkerHost {
       mealSlotKey: params.slotKey ?? null,
       candidates: members.map((m) => ({
         userId: m.userId,
-        isVacationMode: m.user.isVacationMode === true,
+        isVacationMode: resolveMemberFlag(m, m.user, 'isVacationMode'),
       })),
     });
 

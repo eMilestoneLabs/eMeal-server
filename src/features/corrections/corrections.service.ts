@@ -28,6 +28,8 @@ import { CorrectionRequestEntity } from './entities/correction-request.entity';
 import { CreateCorrectionRequestDto } from './dto/create-correction-request.dto';
 import { QueryCorrectionRequestDto } from './dto/query-correction-request.dto';
 import { ReviewCorrectionRequestDto } from './dto/review-correction-request.dto';
+import { resolveMemberFlag } from '../../common/utils/member-settings.util';
+import { getVacationCoveredUserIds } from '../../common/utils/vacation-coverage.util';
 
 /**
  * requestType → the attendance status it targets (null = no status change).
@@ -131,6 +133,9 @@ export class CorrectionsService {
         price: true,
         attendanceWindowOpen: true,
         attendanceWindowClose: true,
+        // ISSUE-005 identity-first boundary coverage. FREE — one more column
+        // on a select this path already makes.
+        slotKey: true,
         organization: { select: { timezone: true } },
         // Live-Test-8 ISSUE-004: planner flags gate the day-override below —
         // rides the same query, no extra round-trip.
@@ -148,13 +153,20 @@ export class CorrectionsService {
     // decides admin self-service below, and its `isVacationMode` also serves
     // the claim_present vacation gate further down, so this Promise.all REPLACES
     // that later lookup: no net query is added to the request path.
-    const [isMember, requester] = await Promise.all([
+    const [isMember, requesterMembership] = await Promise.all([
       this.membersRepo.isActiveMember(meal.groupId, userId),
-      this.prisma.user.findUnique({
-        where: { id: userId },
-        select: { role: true, isVacationMode: true },
+      this.prisma.groupMember.findUnique({
+        where: { groupId_userId: { groupId: meal.groupId, userId } },
+        select: {
+          // Per-group vacation override; the nested user row carries the
+          // current role AND the inherited fallback. Still ONE point read —
+          // the composite (groupId, userId) unique replaces the user PK.
+          isVacationMode: true,
+          user: { select: { role: true, isVacationMode: true } },
+        },
       }),
     ]);
+    const requester = requesterMembership?.user;
     if (!isMember) {
       throw new ForbiddenException('You are not an active member of this group');
     }
@@ -244,9 +256,36 @@ export class CorrectionsService {
     }
 
     // Vacation members cannot claim Present (FR-ACR-001 preconditions).
-    // ISSUE-001: served by the `requester` row already fetched above — the
-    // dedicated lookup that used to live here was removed, not duplicated.
-    if (dto.requestType === 'claim_present' && requester?.isVacationMode) {
+    //
+    // Resolved through getVacationCoveredUserIds — the SAME helper the two
+    // sibling gates already use (attendance mark, guest hosting). The raw flag
+    // is date-agnostic, so a leave ending mid-day blocked corrections for the
+    // whole day; the helper is date- AND meal-accurate (FR-VACX-003 boundary
+    // slots), so the member regains corrections at the exact meal their leave
+    // ends. `resolveMemberFlag` still supplies the candidate's effective
+    // per-group value from rows already fetched — no membership re-read.
+    let claimBlockedByVacation = false;
+    if (dto.requestType === 'claim_present') {
+      const onVacation = await getVacationCoveredUserIds(this.prisma as any, {
+        organizationId,
+        groupId: meal.groupId,
+        dateUtc: toUtcMidnight(dateStr),
+        mealOpenTime: dayEffective?.openTime ?? meal.attendanceWindowOpen,
+        mealSlotKey: (meal as any).slotKey ?? null,
+        candidates: [
+          {
+            userId,
+            isVacationMode: resolveMemberFlag(
+              requesterMembership,
+              requester,
+              'isVacationMode',
+            ),
+          },
+        ],
+      });
+      claimBlockedByVacation = onVacation.has(userId);
+    }
+    if (claimBlockedByVacation) {
       throw new BadRequestException({
         message: 'You are on vacation mode — corrections to Present are unavailable',
         errors: { requestType: 'Disable vacation mode first' },

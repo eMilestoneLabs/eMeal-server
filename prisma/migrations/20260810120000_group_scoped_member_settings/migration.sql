@@ -1,0 +1,38 @@
+-- Group-scoped member settings — per-group vacation + auto-attendance.
+--
+-- Both settings previously lived ONLY on "users", so a single toggle governed
+-- every group the member belonged to:
+--   * auto-attendance enabled while viewing group A also auto-marked (and
+--     billed) the member in group B;
+--   * an APPROVED group-scoped vacation request flipped the global user flag,
+--     which then suppressed attendance and billing in the member's OTHER
+--     groups — a financial leak across group isolation;
+--   * "return early" ended the covering requests of every group at once.
+--
+-- These two columns give each (group, member) pair its own value. They live on
+-- "group_members" rather than a new table because UNI-015 already guarantees
+-- exactly one membership row per (group, user) via the existing
+-- "group_members_groupId_userId_key" unique index — the natural, already
+-- tenant-scoped home for per-group member state.
+--
+-- NULLABLE with NO DEFAULT. This is the entire safety story and is deliberate:
+--   NULL  -> inherit the user-level flag (users.isVacationMode / .isDefaultAttendance)
+--   true  -> explicitly ON for this group only
+--   false -> explicitly OFF for this group only (per-group return-early)
+--
+-- Every pre-existing row is therefore NULL, the effective value stays
+-- `member ?? user`, and behaviour is byte-identical to before this migration
+-- until something explicitly writes a per-group value. NO BACKFILL is required
+-- or performed, and the org-level / admin-forced GLOBAL vacation toggles keep
+-- working unchanged through that inheritance.
+--
+-- No index is added: both columns are only ever read from rows already
+-- selected by ("groupId", "userId") or by the existing "groupId"/"status"
+-- indexes, and they are far too low-cardinality to be selective on their own.
+--
+-- Adding a NULLABLE column with no default is a catalog-only change on
+-- PostgreSQL 11+ — no table rewrite, no scan, no long lock.
+--
+-- Idempotent so a re-run during live testing is safe.
+ALTER TABLE "group_members" ADD COLUMN IF NOT EXISTS "isVacationMode" BOOLEAN;
+ALTER TABLE "group_members" ADD COLUMN IF NOT EXISTS "isDefaultAttendance" BOOLEAN;

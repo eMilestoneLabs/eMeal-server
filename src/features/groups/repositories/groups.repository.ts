@@ -63,12 +63,62 @@ export class GroupsRepository {
     entity.memberFunctionalRoles = new Map(
       members.map((m) => [m.userId, m.functionalRole ?? null]),
     );
+    // Same ride-along, same reasoning: the requester's RAW per-group overrides
+    // (null = inherit the user-level flag). Internal — only the detail read
+    // path copies the requester's own entry onto `myMemberSettings`.
+    //
+    // Built ONLY when the columns were actually selected (memberSelectWithSettings,
+    // i.e. the detail read). The list paths deliberately do not select them, and
+    // allocating a Map plus one object PER MEMBER PER GROUP of all-null entries
+    // there would be pure garbage on the hottest group read — 100 groups of 100
+    // members is 10k discarded objects for data nothing looks at. Presence of
+    // the property is the signal; `memberSettingsOf` already answers null when
+    // the map is absent, so the detail path is unchanged and list paths
+    // allocate nothing.
+    if (members.length > 0 && 'isVacationMode' in members[0]) {
+      entity.memberSettings = new Map(
+        members.map((m) => [
+          m.userId,
+          {
+            isVacationMode: (m as any).isVacationMode ?? null,
+            isDefaultAttendance: (m as any).isDefaultAttendance ?? null,
+          },
+        ]),
+      );
+    }
     return entity;
   }
 
-  // Members select clause — reused across queries for consistency
+  // Members select clause — reused across queries for consistency.
+  // DELIBERATELY unchanged: this clause is shared by the LIST paths
+  // (findAll, findByMembership, findByJoinCode, findPendingJoinGroupsForUser),
+  // which never read the per-group member settings. Widening it there would
+  // pull two extra columns for every member of every returned group on the
+  // hot list read, for data nothing consumes.
   private get memberSelect() {
-    return { select: { userId: true, status: true, functionalRole: true } };
+    return {
+      select: { userId: true, status: true, functionalRole: true },
+    };
+  }
+
+  /**
+   * DETAIL-read variant: the same clause plus the requester's per-group member
+   * settings. Used ONLY by {@link findById}, because `getGroupById` is the only
+   * caller that surfaces them (as `myMemberSettings`). They ride the include
+   * that read already performs, so the detail path pays ZERO extra round trips
+   * (guidebook §3b.3 "ride the include") while the list paths stay byte-for-byte
+   * as they were.
+   */
+  private get memberSelectWithSettings() {
+    return {
+      select: {
+        userId: true,
+        status: true,
+        functionalRole: true,
+        isVacationMode: true,
+        isDefaultAttendance: true,
+      },
+    };
   }
 
   // ── Queries ───────────────────────────────────────────────────────────────
@@ -84,7 +134,7 @@ export class GroupsRepository {
         organizationId, // CRITICAL: tenant isolation
         ...(includeInactive ? {} : { isActive: true }),
       },
-      include: { members: this.memberSelect },
+      include: { members: this.memberSelectWithSettings },
     });
     return group ? this.buildEntity(group) : null;
   }

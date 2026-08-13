@@ -19,6 +19,16 @@ export class UserEntity {
   isActive: boolean;
   isVacationMode: boolean;
   isDefaultAttendance: boolean;
+
+  // Which groups the CURRENT vacation actually applies to. Additive, resolved
+  // per-request on the GET /users/me path only — not a DB column.
+  //   null      → the flag governs every group (pure toggle, or an ORG-LEVEL
+  //               covering request). This is the value on every other path,
+  //               so nothing that does not populate it changes behaviour.
+  //   string[]  → only these groups; the member is NOT on vacation elsewhere.
+  // See resolveVacationScopeGroupIds for why the client needs this to avoid
+  // showing "on vacation" in a group the leave was never requested for.
+  vacationScopedGroupIds?: string[] | null;
   remindersEnabled: boolean;
   loginPreference: string | null;
   fcmToken: string | null;

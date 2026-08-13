@@ -20,8 +20,9 @@
  * enabled auto-attendance.
  */
 
+import { memberFlagWhere } from './member-settings.util';
+
 type PrismaLite = {
-  user: { findUnique: (args: unknown) => Promise<any> };
   groupMember: { findMany: (args: unknown) => Promise<any[]> };
   meal: { findMany: (args: unknown) => Promise<any[]> };
 };
@@ -34,17 +35,18 @@ export async function resumeAutoAttendanceForUser(
   params: { userId: string; organizationId: string; dateStr: string },
 ): Promise<void> {
   const { userId, organizationId, dateStr } = params;
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { isDefaultAttendance: true },
-  });
-  if (!user?.isDefaultAttendance) return;
 
+  // Auto-attendance is per group, so the opt-in check IS the membership
+  // filter: only groups whose EFFECTIVE setting is on need their once-keys
+  // cleared. Folding it into the query the helper already ran replaces the
+  // separate user point-read (one query fewer, not one more) and keeps the
+  // early return for members who never enabled it anywhere.
   const memberships = await prisma.groupMember.findMany({
     where: {
       userId,
       status: 'active',
       group: { organizationId, isActive: true },
+      ...memberFlagWhere('isDefaultAttendance', true),
     },
     select: { groupId: true },
   });

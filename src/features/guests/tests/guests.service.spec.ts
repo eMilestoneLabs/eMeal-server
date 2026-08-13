@@ -234,7 +234,35 @@ describe('GuestsService (Module 22)', () => {
   });
 
   it('vacation hosts cannot host guests (FR-HG-043)', async () => {
+    // Override NULL → the user-level flag is inherited, exactly as before the
+    // per-group settings existed.
+    membersRepo.findMembership.mockResolvedValue({
+      status: 'active',
+      isVacationMode: null,
+    });
     prisma.user.findUnique.mockResolvedValue({ isVacationMode: true });
+    await expect(book([{ isAdult: true }])).rejects.toThrow(ForbiddenException);
+  });
+
+  // Group-scoped vacation: the setting that governs hosting is THIS group's,
+  // never the user-level bit on its own. Both directions are asserted because
+  // only one of them fails if the resolver is written with `||` instead of
+  // `??` — an explicit per-group false must beat an inherited true.
+  it('a host on vacation in ANOTHER group can still host here (per-group false beats inherited true)', async () => {
+    membersRepo.findMembership.mockResolvedValue({
+      status: 'active',
+      isVacationMode: false,
+    });
+    prisma.user.findUnique.mockResolvedValue({ isVacationMode: true });
+    await expect(book([{ isAdult: true }])).resolves.toBeDefined();
+  });
+
+  it('a host on vacation in THIS group cannot host, even with the user flag off', async () => {
+    membersRepo.findMembership.mockResolvedValue({
+      status: 'active',
+      isVacationMode: true,
+    });
+    prisma.user.findUnique.mockResolvedValue({ isVacationMode: false });
     await expect(book([{ isAdult: true }])).rejects.toThrow(ForbiddenException);
   });
 

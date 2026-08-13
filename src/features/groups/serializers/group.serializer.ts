@@ -106,6 +106,12 @@ export class GroupSerializer {
 
       // Additive (#8): requester's per-group functional role (null = use global).
       functionalRole: group.functionalRole ?? null,
+      // Additive: the REQUESTER's own per-group setting overrides, populated
+      // only on the detail read. `null` on a field means "inherit the
+      // user-level flag", which the client already has in its session — so the
+      // student Settings tab can show THIS group's true state with no extra
+      // call. Never the whole member map: that would leak every member's state.
+      myMemberSettings: group.myMemberSettings ?? null,
 
       // Additive (ISSUE 2): read-only detail context for members. Populated only
       // on GET /groups/:id (null elsewhere / when unavailable).

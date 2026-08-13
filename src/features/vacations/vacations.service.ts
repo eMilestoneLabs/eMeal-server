@@ -308,7 +308,14 @@ export class VacationsService {
       existing.startDate.getTime() <= todayUtc.getTime() &&
       existing.endDate.getTime() >= todayUtc.getTime();
     if (coversToday) {
-      await this.repo.setUserVacation(existing.userId, organizationId, true);
+      // Scope rides the request: a group-scoped approval activates THAT
+      // membership, an org-level one still writes the account flag.
+      await this.repo.setUserVacation(
+        existing.userId,
+        organizationId,
+        true,
+        existing.groupId,
+      );
     }
 
     // FR-VACX-004 (LOOP-046): overlapping explicit Present marks are KEPT
@@ -464,14 +471,26 @@ export class VacationsService {
     if (wasApproved) {
       // Reuses the date already resolved by the ended-vacation guard above —
       // one org-timezone read per cancel, exactly as before this change.
+      // Scoped to the SAME state the write below resyncs: cancelling a
+      // group-scoped vacation must not be held open by an unrelated group's
+      // live vacation.
       const stillCovered = await this.repo.hasApprovedCovering(
         existing.userId,
         organizationId,
         todayUtc!,
         id,
+        existing.groupId,
+        true,
       );
       if (!stillCovered) {
-        await this.repo.setUserVacation(existing.userId, organizationId, false);
+        // Same scope on the way out — a group-scoped cancel restores that
+        // membership to NULL (inherit), never a shadowing `false`.
+        await this.repo.setUserVacation(
+          existing.userId,
+          organizationId,
+          false,
+          existing.groupId,
+        );
         // Live-Test-11 ISSUE-004: vacation ended mid-day — clear today's
         // auto-attendance once-keys so the sweep re-marks the member for
         // still-open windows. Fire-and-forget, never blocks the cancel.

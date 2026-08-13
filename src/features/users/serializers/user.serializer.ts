@@ -31,6 +31,11 @@ export class UserSerializer {
       isActive: user.isActive,
       isVacationMode: user.isVacationMode,
       isDefaultAttendance: user.isDefaultAttendance,
+      // Additive: the groups the vacation flag above actually applies to.
+      // `null` (every path except GET /users/me) means "governs every group" —
+      // exactly the behaviour every existing client already implements, so an
+      // older client ignoring this field is unchanged.
+      vacationScopedGroupIds: user.vacationScopedGroupIds ?? null,
       remindersEnabled: user.remindersEnabled,
       loginPreference: user.loginPreference ?? 'email',
       // SRS AUTH-036/040/041 — lets the client gate onboarding on email verification.

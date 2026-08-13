@@ -6,6 +6,7 @@ import {
   getTodayInTimezone,
   toUtcMidnight,
 } from '../../../common/utils/date.utils';
+import { splitVacationTargets } from '../../../common/utils/vacation-coverage.util';
 
 @Injectable()
 export class UsersRepository {
@@ -46,6 +47,11 @@ export class UsersRepository {
           status: true,
           // ISSUE-001: group name + per-group role for the switcher labels.
           functionalRole: true,
+          // Per-group vacation state. FREE — one more column on an include
+          // this finder already makes. It lets the read-time sync decide
+          // whether a write is even needed, preserving command_6's rule that
+          // the common no-flip profile load costs ZERO extra queries.
+          isVacationMode: true,
           group: { select: { name: true } },
         },
       },
@@ -73,6 +79,12 @@ export class UsersRepository {
    *     today → flip OFF (auto-resume the day after endDate, org time).
    *   • Pure-toggle users (no approved requests at all) are NEVER touched —
    *     the instant toggle is its own mode and must not silently die.
+   *
+   * Currently UNREACHABLE — `GET /auth/me` uses the bundled
+   * {@link resolveVacationFlagPrefetched} (command_6), and a repo grep finds
+   * no production caller. It is KEPT (never delete a working path) and is now
+   * SCOPE-AWARE like the other writers, so wiring it up again can never
+   * re-introduce the account-level spill.
    */
   async syncVacationExpiry(userId: string): Promise<void> {
     const user = await this.prisma.user.findUnique({
@@ -88,7 +100,7 @@ export class UsersRepository {
     const tz = user.organization?.timezone ?? 'Asia/Kolkata';
     const todayUtc = toUtcMidnight(getTodayInTimezone(tz));
 
-    const covering = await this.prisma.vacationRequest.findFirst({
+    const coveringRequests = await this.prisma.vacationRequest.findMany({
       where: {
         userId,
         status: 'approved',
@@ -96,20 +108,47 @@ export class UsersRepository {
         startDate: { lte: todayUtc },
         endDate: { gte: todayUtc },
       },
-      select: { id: true },
+      // `groupId` decides WHERE the state belongs — same free column, same
+      // shared rule as the other two writers.
+      select: { id: true, groupId: true },
     });
+    const { orgLevel, groupIds } = splitVacationTargets(coveringRequests);
 
-    if (covering && !user.isVacationMode) {
+    // GROUP-SCOPED requests activate their own membership. `not: true` keeps
+    // it idempotent while still re-activating a group the member once returned
+    // early from (identical guard to resolveVacationFlagPrefetched).
+    if (groupIds.length > 0) {
+      // TENANT ISOLATION: no organizationId predicate is needed here and its
+      // absence is not an oversight. `groupIds` is derived from THIS user's own
+      // approved requests (the query above is `userId`-pinned), and a request's
+      // groupId is validated against the member's own membership at creation.
+      // The write is additionally pinned to `userId`, so it can only ever touch
+      // this user's own membership rows — never another user's, never another
+      // organization's.
+      await this.prisma.groupMember.updateMany({
+        where: { userId, groupId: { in: groupIds }, isVacationMode: { not: true } },
+        data: { isVacationMode: true },
+      });
+    }
+
+    // Only an ORG-LEVEL covering request may raise the ACCOUNT flag.
+    if (orgLevel && !user.isVacationMode) {
       await this.prisma.user.update({
         where: { id: userId },
         data: { isVacationMode: true },
       });
       return;
     }
-    if (!covering && user.isVacationMode) {
+    // ACCOUNT-flag resume. Gated on ORG-LEVEL coverage only, mirroring the
+    // FR-VACX-006 sweep: `User.isVacationMode` means ORG-WIDE leave, so a
+    // group-scoped request must never hold it open — an expired org-level
+    // vacation would then stay switched on merely because an unrelated
+    // group's vacation had started, re-creating the cross-group spill.
+    if (!orgLevel && user.isVacationMode) {
       // Only request-driven flags auto-resume; toggle-mode flags stay.
+      // ORG-LEVEL only, for the same reason.
       const hasAnyApproved = await this.prisma.vacationRequest.findFirst({
-        where: { userId, status: 'approved', deletedAt: null },
+        where: { userId, status: 'approved', deletedAt: null, groupId: null },
         select: { id: true },
       });
       if (hasAnyApproved) {
@@ -137,7 +176,17 @@ export class UsersRepository {
   async findByIdWithVacationMeta(id: string): Promise<{
     entity: UserEntity;
     orgTimezone: string;
-    approvedNearToday: { startDate: Date; endDate: Date }[];
+    approvedNearToday: {
+      startDate: Date;
+      endDate: Date;
+      // Additive, and FREE: one more column on a select this query already
+      // makes. It carries WHICH group a covering request belongs to, so the
+      // caller can tell the client that a group-scoped vacation does not apply
+      // to the member's other groups (resolveVacationScopeGroupIds).
+      groupId: string | null;
+    }[];
+    /** groupId -> this member's per-group vacation value (null = inherit). */
+    memberVacation: Map<string, boolean | null>;
   } | null> {
     const marginMs = 48 * 60 * 60 * 1000;
     const now = Date.now();
@@ -157,7 +206,7 @@ export class UsersRepository {
           startDate: { lte: new Date(now + marginMs) },
           endDate: { gte: new Date(now - marginMs) },
         },
-        select: { startDate: true, endDate: true },
+        select: { startDate: true, endDate: true, groupId: true },
       }),
     ]);
     if (!user) return null;
@@ -166,6 +215,12 @@ export class UsersRepository {
       entity: this.buildEntityFromInclude(rest),
       orgTimezone: organization?.timezone ?? 'Asia/Kolkata',
       approvedNearToday,
+      memberVacation: new Map(
+        ((rest.groupMembers ?? []) as any[]).map((m) => [
+          m.groupId as string,
+          (m.isVacationMode ?? null) as boolean | null,
+        ]),
+      ),
     };
   }
 
@@ -180,21 +235,93 @@ export class UsersRepository {
     userId: string,
     isVacationMode: boolean,
     orgTimezone: string,
-    approvedNearToday: { startDate: Date; endDate: Date }[],
+    approvedNearToday: { startDate: Date; endDate: Date; groupId?: string | null }[],
+    // Per-group state from the SAME bundle (groupId -> value, null = inherit).
+    // Omitted by callers that have no membership context; the org-level rules
+    // below are then byte-identical to the behaviour before group scoping.
+    memberVacation?: Map<string, boolean | null>,
   ): Promise<boolean> {
     const todayUtc = toUtcMidnight(getTodayInTimezone(orgTimezone));
-    const covering = approvedNearToday.some(
+    const coveringRequests = approvedNearToday.filter(
       (r) => r.startDate <= todayUtc && r.endDate >= todayUtc,
     );
 
-    if (covering && !isVacationMode) {
+    // WHERE the state belongs. An ORG-LEVEL request keeps writing the account
+    // flag exactly as before; a GROUP-SCOPED one writes only its membership,
+    // because the account bit has no room for scope and using it marked the
+    // member on vacation in every group they belong to.
+    const { orgLevel, groupIds } = splitVacationTargets(coveringRequests);
+
+    // Activate the group-scoped memberships a covering request governs.
+    //
+    // The guard is "not already TRUE", never "is NULL". A per-group Return
+    // Early leaves the row at explicit `false`, and a LATER approved request
+    // for that same group must still be able to activate it — the account-flag
+    // path has always recovered that way (`covering && !isVacationMode`).
+    // Narrowing this to NULL would strand the member off-vacation for every
+    // future request in a group they once returned early from.
+    //
+    // Return Early is protected by the REQUEST being ended, not by the column
+    // value: setVacationMode calls endCoveringVacationRequests for this group
+    // AND org-level requests, so no covering request survives to re-activate.
+    //
+    // `not: true` also keeps the hot path clean — an already-active membership
+    // matches nothing, so a profile load during a vacation issues NO write.
+    if (memberVacation) {
+      const toActivate = groupIds.filter((g) => memberVacation.get(g) !== true);
+      if (toActivate.length > 0) {
+        // Tenant isolation by derivation — see the note in syncVacationExpiry:
+        // groupIds come from this user's OWN requests and the write is
+        // userId-pinned, so no cross-user or cross-org row is reachable.
+        await this.prisma.groupMember.updateMany({
+          where: {
+            userId,
+            groupId: { in: toActivate },
+            isVacationMode: { not: true },
+          },
+          data: { isVacationMode: true },
+        });
+      }
+    }
+
+    // Only an ORG-LEVEL covering request may raise the account flag now.
+    if (orgLevel && !isVacationMode) {
       await this.prisma.user.update({
         where: { id: userId },
         data: { isVacationMode: true },
       });
       return true;
     }
-    if (!covering && isVacationMode) {
+    // Group-scoped resume: a membership activated by a request that has now
+    // ENDED goes back to NULL (inherit) — never `false`, which would be an
+    // explicit override permanently shadowing later org-wide vacations.
+    // Gated by the SAME "recently ended" rule as the account flag (LT-8
+    // ISSUE-007): without it, a member's own per-group toggle would be
+    // force-cleared, which is precisely the bug that exposed members to
+    // auto-Present billing mid-vacation.
+    if (memberVacation) {
+      const endedRecently = approvedNearToday.filter(
+        (r) => r.endDate.getTime() < todayUtc.getTime(),
+      );
+      const stillCovered = new Set(groupIds);
+      const toResume = splitVacationTargets(endedRecently)
+        .groupIds.filter(
+          (g) => !stillCovered.has(g) && memberVacation.get(g) === true,
+        );
+      if (toResume.length > 0) {
+        await this.prisma.groupMember.updateMany({
+          where: { userId, groupId: { in: toResume }, isVacationMode: true },
+          data: { isVacationMode: null },
+        });
+      }
+    }
+
+    // ACCOUNT-flag resume — ORG-LEVEL requests only, mirroring the FR-VACX-006
+    // sweep. `User.isVacationMode` means ORG-WIDE leave, so a GROUP-scoped
+    // request must never hold it open: an expired org-level vacation would
+    // otherwise stay switched on merely because an unrelated group's vacation
+    // had started, spilling org-wide leave into every group.
+    if (!orgLevel && isVacationMode) {
       // Only request-driven flags auto-resume; toggle-mode flags stay.
       // Live-Test-8 ISSUE-007: "request-driven" = an approved request that
       // JUST ENDED (inside the prefetch's ±48h margin). The old "any approved
@@ -203,8 +330,9 @@ export class UsersRepository {
       // billing mid-vacation. A recently-ended request is the only legitimate
       // auto-resume trigger; anything older means the flag is toggle-driven
       // and stays until the member turns it off.
+      // ORG-LEVEL only, for the same reason as the guard above.
       const recentlyEnded = approvedNearToday.some(
-        (r) => r.endDate.getTime() < todayUtc.getTime(),
+        (r) => r.groupId == null && r.endDate.getTime() < todayUtc.getTime(),
       );
       if (recentlyEnded) {
         await this.prisma.user.update({
@@ -235,7 +363,16 @@ export class UsersRepository {
    * vacations, not the one being returned from. Returns the ended request ids
    * so the caller can audit the action (VAC-013).
    */
-  async endCoveringVacationRequests(userId: string): Promise<string[]> {
+  async endCoveringVacationRequests(
+    userId: string,
+    // Optional GROUP scope for Return Early. Omitted (every existing caller)
+    // keeps the historical behaviour verbatim: every covering request ends,
+    // matching the org-wide toggle that triggered it. Supplied, only THIS
+    // group's requests — plus org-level ones, which genuinely cover it — are
+    // ended, so returning early from one group cannot silently truncate a
+    // separately-approved vacation in another.
+    groupId?: string,
+  ): Promise<string[]> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: { organization: { select: { timezone: true } } },
@@ -252,6 +389,10 @@ export class UsersRepository {
         deletedAt: null,
         startDate: { lte: todayUtc },
         endDate: { gte: todayUtc },
+        // Same scoping rule the coverage util applies (FR-VACX-001): an
+        // org-level request (groupId null) governs every group, so ending
+        // this group's vacation must end it too.
+        ...(groupId ? { OR: [{ groupId }, { groupId: null }] } : {}),
       },
       select: { id: true, startDate: true },
     });
@@ -278,9 +419,136 @@ export class UsersRepository {
    * Pass 11 (FR-VACX-001): does any of the user's active groups require the
    * dated-request approval flow (instant toggle disabled)?
    */
-  async vacationRequiresApproval(userId: string): Promise<boolean> {
+  /**
+   * Resolve a CLIENT-SUPPLIED groupId to a membership the target user actually
+   * holds, inside the caller's organization. Returns null when the id is not
+   * an active membership of that user in that org — so a caller can never
+   * address another tenant's or another member's group by guessing an id.
+   *
+   * One indexed point read on the existing (groupId, userId) unique.
+   */
+  async findActiveMembershipId(
+    userId: string,
+    groupId: string,
+    organizationId: string,
+  ): Promise<string | null> {
     const hit = await this.prisma.groupMember.findFirst({
       where: {
+        userId,
+        groupId,
+        status: 'active',
+        // Tenant isolation through the relation, plus the same archived-group
+        // re-check every other state-changing flow makes at submit: an
+        // archived group runs no meals, so a per-group setting written to one
+        // is inert — but it SURVIVES a restore, which is exactly the "silently
+        // resumes on return" hazard the rejoin paths reset to NULL to avoid.
+        // `vacationRequiresApproval` already required isActive; this aligns.
+        group: { organizationId, isActive: true },
+      },
+      select: { id: true },
+    });
+    return hit?.id ?? null;
+  }
+
+  /**
+   * Per-group Personal Auto-Attendance (ATT-010). Writes the membership row
+   * only — `User.isDefaultAttendance` is left untouched so it keeps serving as
+   * the inherited default for every group that has no explicit value.
+   */
+  async setMemberDefaultAttendance(
+    userId: string,
+    groupId: string,
+    organizationId: string,
+    enabled: boolean,
+  ): Promise<boolean> {
+    const { count } = await this.prisma.groupMember.updateMany({
+      where: {
+        userId,
+        groupId,
+        status: 'active',
+        // Tenant isolation + the archived-group re-check (see
+        // findActiveMembershipId). Same clause on both, so the validate and
+        // the write can never disagree about which groups are writable.
+        group: { organizationId, isActive: true },
+      },
+      data: { isDefaultAttendance: enabled },
+    });
+    return count > 0;
+  }
+
+  /**
+   * Per-group vacation state. Same contract as
+   * {@link setMemberDefaultAttendance}: membership row only, user flag
+   * untouched. `null` restores "inherit the user-level flag".
+   */
+  async setMemberVacationMode(
+    userId: string,
+    groupId: string,
+    organizationId: string,
+    value: boolean | null,
+  ): Promise<boolean> {
+    const { count } = await this.prisma.groupMember.updateMany({
+      where: {
+        userId,
+        groupId,
+        status: 'active',
+        // Same clause as the other two (see findActiveMembershipId).
+        group: { organizationId, isActive: true },
+      },
+      data: { isVacationMode: value },
+    });
+    return count > 0;
+  }
+
+  /**
+   * ORG-WIDE vacation write (no group scope) — the admin-forced toggle and the
+   * historical self-service one.
+   *
+   * It must be AUTHORITATIVE. `resolveMemberFlag` is `member ?? user`, so an
+   * explicit per-group value beats the user flag by design (that is how a
+   * per-group Return Early works). The side effect was that once a member had
+   * used the per-group toggle, that column stayed non-NULL forever and an
+   * admin forcing vacation org-wide got a 200 plus a "turned ON by your admin"
+   * push while THAT group carried on billing them.
+   *
+   * Clearing the overrides back to NULL restores inheritance, so the org-wide
+   * value genuinely governs every group again — which is what "org-wide" means
+   * and what the migration note promised.
+   *
+   * ONE round trip: `$transaction([...])` pipelines both statements, so this
+   * costs no extra wave versus the single `update` it replaces. The
+   * `not: null` predicate means the second statement touches only rows that
+   * actually carry an override — usually zero.
+   *
+   * Only `isVacationMode` is cleared. Auto-attendance has no org-wide toggle
+   * and is a separate member preference; wiping it here would destroy a
+   * setting the actor never addressed.
+   */
+  async setVacationModeOrgWide(userId: string, enabled: boolean) {
+    const [user] = await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: userId },
+        data: { isVacationMode: enabled },
+      }),
+      this.prisma.groupMember.updateMany({
+        where: { userId, isVacationMode: { not: null } },
+        data: { isVacationMode: null },
+      }),
+    ]);
+    return user;
+  }
+
+  async vacationRequiresApproval(
+    userId: string,
+    // Optional GROUP scope. Omitted (the org-wide toggle) keeps the historical
+    // rule verbatim: ANY of the member's groups demanding approval blocks the
+    // instant toggle. Supplied, only THAT group's policy decides — a group
+    // that does not require approval must not inherit another group's gate.
+    groupId?: string,
+  ): Promise<boolean> {
+    const hit = await this.prisma.groupMember.findFirst({
+      where: {
+        ...(groupId ? { groupId } : {}),
         userId,
         status: 'active',
         group: { isActive: true, vacationRequiresApproval: true },

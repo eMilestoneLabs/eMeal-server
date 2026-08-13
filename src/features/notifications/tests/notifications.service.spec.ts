@@ -284,6 +284,86 @@ describe('NotificationsService', () => {
     );
   });
 
+  // ── Group-scoped vacation on the schedule-published push ────────────────
+  //
+  // Vacation is per group (`member ?? user`). The SQL filter deliberately does
+  // NOT express it — adding it would need a second reference to the `user`
+  // relation next to the reminders/token one, and Prisma emits a separate
+  // correlated subquery per relation reference, turning one join on `users`
+  // into two. The resolve therefore happens in memory, and these tests are
+  // what keep that decision honest.
+
+  it('notifySchedulePublished inherits the user flag when the group has no override', async () => {
+    mockPrisma.groupMember.findMany.mockResolvedValueOnce([
+      { userId: 'u-a', isVacationMode: null, user: { fcmToken: 'tok-a', isVacationMode: false } },
+      { userId: 'u-b', isVacationMode: null, user: { fcmToken: 'tok-b', isVacationMode: true } },
+    ]);
+
+    await service.notifySchedulePublished({
+      organizationId: 'org-1',
+      groupId: 'group-1',
+      weekStartDate: '2026-08-10',
+    });
+
+    expect(mockQueue.enqueueBatchPush).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recipients: [{ userId: 'u-a', fcmToken: 'tok-a' }],
+      }),
+    );
+  });
+
+  it('notifySchedulePublished still pushes to a member on vacation in ANOTHER group', async () => {
+    mockPrisma.groupMember.findMany.mockResolvedValueOnce([
+      // Per-group false must beat the inherited true — this is the leak the
+      // per-group setting exists to close, and the `??`-vs-`||` regression.
+      { userId: 'u-c', isVacationMode: false, user: { fcmToken: 'tok-c', isVacationMode: true } },
+    ]);
+
+    await service.notifySchedulePublished({
+      organizationId: 'org-1',
+      groupId: 'group-1',
+      weekStartDate: '2026-08-10',
+    });
+
+    expect(mockQueue.enqueueBatchPush).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recipients: [{ userId: 'u-c', fcmToken: 'tok-c' }],
+      }),
+    );
+  });
+
+  it('notifySchedulePublished suppresses a member on vacation in THIS group', async () => {
+    mockPrisma.groupMember.findMany.mockResolvedValueOnce([
+      { userId: 'u-d', isVacationMode: true, user: { fcmToken: 'tok-d', isVacationMode: false } },
+    ]);
+
+    await service.notifySchedulePublished({
+      organizationId: 'org-1',
+      groupId: 'group-1',
+      weekStartDate: '2026-08-10',
+    });
+
+    expect(mockQueue.enqueueBatchPush).not.toHaveBeenCalled();
+  });
+
+  // Plan-shape guard: the vacation predicate must stay OUT of the SQL, so the
+  // where-clause keeps exactly ONE `user` relation reference (one join).
+  it('notifySchedulePublished keeps the vacation filter out of the SQL where-clause', async () => {
+    mockPrisma.groupMember.findMany.mockResolvedValueOnce([]);
+
+    await service.notifySchedulePublished({
+      organizationId: 'org-1',
+      groupId: 'group-1',
+      weekStartDate: '2026-08-10',
+    });
+
+    const where = mockPrisma.groupMember.findMany.mock.calls[0][0].where;
+    expect(where).not.toHaveProperty('OR');
+    expect(where).not.toHaveProperty('isVacationMode');
+    expect(where.user).not.toHaveProperty('isVacationMode');
+    expect(Object.keys(where.user).sort()).toEqual(['fcmToken', 'remindersEnabled']);
+  });
+
   it('notifyNoticePublished never throws when push enqueue fails (FR-NOTX-016)', async () => {
     mockPrisma.user.findMany.mockResolvedValueOnce([
       { id: 'user-1', fcmToken: 'tok-1' },

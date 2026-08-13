@@ -114,7 +114,9 @@ describe('VacationsService (Pass 11)', () => {
       { date: '2026-07-05', mealId: 'm1', mealName: 'Lunch' },
     ]);
     const res: any = await service.approve('admin1', 'org1', 'vr1', {} as any);
-    expect(repo.setUserVacation).toHaveBeenCalledWith('u1', 'org1', true);
+    // ORG-LEVEL request (groupId null) → still writes the ACCOUNT flag,
+    // byte-identical to the behaviour before group scoping.
+    expect(repo.setUserVacation).toHaveBeenCalledWith('u1', 'org1', true, null);
     expect(res.conflicts).toHaveLength(1);
     expect(res.conflicts[0].mealName).toBe('Lunch');
   });

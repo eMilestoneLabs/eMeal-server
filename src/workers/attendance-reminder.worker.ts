@@ -7,7 +7,8 @@
  *   dispatch-reminder — fired at scheduled time, pushes reminder to group members
  *
  * Rules enforced in worker (in addition to service-level checks):
- *   - Skip users with isVacationMode=true
+ *   - Skip members on vacation IN THIS GROUP (effective per-group setting:
+ *     the membership override, else the user-level flag)
  *   - Skip users with remindersEnabled=false
  *   - Skip users who have ALREADY marked attendance for this meal
  *   - Deduplicate using Redis setNx on dedupKey
@@ -38,6 +39,7 @@ import type { ScheduleReminderPayload } from '../queue/interfaces/job-payload.in
 import { getTodayInTimezone, toUtcMidnight } from '../common/utils/date.utils';
 import { getVacationCoveredUserIds } from '../common/utils/vacation-coverage.util';
 import { resolvePublishedDayEntries } from '../common/utils/published-day.util';
+import { resolveMemberFlag } from '../common/utils/member-settings.util';
 
 const REMINDER_DEDUP_TTL = 4 * 60 * 60; // 4 hours
 
@@ -91,13 +93,26 @@ export class AttendanceReminderWorker extends WorkerHost {
         where: {
           groupId,
           status: 'active',
+          // Vacation moved OUT of this filter and into the in-memory resolve
+          // below — deliberately, to preserve the query PLAN. Vacation is now
+          // per group (`member ?? user`), and expressing that here would need a
+          // second reference to the `user` relation alongside the one already
+          // used for reminders/token. Prisma emits a separate correlated
+          // subquery per relation reference, so the filter would have become
+          // two joins on `users` instead of one. The candidate set is a single
+          // group's active members, so filtering it in memory is free and the
+          // SQL stays exactly the shape it has always been.
           user: {
-            isVacationMode: false,
             remindersEnabled: true,
             fcmToken: { not: null },
           },
         },
-        select: { userId: true, user: { select: { fcmToken: true } } },
+        select: {
+          userId: true,
+          // Per-group override rides the SAME row; user flag is the fallback.
+          isVacationMode: true,
+          user: { select: { fcmToken: true, isVacationMode: true } },
+        },
       }),
       this.prisma.attendanceRecord.findMany({
         where: {
@@ -157,7 +172,9 @@ export class AttendanceReminderWorker extends WorkerHost {
       mealSlotKey: (mealRow as any)?.slotKey ?? null,
       candidates: membersWithToken.map((m) => ({
         userId: m.userId,
-        isVacationMode: false, // flag=true members were already filtered out
+        // Per-group effective value (see the select note above): a member on
+        // vacation in ANOTHER group must still be reminded for THIS one.
+        isVacationMode: resolveMemberFlag(m, m.user, 'isVacationMode'),
       })),
     });
 

@@ -486,6 +486,10 @@ export class GroupsService {
 
     // Additive (#8): requester's per-group functional role for display.
     group.functionalRole = group.functionalRoleOf(userId);
+    // Same ride-along: the requester's own per-group setting overrides, so the
+    // student Settings tab reflects THIS group rather than the shared
+    // user-level flag. Rides the member include already fetched — no query.
+    group.myMemberSettings = group.memberSettingsOf(userId);
 
     const names = await this.groupsRepo.getDetailNames(
       group.adminId,
@@ -1416,6 +1420,14 @@ export class GroupsService {
           reviewedBy: null as any,
           reviewedAt: null as any,
           reviewNote: null as any,
+          // Same rule for the per-group settings (UNI-015 reuses this row, so
+          // they would otherwise survive the removal): a member who was on
+          // vacation — or auto-marking — in this group before being removed
+          // must not silently resume either on rejoin. NULL restores
+          // "inherit the user-level flag", not false. Deliberately NOT reset
+          // on unblock: a block is temporary, so settings survive it.
+          isVacationMode: null as any,
+          isDefaultAttendance: null as any,
           ...(dto.functionalRole
             ? { functionalRole: dto.functionalRole }
             : {}),
@@ -2104,6 +2116,11 @@ export class GroupsService {
         role: (role as any) ?? existing.role,
         removedAt: null as any,
         removedBy: null as any,
+        // Same reset as the self-rejoin path above: UNI-015 reuses this row,
+        // so a stale per-group vacation / auto-attendance value would silently
+        // resume on re-add. NULL restores "inherit the user-level flag".
+        isVacationMode: null as any,
+        isDefaultAttendance: null as any,
       });
       await this.syncUserOrganization(targetUserId, organizationId);
       this.realtime?.emitGroupMemberUpdated(groupId, { groupId, userId: targetUserId, action: 'joined' });

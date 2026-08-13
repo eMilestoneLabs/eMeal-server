@@ -174,6 +174,11 @@ export class MembersRepository {
       reviewedBy: string | null;
       reviewedAt: Date | null;
       reviewNote: string | null;
+      // Per-group member settings. NULL means "inherit the user-level flag",
+      // which is also how the rejoin paths clear them (a removal must not
+      // leave a member silently on vacation / auto-marking when they return).
+      isVacationMode: boolean | null;
+      isDefaultAttendance: boolean | null;
     }>,
   ): Promise<GroupMemberEntity> {
     const m = await this.prisma.groupMember.update({

@@ -5,6 +5,7 @@ import {
   ConflictException,
   BadRequestException,
   UnprocessableEntityException,
+  ForbiddenException,
   Optional,
   Logger,
 } from '@nestjs/common';
@@ -17,7 +18,8 @@ import { QueueService } from '../../queue/queue.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../redis/redis.service';
 import { normalizePhone } from '../../common/utils/phone.util';
-import { getTodayInTimezone } from '../../common/utils/date.utils';
+import { getTodayInTimezone, toUtcMidnight } from '../../common/utils/date.utils';
+import { resolveVacationScopeGroupIds } from '../../common/utils/vacation-coverage.util';
 import { resumeAutoAttendanceForUser } from '../../common/utils/auto-attendance-resume.util';
 import { invalidateUserAuthCaches } from '../../common/utils/auth-cache-invalidation.util';
 
@@ -122,12 +124,25 @@ export class UsersService {
     // see UsersRepository.resolveVacationFlagPrefetched.
     const bundle = await this.usersRepo.findByIdWithVacationMeta(userId);
     if (!bundle) throw new NotFoundException('User not found');
-    const { entity, orgTimezone, approvedNearToday } = bundle;
+    const { entity, orgTimezone, approvedNearToday, memberVacation } = bundle;
     entity.isVacationMode = await this.usersRepo.resolveVacationFlagPrefetched(
       userId,
       entity.isVacationMode,
       orgTimezone,
       approvedNearToday,
+      // Per-group state from the SAME bundle, so a group-scoped approval
+      // activates that membership instead of the account-level flag.
+      memberVacation,
+    );
+    // Which groups that flag actually applies to. The flag is a single
+    // user-level bit, but a covering request may be scoped to ONE group, and
+    // the sync above sets the bit from ANY covering request. Without this the
+    // client resolves `override ?? userFlag` and shows "on vacation" in a
+    // group the member never requested leave from. Derived in memory from the
+    // rows the bundle already fetched — no query, no extra wave.
+    entity.vacationScopedGroupIds = resolveVacationScopeGroupIds(
+      approvedNearToday,
+      toUtcMidnight(getTodayInTimezone(orgTimezone)),
     );
     return UserSerializer.toResponse(entity);
   }
@@ -249,11 +264,42 @@ export class UsersService {
     enabled: boolean,
     actor?: { id: string; organizationId?: string | null },
     requestId?: string,
+    // Additive + OPTIONAL group scope. Omitted = the historical org-wide
+    // toggle, unchanged. Supplied = this group only; validated below against
+    // the TARGET user's active membership in the CALLER's organization, so a
+    // guessed or foreign id can never reach a write.
+    groupId?: string,
   ) {
     const isSelf = !actor || actor.id === userId;
 
+    // Validated BEFORE the approval gate and before Return Early, because both
+    // of those act on data — a foreign or inactive group must be rejected
+    // before anything is read or ended on its behalf. The write below repeats
+    // the same scoping atomically, so a membership removed in between cannot
+    // slip through as a raw Prisma error.
+    if (groupId) {
+      const membershipId = await this.usersRepo.findActiveMembershipId(
+        userId,
+        groupId,
+        actor?.organizationId ?? '',
+      );
+      if (!membershipId) {
+        throw new ForbiddenException({
+          message: 'You are not an active member of this group',
+          code: 'GROUP_MEMBERSHIP_REQUIRED',
+          errors: { groupId: 'Not an active membership in your organization' },
+        });
+      }
+    }
+
     if (isSelf && enabled) {
-      const needsApproval = await this.usersRepo.vacationRequiresApproval(userId);
+      // Scoped to the same group as the write: a group that does not require
+      // approval must not inherit another group's gate. Without a group scope
+      // this is the historical org-wide rule, unchanged.
+      const needsApproval = await this.usersRepo.vacationRequiresApproval(
+        userId,
+        groupId,
+      );
       if (needsApproval) {
         throw new UnprocessableEntityException({
           message:
@@ -268,12 +314,54 @@ export class UsersService {
     // is Return Early — end the approved request covering today, or the
     // read-time sync/lifecycle sweep force-enables the flag right back and the
     // toggle "doesn't persist". Always allowed, even in approval mode (VAC-005).
+    // Group-scoped Return Early ends only THIS group's covering requests (plus
+    // org-level ones, which genuinely cover it) — a member returning early
+    // from group A no longer truncates a separately-approved group-B vacation.
     let endedRequestIds: string[] = [];
     if (!enabled) {
-      endedRequestIds = await this.usersRepo.endCoveringVacationRequests(userId);
+      endedRequestIds = await this.usersRepo.endCoveringVacationRequests(
+        userId,
+        groupId,
+      );
     }
 
-    const user = await this.usersRepo.update(userId, { isVacationMode: enabled });
+    // With a group scope the USER flag is deliberately left alone: it is the
+    // inherited default for the member's other groups, and clearing it there
+    // would recreate the very cross-group spill this scoping removes. The
+    // membership row carries the explicit per-group value instead — and since
+    // that write IS the new effective value, no read-back is needed.
+    if (groupId) {
+      const applied = await this.usersRepo.setMemberVacationMode(
+        userId,
+        groupId,
+        actor?.organizationId ?? '',
+        enabled,
+      );
+      // The pre-check above and this write share one where-clause, so they can
+      // only disagree if the membership was removed or deactivated BETWEEN
+      // them. `updateMany` reports that as count 0 rather than throwing, so an
+      // unchecked call would return 200 with `isVacationMode: enabled` while
+      // nothing was written — and the covering requests above are ALREADY
+      // ended by then, so the member would be left with their vacation
+      // destroyed and no flag to show for it. Surfacing the same rejection the
+      // pre-check raises keeps the two group-scoped writes symmetric
+      // (setDefaultAttendance already checks its own result) and keeps the
+      // "no silently ignored failures" rule intact.
+      if (!applied) {
+        throw new ForbiddenException({
+          message: 'You are not an active member of this group',
+          code: 'GROUP_MEMBERSHIP_REQUIRED',
+          errors: { groupId: 'Not an active membership in your organization' },
+        });
+      }
+    }
+    // Without a group scope this is the ORG-WIDE toggle, so it must govern
+    // every group: the repo clears any per-group overrides in the SAME round
+    // trip, restoring inheritance. Otherwise an admin-forced vacation would
+    // report success while a group carrying an explicit override ignored it.
+    const user = groupId
+      ? { isVacationMode: enabled }
+      : await this.usersRepo.setVacationModeOrgWide(userId, enabled);
 
     // ISSUE-004: vacation OFF → auto-attendance resumes the SAME day.
     if (!enabled) this.resumeAutoAttendance(userId);
@@ -335,7 +423,56 @@ export class UsersService {
     };
   }
 
-  async setDefaultAttendance(userId: string, enabled: boolean) {
+  /**
+   * Personal Auto-Attendance (ATT-010).
+   *
+   * `scope.groupId` is OPTIONAL and additive. Without it this is the original
+   * user-level write, byte-identical for every existing client. With it the
+   * setting applies to that ONE membership — the reason the per-group column
+   * exists: enabling auto-attendance while looking at group A must not start
+   * auto-marking (and billing) the member in group B.
+   *
+   * The id is never trusted: it must resolve to an ACTIVE membership of the
+   * TARGET user inside the CALLER's organization, or the request is rejected.
+   */
+  async setDefaultAttendance(
+    userId: string,
+    enabled: boolean,
+    scope?: { groupId?: string; organizationId?: string | null },
+  ) {
+    const groupId = scope?.groupId;
+    if (groupId) {
+      // ONE statement does the tenant/membership check AND the write: the
+      // where-clause carries `status: active` + the organization relation, so
+      // a foreign or inactive group simply matches nothing. That removes the
+      // validate-then-write race (a membership removed in between used to
+      // surface Prisma P2025 as a raw 500 — the global filter only maps P2002)
+      // and costs one query instead of two.
+      const applied = await this.usersRepo.setMemberDefaultAttendance(
+        userId,
+        groupId,
+        scope?.organizationId ?? '',
+        enabled,
+      );
+      if (!applied) {
+        throw new ForbiddenException({
+          message: 'You are not an active member of this group',
+          code: 'GROUP_MEMBERSHIP_REQUIRED',
+          errors: { groupId: 'Not an active membership in your organization' },
+        });
+      }
+      // Auto-attendance turning ON mid-day must resume the same day, exactly
+      // as the user-level path below already guarantees (ISSUE-004).
+      if (enabled) this.resumeAutoAttendance(userId);
+      return {
+        isDefaultAttendance: enabled,
+        groupId,
+        message: enabled
+          ? 'Default attendance mode enabled for this group'
+          : 'Default attendance mode disabled for this group',
+      };
+    }
+
     const user = await this.usersRepo.update(userId, { isDefaultAttendance: enabled });
     return {
       isDefaultAttendance: user.isDefaultAttendance,

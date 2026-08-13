@@ -29,6 +29,7 @@ import {
   AttendanceWindowState,
 } from '../../common/utils/date.utils';
 import { getVacationCoveredUserIds } from '../../common/utils/vacation-coverage.util';
+import { resolveMemberFlag } from '../../common/utils/member-settings.util';
 import {
   resolvePublishedDayEntries,
   type PublishedPreferenceGroup,
@@ -405,7 +406,8 @@ export class AttendanceService {
       );
     }
 
-    // 4. Vacation mode check — read from user record
+    // 4. Vacation mode check — user-level fallback for the per-group setting
+    // resolved below (`membership` above already carries this group's value).
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: { isVacationMode: true },
@@ -470,7 +472,17 @@ export class AttendanceService {
         // ISSUE-005: identity-first boundary coverage (start/end meal).
         mealSlotKey: (meal as any).slotKey ?? null,
         candidates: [
-          { userId, isVacationMode: user?.isVacationMode === true },
+          {
+            userId,
+            // Vacation is per group: the membership row already fetched above
+            // carries this group's override, with the user flag as the
+            // inherited fallback. No extra query.
+            isVacationMode: resolveMemberFlag(
+              membership,
+              user,
+              'isVacationMode',
+            ),
+          },
         ],
       });
       if (onVacation.has(userId)) {
@@ -1499,6 +1511,8 @@ export class AttendanceService {
         where: { groupId, status: 'active' },
         select: {
           userId: true,
+          // Per-group vacation override rides the SAME row — no extra query.
+          isVacationMode: true,
           // name rides along so the admin dashboard can LIST members under the
           // "Vacation" filter (not just count them) — no extra query.
           user: { select: { isVacationMode: true, name: true } },
@@ -1514,7 +1528,7 @@ export class AttendanceService {
       mealOpenTime: null, // day-level: whole-day coverage
       candidates: activeMembers.map((m) => ({
         userId: m.userId,
-        isVacationMode: m.user.isVacationMode === true,
+        isVacationMode: resolveMemberFlag(m, m.user, 'isVacationMode'),
       })),
     });
 
@@ -1566,7 +1580,12 @@ export class AttendanceService {
     // the vacation flag rides along for FR-ANL-003 below.
     const activeMembers = await this.prisma.groupMember.findMany({
       where: { groupId: meal.groupId, status: 'active' },
-      select: { userId: true, user: { select: { isVacationMode: true } } },
+      select: {
+        userId: true,
+        // Per-group vacation override rides the SAME row — no extra query.
+        isVacationMode: true,
+        user: { select: { isVacationMode: true } },
+      },
     });
     const totalMembers = activeMembers.length;
 
@@ -1582,7 +1601,7 @@ export class AttendanceService {
       mealSlotKey: (meal as any).slotKey ?? null,
       candidates: activeMembers.map((m) => ({
         userId: m.userId,
-        isVacationMode: m.user.isVacationMode === true,
+        isVacationMode: resolveMemberFlag(m, m.user, 'isVacationMode'),
       })),
     });
     const expectedParticipants = totalMembers - onVacation.size;

@@ -27,6 +27,7 @@ import {
   NotificationPayloadService,
 } from './services/notification-payload.service';
 import { NotificationSendService } from './services/notification-send.service';
+import { resolveMemberFlag } from '../../common/utils/member-settings.util';
 
 // FCM token deduplication TTL in Redis — 24 hours
 const TOKEN_DEDUP_TTL = 24 * 60 * 60;
@@ -170,15 +171,23 @@ export class NotificationsService {
       where: {
         groupId: params.groupId,
         status: 'active',
+        // Vacation is resolved in memory below, NOT here — deliberately, to
+        // preserve the query PLAN. Vacation is now per group (`member ?? user`)
+        // and expressing that in SQL would need a second reference to the
+        // `user` relation alongside the one already used for reminders/token;
+        // Prisma emits a separate correlated subquery per relation reference,
+        // turning one join on `users` into two. One group's active members is a
+        // small set, so the in-memory filter is free and the SQL is unchanged.
         user: {
-          isVacationMode: false,
           remindersEnabled: true,
           fcmToken: { not: null },
         },
       },
       select: {
         userId: true,
-        user: { select: { fcmToken: true } },
+        // Per-group override rides the SAME row; user flag is the fallback.
+        isVacationMode: true,
+        user: { select: { fcmToken: true, isVacationMode: true } },
       },
     });
 
@@ -188,7 +197,13 @@ export class NotificationsService {
     }
 
     const recipients = members
-      .filter((m) => m.user.fcmToken)
+      // A member on vacation in ANOTHER group must still get THIS group's
+      // menu push, so the effective per-group value decides.
+      .filter(
+        (m) =>
+          m.user.fcmToken &&
+          !resolveMemberFlag(m, m.user, 'isVacationMode'),
+      )
       .map((m) => ({ userId: m.userId, fcmToken: m.user.fcmToken! }));
 
     if (!recipients.length) return;

@@ -58,16 +58,26 @@ export class UsersController {
   async setMyVacationMode(@CurrentUser() user: JwtPayload, @Body() dto: VacationModeDto) {
     // VAC-013: actor rides along so a self return-early (OFF while an approved
     // vacation covers today) is auditable; isSelf semantics are unchanged.
-    return this.usersService.setVacationMode(user.sub, dto.enabled, {
-      id: user.sub,
-      organizationId: user.organizationId,
-    });
+    return this.usersService.setVacationMode(
+      user.sub,
+      dto.enabled,
+      { id: user.sub, organizationId: user.organizationId },
+      undefined,
+      // Additive: when the client scopes the toggle to a group, Return Early
+      // ends only that group's vacation. Omitted = unchanged org-wide toggle.
+      dto.groupId,
+    );
   }
 
   @Patch('me/default-attendance')
   @HttpCode(HttpStatus.OK)
   async setMyDefaultAttendance(@CurrentUser() user: JwtPayload, @Body() dto: DefaultAttendanceDto) {
-    return this.usersService.setDefaultAttendance(user.sub, dto.enabled);
+    // Additive group scope; omitted = unchanged user-level write. The id is
+    // validated against this caller's own active membership in their org.
+    return this.usersService.setDefaultAttendance(user.sub, dto.enabled, {
+      groupId: dto.groupId,
+      organizationId: user.organizationId,
+    });
   }
 
   // ── /users (admin list) ───────────────────────────────────────────────────
@@ -139,10 +149,14 @@ export class UsersController {
   ) {
     this._assertSelfOrAdmin(user, userId);
     // Pass 11 (LOOP-041): admin-on-behalf changes are audited + notified.
-    return this.usersService.setVacationMode(userId, dto.enabled, {
-      id: user.sub,
-      organizationId: user.organizationId,
-    });
+    return this.usersService.setVacationMode(
+      userId,
+      dto.enabled,
+      { id: user.sub, organizationId: user.organizationId },
+      undefined,
+      // Validated against the TARGET user's membership in the CALLER's org.
+      dto.groupId,
+    );
   }
 
   // ── /users/:userId/default-attendance ────────────────────────────────────
@@ -156,7 +170,12 @@ export class UsersController {
     @Body() dto: DefaultAttendanceDto,
   ) {
     this._assertSelfOrAdmin(user, userId);
-    return this.usersService.setDefaultAttendance(userId, dto.enabled);
+    // The group is validated against the TARGET user's membership inside the
+    // CALLER's organization, so an admin cannot reach another tenant's group.
+    return this.usersService.setDefaultAttendance(userId, dto.enabled, {
+      groupId: dto.groupId,
+      organizationId: user.organizationId,
+    });
   }
 
   // ── /users/:userId/meal-preference ───────────────────────────────────────

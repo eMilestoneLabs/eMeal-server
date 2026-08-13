@@ -279,6 +279,43 @@ describe('GroupsService', () => {
       );
       expect(membersRepo.createMembership).not.toHaveBeenCalled();
     });
+
+    // UNI-015 reuses the SAME membership row on rejoin, so anything left on it
+    // survives the removal. For the per-group settings that is a financial
+    // trap of the same class as the stale blockedAt (BR-24): a member who was
+    // on vacation — or auto-marking — in this group before being removed would
+    // silently resume both months later, suppressing or creating charges they
+    // never asked for. They must come back inheriting, i.e. NULL — not false,
+    // which would instead pin them OFF against a later org-wide vacation.
+    it('rejoin CLEARS the per-group vacation / auto-attendance settings', async () => {
+      const removedMember = new GroupMemberEntity({
+        ...mockActiveMember,
+        status: 'removed',
+        removedAt: new Date('2025-01-01'),
+        removedBy: 'usr_admin',
+        isVacationMode: true,
+        isDefaultAttendance: true,
+      });
+      groupsRepo.findByJoinCode.mockResolvedValue(mockGroup);
+      membersRepo.findMembership.mockResolvedValue(removedMember);
+      membersRepo.updateMembership.mockResolvedValue({
+        ...removedMember,
+        status: 'active',
+      } as any);
+      groupsRepo.findById.mockResolvedValue(mockGroup);
+      usersRepo.findById.mockResolvedValue({
+        id: 'usr_student',
+        organizationId: 'org_01',
+      } as any);
+
+      await service.joinGroup('usr_student', { joinCode: 'HTL3K8XZ' });
+
+      const patch = membersRepo.updateMembership.mock.calls[0][2];
+      expect(patch.isVacationMode).toBeNull();
+      expect(patch.isDefaultAttendance).toBeNull();
+      // Same reset the pre-existing BR-24 guard makes for the block trail.
+      expect(patch.blockedAt).toBeNull();
+    });
   });
 
   // ── JOIN APPROVAL WORKFLOW (Module 02, MEM-004..007) ──────────────────────

@@ -33,6 +33,7 @@ import {
   getCurrentTimeInTimezone,
 } from '../../common/utils/date.utils';
 import { getVacationCoveredUserIds } from '../../common/utils/vacation-coverage.util';
+import { resolveMemberFlag } from '../../common/utils/member-settings.util';
 import { resolvePublishedDayEntries } from '../../common/utils/published-day.util';
 import {
   BookGuestsDto,
@@ -251,7 +252,9 @@ export class GuestsService {
 
     // Host eligibility (FR-HG-043): active member, not blocked. The vacation
     // check moved below — it is date/meal-scoped (FR-VACX-003/008).
-    await this.assertEligibleHost(group.id, hostUserId);
+    // Keeps the validated membership: it already carries this group's vacation
+    // override, so the check further down costs no additional query.
+    const hostMembership = await this.assertEligibleHost(group.id, hostUserId);
 
     // Date bounds (FR-HG-040): today .. today + guestAdvanceBookingDays.
     const tz = meal.organization?.timezone ?? 'Asia/Kolkata';
@@ -297,6 +300,10 @@ export class GuestsService {
     // the covered slots stay hostable. Approved dated requests govern; the
     // instant toggle covers whole days.
     const dateUtc = toUtcMidnight(dateStr);
+    // Vacation is per group. `hostMembership` (already validated and fetched
+    // above) carries THIS group's override, so only the user-level fallback
+    // still needs reading — the same single point-read this always made. No
+    // query is added to the booking path.
     const hostUser = await this.prisma.user.findUnique({
       where: { id: hostUserId },
       select: { isVacationMode: true },
@@ -311,7 +318,14 @@ export class GuestsService {
       // ISSUE-005: identity-first boundary coverage (start/end meal).
       mealSlotKey: (meal as any).slotKey ?? null,
       candidates: [
-        { userId: hostUserId, isVacationMode: hostUser?.isVacationMode === true },
+        {
+          userId: hostUserId,
+          isVacationMode: resolveMemberFlag(
+            hostMembership,
+            hostUser,
+            'isVacationMode',
+          ),
+        },
       ],
     });
     if (onVacation.has(hostUserId)) {
@@ -1317,6 +1331,11 @@ export class GuestsService {
 
   // ── Internals ──────────────────────────────────────────────────────────────
 
+  /**
+   * Returns the validated ACTIVE membership so callers can read per-group
+   * member state (e.g. the vacation override) from the row this already
+   * fetched, instead of issuing a second lookup for the same record.
+   */
   private async assertEligibleHost(groupId: string, hostUserId: string) {
     const membership = await this.membersRepo.findMembership(groupId, hostUserId);
     if (membership?.status === 'blocked') {
@@ -1334,6 +1353,7 @@ export class GuestsService {
     }
     // Vacation is validated in bookGuests — it is (date, meal)-scoped since
     // Pass 11 (FR-VACX-003): boundary days block only the covered slots.
+    return membership;
   }
 
   /** Effective window/price: published per-day entry overrides the master. */

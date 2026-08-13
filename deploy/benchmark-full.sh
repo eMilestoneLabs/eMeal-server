@@ -97,10 +97,23 @@ discover_group() { # $1=token → first visible group id
   curl -s -H "Authorization: Bearer $1" "$BASE/groups?page=1&limit=5" \
     | jq -r '.data[0].id // empty'
 }
+# Meal Pricing is the MASTER GATE for Meal Billing: a pricing-OFF group answers
+# 400 BILLING_NOT_APPLICABLE by design, not by fault. Pointing the billing rows
+# at an arbitrary group therefore times an ERROR PATH and reports a false
+# CHECK! — "never bench an error path silently" (guidebook script rule 6).
+# Same precedent as srs/lib.sh billable_gid(): resolve the group that actually
+# exercises the feature under test. Empty = the org has no billable group, and
+# the billing rows are skipped rather than faked.
+discover_billable_group() {
+  curl -s -H "Authorization: Bearer $1" "$BASE/groups?page=1&limit=50"     | jq -r '[(.data // .)[]? | select(.mealConfig.mealsEnabled == true
+                                   and .mealConfig.mealPricingEnabled == true)][0].id // empty'
+}
 AGID="${GROUP_ID:-$(discover_group "$ADMIN_TOKEN")}"
 SGID="${GROUP_ID:-$(discover_group "$STUDENT_TOKEN")}"
 [ -n "$AGID" ] || { echo "No admin-visible group found — set GROUP_ID"; exit 1; }
 [ -n "$SGID" ] || SGID="$AGID"
+# Billing rows target a BILLABLE group (may differ from $AGID, may be empty).
+BGID="$(discover_billable_group "$ADMIN_TOKEN")"
 
 # A real mealId for /attendance/meal-summary (its DTO requires mealId+date).
 AMID=$(curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -174,8 +187,12 @@ else
   echo "  (skipped /attendance/meal-summary — group has no configured meals)"
 fi
 bench "/attendance/vacation-members?groupId=$AGID&date=$TO"         "$T" 80
-bench "/attendance/billing-summary?groupId=$AGID"                   "$T" 120
-bench "/attendance/billing-series?groupId=$AGID&fromDate=$FROM&toDate=$TO" "$T" 120
+if [ -n "$BGID" ]; then
+  bench "/attendance/billing-summary?groupId=$BGID"                 "$T" 120
+  bench "/attendance/billing-series?groupId=$BGID&fromDate=$FROM&toDate=$TO" "$T" 120
+else
+  echo "  (skipped billing-summary/billing-series — no group in this org has Meal Pricing enabled)"
+fi
 bench "/reports/analytics?fromDate=$FROM&toDate=$TO"                "$T" 120
 bench "/notices?page=1&limit=20"                                    "$T" 60
 bench "/notices/unread-count"                                       "$T" 40

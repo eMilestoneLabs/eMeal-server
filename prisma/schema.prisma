@@ -410,6 +410,24 @@ model GroupMember {
   reviewedAt DateTime? // when the decision was taken
   reviewNote String?   // optional rejection reason (MEM-007)
 
+  // ── Per-group member settings (group-scoped vacation / auto-attendance) ─────
+  // A member in two groups must be able to be on vacation in one and not the
+  // other, and to auto-mark in one and not the other. Both settings used to
+  // live ONLY on User, so one toggle governed every group the member belonged
+  // to — an approved GROUP-scoped vacation request even suppressed billing in
+  // the member's OTHER groups.
+  //
+  // NULL is load-bearing and is the whole safety story: it means "inherit the
+  // user-level flag". Every pre-existing row is NULL, so the effective value
+  // (`member ?? user`) is byte-identical to the previous behaviour until
+  // something explicitly writes a per-group value. No backfill, and the
+  // org-level / admin-forced global toggles keep working through inheritance.
+  //   NULL  -> inherit User.<same flag>
+  //   true  -> explicitly ON for this group only
+  //   false -> explicitly OFF for this group only (per-group return-early)
+  isVacationMode      Boolean?
+  isDefaultAttendance Boolean?
+
   group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
   user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
 

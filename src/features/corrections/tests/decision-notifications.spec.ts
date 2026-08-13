@@ -103,6 +103,23 @@ describe('Live-Test-14 — correction decisions notify the member', () => {
           .fn()
           .mockResolvedValue({ role: 'student', isVacationMode: false }),
       },
+      // The claim_present vacation gate now runs through
+      // getVacationCoveredUserIds (same helper as the attendance-mark and
+      // guest-hosting gates), so it is date- AND meal-accurate instead of
+      // reading a date-agnostic flag. No approved request here: coverage then
+      // falls to the candidate's effective per-group flag, exactly as the
+      // "admin on vacation" case below expects.
+      vacationRequest: { findMany: jest.fn().mockResolvedValue([]) },
+      // The requester's CURRENT role and vacation state now ride the
+      // membership point-read: the row carries THIS group's vacation override
+      // and the nested user row supplies the role plus the inherited fallback.
+      // Default is the pre-migration state — override NULL (inherit).
+      groupMember: {
+        findUnique: jest.fn().mockResolvedValue({
+          isVacationMode: null,
+          user: { role: 'student', isVacationMode: false },
+        }),
+      },
     };
     attendanceService = {
       resolveEffectiveWindow: jest.fn().mockResolvedValue({
@@ -178,9 +195,9 @@ describe('Live-Test-14 — correction decisions notify the member', () => {
   });
 
   it("an ADMIN's own claim_present is applied immediately, with no review", async () => {
-    prisma.user.findUnique.mockResolvedValue({
-      role: 'messManager',
-      isVacationMode: false,
+    prisma.groupMember.findUnique.mockResolvedValue({
+      isVacationMode: null,
+      user: { role: 'messManager', isVacationMode: false },
     });
 
     const res: any = await create();
@@ -199,9 +216,11 @@ describe('Live-Test-14 — correction decisions notify the member', () => {
   });
 
   it('an admin on vacation still cannot claim Present (guard not bypassed)', async () => {
-    prisma.user.findUnique.mockResolvedValue({
-      role: 'messManager',
-      isVacationMode: true,
+    // Override NULL -> the user-level flag is inherited, exactly as before
+    // the per-group settings existed.
+    prisma.groupMember.findUnique.mockResolvedValue({
+      isVacationMode: null,
+      user: { role: 'messManager', isVacationMode: true },
     });
 
     await expect(create()).rejects.toThrow(/vacation/i);
@@ -209,9 +228,9 @@ describe('Live-Test-14 — correction decisions notify the member', () => {
   });
 
   it('a charge dispute is NEVER self-approved, even for an admin', async () => {
-    prisma.user.findUnique.mockResolvedValue({
-      role: 'hostelAdmin',
-      isVacationMode: false,
+    prisma.groupMember.findUnique.mockResolvedValue({
+      isVacationMode: null,
+      user: { role: 'hostelAdmin', isVacationMode: false },
     });
 
     const res: any = await create('dispute_charge');

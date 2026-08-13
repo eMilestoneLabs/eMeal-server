@@ -97,6 +97,82 @@ export function requestCoversMeal(
   return true;
 }
 
+/**
+ * Which groups does the member's CURRENT vacation actually apply to?
+ *
+ * `User.isVacationMode` is a single ACCOUNT-level bit and now means exactly
+ * ORG-WIDE vacation: a group-scoped approved request writes
+ * `GroupMember.isVacationMode` instead (see splitVacationTargets). This helper
+ * publishes WHICH groups the member's current leave covers, so the Flutter
+ * shell reaches the same answer the server does without another request —
+ * including during the window before a future-dated approval activates.
+ *
+ * This is the same rule, expressed once, so the client can reach the same
+ * answer with NO extra request:
+ *
+ *   null      → the flag governs EVERY group. Two cases, deliberately merged
+ *               because they are indistinguishable to a caller: no covering
+ *               request at all (a pure self-service toggle), or an ORG-LEVEL
+ *               covering request (groupId null), which genuinely covers all.
+ *   string[]  → ONLY group-scoped requests cover today, so the vacation
+ *               applies to exactly these groups and nowhere else.
+ *
+ * PURE — no query, no Prisma. It reads rows the caller already fetched
+ * (`findByIdWithVacationMeta` selects them for the flag rule anyway), so
+ * exposing the scope costs one extra column on an existing select.
+ */
+export function resolveVacationScopeGroupIds(
+  approvedNearToday: Array<{
+    startDate: Date;
+    endDate: Date;
+    groupId?: string | null;
+  }>,
+  todayUtc: Date,
+): string[] | null {
+  const covering = approvedNearToday.filter(
+    (r) => r.startDate <= todayUtc && r.endDate >= todayUtc,
+  );
+  if (covering.length === 0) return null; // pure toggle — governs every group
+  // An org-level request covers every group, so no narrowing is possible.
+  if (covering.some((r) => r.groupId == null)) return null;
+  return [...new Set(covering.map((r) => r.groupId as string))];
+}
+
+/**
+ * WHERE does a covering approved request's vacation state belong?
+ *
+ * `User.isVacationMode` is one account-level bit. A request scoped to ONE
+ * group has no room in it, so writing there marked the member on vacation in
+ * every group they belong to. This splits covering requests into the two
+ * storage targets:
+ *
+ *   orgLevel  — at least one covering request has `groupId == null`, so it
+ *               genuinely governs every group: the USER flag is the correct
+ *               home, exactly as it has always been.
+ *   groupIds  — covering requests scoped to these groups: their state belongs
+ *               on `GroupMember.isVacationMode` for those pairs only.
+ *
+ * Both can be true at once (an org-level and a group-scoped request covering
+ * the same date). They are not mutually exclusive here even though FR-VACX-001
+ * makes that combination unreachable today — encoding the assumption would
+ * make this rule wrong the moment the overlap policy changes.
+ *
+ * PURE — no query, no Prisma. ONE definition shared by every writer
+ * (read-time sync, approve/cancel, and the FR-VACX-006 sweep) so the three
+ * cannot drift apart, which is the only way this rule breaks.
+ */
+export function splitVacationTargets(
+  covering: Array<{ groupId?: string | null }>,
+): { orgLevel: boolean; groupIds: string[] } {
+  const groupIds = new Set<string>();
+  let orgLevel = false;
+  for (const r of covering) {
+    if (r.groupId == null) orgLevel = true;
+    else groupIds.add(r.groupId);
+  }
+  return { orgLevel, groupIds: [...groupIds] };
+}
+
 type PrismaLike = {
   vacationRequest: {
     findMany: (args: unknown) => Promise<any[]>;
@@ -248,6 +324,14 @@ export async function getVacationCoveredUserIds(
       continue;
     }
     // No dated request governs this date → the instant toggle covers whole days.
+    //
+    // The flag is trustworthy here BY CONSTRUCTION. Vacation state is written
+    // at its source: a GROUP-SCOPED approved request writes
+    // `GroupMember.isVacationMode` for its own group, and only an ORG-LEVEL
+    // request (or a deliberate org-wide toggle) raises `User.isVacationMode`.
+    // Callers resolve `member ?? user`, so a flag reaching this branch always
+    // genuinely governs THIS group — there is no cross-group spill left to
+    // compensate for, and the read-side workaround that once did so is gone.
     if (c.isVacationMode) covered.add(c.userId);
   }
   return covered;

@@ -157,7 +157,25 @@ export class VacationRequestsRepository {
     organizationId: string,
     todayUtc: Date,
     excludeId?: string,
+    // SCOPE of the state being resynced — must match the scope of the write
+    // that follows, or the check answers a different question than the write
+    // asks. Omitted = the historical user-level check, unchanged.
+    //   set   -> does anything still cover THAT GROUP? Its own group-scoped
+    //            requests, plus org-level ones (which govern every group).
+    //   null  -> ORG-LEVEL state: only another ORG-LEVEL request keeps the
+    //            account flag true; a group-scoped request governs its own
+    //            membership row and must NOT hold the account flag up.
+    // Without this, cancelling a group-A vacation while an unrelated group-B
+    // vacation was live reported "still covered" and left group A's membership
+    // switched on after its leave had been cancelled.
+    scopeGroupId?: string | null,
+    scoped = false,
   ): Promise<boolean> {
+    const scopeWhere = !scoped
+      ? {}
+      : scopeGroupId
+        ? { OR: [{ groupId: scopeGroupId }, { groupId: null }] }
+        : { groupId: null };
     const hit = await (this.prisma as any).vacationRequest.findFirst({
       where: {
         organizationId,
@@ -167,6 +185,7 @@ export class VacationRequestsRepository {
         startDate: { lte: todayUtc },
         endDate: { gte: todayUtc },
         ...(excludeId ? { id: { not: excludeId } } : {}),
+        ...scopeWhere,
       },
       select: { id: true },
     });
@@ -269,12 +288,67 @@ export class VacationRequestsRepository {
     return this.findById(id, organizationId) as Promise<VacationRequestEntity>;
   }
 
-  /** Additive integration with the existing self-service vacation flag. */
+  /**
+   * Additive integration with the existing self-service vacation flag.
+   *
+   * `groupId` names the SCOPE of the request driving this change:
+   *   null  → ORG-LEVEL. Writes `User.isVacationMode`, byte-identical to the
+   *           behaviour this method has always had.
+   *   set   → GROUP-SCOPED. Writes that ONE membership instead, because the
+   *           account-level bit has no room for scope and using it marked the
+   *           member on vacation in every group they belong to.
+   *
+   * Deactivation restores **NULL**, never `false`. NULL means "inherit the
+   * user flag"; a literal `false` would be an explicit per-group override that
+   * permanently shadows any later org-wide vacation for that group.
+   *
+   * Tenant isolation is preserved on BOTH paths — the org-level write keeps
+   * its `organizationId` predicate, and the group-scoped write reaches the
+   * organization through the `group` relation.
+   */
   async setUserVacation(
     userId: string,
     organizationId: string,
     isVacationMode: boolean,
+    groupId?: string | null,
   ): Promise<void> {
+    if (groupId) {
+      await this.prisma.groupMember.updateMany({
+        where: { userId, groupId, group: { organizationId } },
+        data: { isVacationMode: isVacationMode ? true : null },
+      });
+      return;
+    }
+    if (isVacationMode) {
+      // ORG-WIDE leave ACTIVATING. It governs every group, so it must not be
+      // shadowed by a stale per-group override: a member who once returned
+      // early from group A carries an explicit `false` there, and
+      // `member ?? user` would keep them off-leave in that group for the whole
+      // org-wide vacation — visible in the roster badge, the client and the
+      // stored state, even though the request itself covers the date.
+      //
+      // Clearing to NULL restores inheritance, which is exactly the rule the
+      // org-wide TOGGLE already applies (setVacationModeOrgWide). ONE round
+      // trip; the `not: null` predicate means it usually touches zero rows.
+      //
+      // Deactivation deliberately does NOT clear: a per-group vacation the
+      // member set DURING the org-wide leave is theirs and must survive it.
+      await this.prisma.$transaction([
+        this.prisma.user.updateMany({
+          where: { id: userId, organizationId },
+          data: { isVacationMode },
+        }),
+        this.prisma.groupMember.updateMany({
+          where: {
+            userId,
+            isVacationMode: { not: null },
+            group: { organizationId },
+          },
+          data: { isVacationMode: null },
+        }),
+      ]);
+      return;
+    }
     await this.prisma.user.updateMany({
       where: { id: userId, organizationId },
       data: { isVacationMode },

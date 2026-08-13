@@ -86,6 +86,11 @@ export class WarmupService implements OnApplicationBootstrap {
     ]);
 
     const primed = this.deepEnabled ? await this.deepWarm() : 0;
+    // LAST, and only after the endpoint warming above: those are I/O-bound and
+    // leave the loop free, whereas module resolution is CPU-bound and blocks
+    // it. This worker is already listening by now, so anything blocking here
+    // stalls real traffic. See warmHeavyModules for how that is bounded.
+    if (this.deepEnabled) await this.warmHeavyModules();
     this.logger.log(
       `Boot warmup completed in ${Date.now() - t0}ms` +
         (this.deepEnabled ? ` (deep paths primed: ${primed})` : ''),
@@ -251,5 +256,43 @@ export class WarmupService implements OnApplicationBootstrap {
     if (tasks.length === 0) return 0; // fresh install — nothing to warm yet
     const results = await Promise.allSettled(tasks);
     return results.filter((r) => r.status === 'fulfilled').length;
+  }
+
+  /**
+   * Pre-load the heavy report/export module trees that production code
+   * deliberately `require()`s LAZILY inside their methods.
+   *
+   * Measured 2026-08-11 (SERVER_HANDBOOK §17.8): on a genuinely cold battery,
+   * 31 of 32 endpoints stayed inside budget and ONE did not —
+   * `/exports/attendance` at p95 497 ms (max 815) against a 300 ms SLO, versus
+   * 58 ms warm. That 8.6x is not JIT: `exports.service` does
+   * `const ExcelJS = require('exceljs')` inside the writer, so the entire
+   * ExcelJS tree is loaded by the FIRST export request — and separately by
+   * each PM2 worker, so several admins can each pay it.
+   *
+   * The lazy require itself is left exactly as it is: it keeps boot fast and
+   * keeps the module out of memory for workers that never export, which is the
+   * right default. This just pays the cost at boot instead of on a user's
+   * request. Resolution only — no export is generated, nothing is written, no
+   * Response is faked.
+   *
+   * Fail-soft and last: a missing optional module must never break boot.
+   */
+  private async warmHeavyModules(): Promise<void> {
+    for (const id of ['exceljs', 'pdf-lib', 'sharp']) {
+      // Yield BEFORE each load. `require` is synchronous and these trees are
+      // heavy (ExcelJS is large; sharp is a native binding), so loading all
+      // three back-to-back would hold the event loop for one long block on a
+      // worker that is ALREADY serving traffic after a rolling reload — the
+      // same class of stall the log-pipe backpressure fix removed. Yielding
+      // between them bounds it to one module at a time and lets queued
+      // requests through in between.
+      await new Promise((resolve) => setImmediate(resolve));
+      try {
+        require(id);
+      } catch {
+        /* absent or unbuildable on this host — the lazy path still works */
+      }
+    }
   }
 }
