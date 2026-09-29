@@ -823,7 +823,7 @@ describe('GroupsService', () => {
       const result = await service.deleteGroup('grp_01', 'org_01', 'usr_admin');
 
       expect(groupsRepo.softDelete).toHaveBeenCalledWith('grp_01', 'org_01');
-      expect(result).toHaveProperty('message', 'Group archived successfully');
+      expect(result).toHaveProperty('message', 'Group archived');
       // Hard delete must never be called
     });
   });

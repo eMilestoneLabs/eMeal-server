@@ -146,7 +146,7 @@ export class VacationsService {
         message: 'Vacation cannot start in the past',
         code: 'VACATION_PAST_DATES',
         errors: {
-          startDate: `Vacation is forward-only — earliest start is today (${todayUtc
+          startDate: `Vacation can start from today (${todayUtc
             .toISOString()
             .slice(0, 10)})`,
         },
@@ -194,7 +194,7 @@ export class VacationsService {
       throw new ForbiddenException({
         message: 'You are not an active member of this group',
         code: 'GROUP_MEMBERSHIP_REQUIRED',
-        errors: { groupId: 'Not an active membership in your organization' },
+        errors: { groupId: 'You are not in this group' },
       });
     }
     // ISSUE-2: vacation never covers a meal already taken today — the
@@ -214,7 +214,7 @@ export class VacationsService {
       );
       if (clash) {
         throw new UnprocessableEntityException({
-          message: `${clash.name} is already marked today — vacation can only start from an upcoming meal`,
+          message: `${clash.name} is already marked today. Start from an upcoming meal.`,
           code: 'VACATION_MEAL_ALREADY_TAKEN',
           errors: { startSlotKey: `${clash.name} today is already taken` },
         });
@@ -227,7 +227,7 @@ export class VacationsService {
         errors: {
           startDate: `Overlaps your ${overlap.status} request ${overlap.startDate
             .toISOString()
-            .slice(0, 10)} – ${overlap.endDate.toISOString().slice(0, 10)}`,
+            .slice(0, 10)} - ${overlap.endDate.toISOString().slice(0, 10)}`,
         },
       });
     }
@@ -268,7 +268,7 @@ export class VacationsService {
       const range =
         dto.startDate === dto.endDate
           ? dto.startDate
-          : `${dto.startDate} – ${dto.endDate}`;
+          : `${dto.startDate} - ${dto.endDate}`;
       // Live-Test-11 ISSUE-008: a vacation request belongs to the member's
       // GROUP — resolve it when the request itself is org-level so the admin
       // bell never shows it as an "Organisation" notification. Best-effort:
@@ -398,7 +398,7 @@ export class VacationsService {
       existing.userId,
       'Vacation approved',
       conflicts.length > 0
-        ? `Your vacation was approved. Note: ${conflicts.length} day(s) you already marked Present stay billed as marked.`
+        ? `Your vacation was approved. ${conflicts.length} day(s) already marked Present stay billed.`
         : 'Your vacation request was approved.',
     );
 
@@ -504,7 +504,7 @@ export class VacationsService {
           errors: {
             endDate: `Ended on ${existing.endDate
               .toISOString()
-              .slice(0, 10)} — completed vacations are permanent records`,
+              .slice(0, 10)}. Past vacations can\'t be changed.`,
           },
         });
       }
@@ -584,9 +584,9 @@ export class VacationsService {
         wasApproved
           ? `Your approved vacation (${existing.startDate
               .toISOString()
-              .slice(0, 10)} – ${existing.endDate
+              .slice(0, 10)} - ${existing.endDate
               .toISOString()
-              .slice(0, 10)}) was cancelled by your admin. Your meals resume as normal.`
+              .slice(0, 10)}) was cancelled by your admin. Meals are back on.`
           : 'Your pending vacation request was cancelled by your admin.',
       );
     }

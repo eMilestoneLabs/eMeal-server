@@ -47,7 +47,7 @@ export class NotificationPayloadService {
     return {
       title: 'Attendance Reminder',
       body: params.defaultPresent
-        ? `${slot} attendance closes in ${params.minutesRemaining} minutes. You'll be marked present — update only if you're skipping.`
+        ? `${slot} closes in ${params.minutesRemaining} min. You'll be marked present.`
         : `${slot} attendance closes in ${params.minutesRemaining} minutes. Mark now!`,
       route: '/student/attendance',
       data: {

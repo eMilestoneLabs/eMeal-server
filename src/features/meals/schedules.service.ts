@@ -163,7 +163,7 @@ export class SchedulesService {
     if (!group.weeklyMenuEnabled) {
       throw new BadRequestException({
         message: 'Weekly menu is disabled for this group',
-        errors: { groupId: 'Enable weeklyMenuEnabled in group meal config first' },
+        errors: { groupId: 'Turn on Weekly Menu first' },
       });
     }
 

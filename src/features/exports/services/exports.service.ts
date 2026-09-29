@@ -103,7 +103,7 @@ export class ExportsService {
       throw new BadRequestException({
         message: 'Export too large',
         errors: {
-          rows: `This export would return ${rowCount.toLocaleString()} rows which exceeds the ${MAX_EXPORT_ROWS.toLocaleString()} row limit. Narrow the date range or filter by a specific member.`,
+          rows: `Too many rows (${rowCount.toLocaleString()}). Choose a shorter range or one member.`,
         },
       });
     }

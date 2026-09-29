@@ -90,7 +90,7 @@ export class EmailVerifiedGuard implements CanActivate {
 
     throw new ForbiddenException({
       message:
-        'Please verify your email to participate. Verification is required before marking attendance, booking guests, or sending requests.',
+        'Verify your email to mark attendance, book guests and send requests.',
       code: 'EMAIL_VERIFICATION_REQUIRED',
       errors: { email: 'Email not verified' },
     });

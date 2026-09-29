@@ -42,7 +42,7 @@ export class CreateCorrectionRequestDto {
     // COR-004 exact wording — old APKs sending correct_to_skip get the real
     // business reason, not a generic validation failure.
     message:
-      'Attendance cannot be corrected to Skip. Only Present or Absent are allowed.',
+      'Choose Present or Absent',
   })
   requestType: string;
 

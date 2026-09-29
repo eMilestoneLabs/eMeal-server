@@ -385,7 +385,7 @@ describe('MealsService', () => {
       const result = await service.deleteMeal('meal_01', 'org_01', 'usr_admin');
 
       expect(mealsRepo.softDelete).toHaveBeenCalledWith('meal_01', 'org_01');
-      expect(result).toHaveProperty('message', 'Meal archived successfully');
+      expect(result).toHaveProperty('message', 'Meal archived');
       // Live-Test-9 ISSUE-002: draft entries purged AND published planners
       // carrying the meal reverted to draft — members keep the frozen
       // published snapshot until the admin republishes.
@@ -417,7 +417,7 @@ describe('MealsService', () => {
         service.updateMeal('meal_01', 'org_01', 'usr_admin', {
           isEnabled: true,
         }),
-      ).rejects.toThrow(/deleted and cannot be enabled/i);
+      ).rejects.toThrow(/was deleted\. Create a new meal/i);
       // Rejected BEFORE any write.
       expect(mealsRepo.update).not.toHaveBeenCalled();
     });
@@ -485,7 +485,7 @@ describe('MealsService', () => {
         service.updateMeal('meal_01', 'org_01', 'usr_admin', {
           isEnabled: true,
         }),
-      ).rejects.toThrow(/needs an attendance window/i);
+      ).rejects.toThrow(/needs an opening and closing time/i);
       expect(mealsRepo.update).not.toHaveBeenCalled();
     });
 

@@ -222,7 +222,7 @@ export class AttendanceService {
       throw new HttpException(
         {
           message:
-            'This billing period is finalized — reopen it before changing attendance',
+            'This period is finalized. Reopen it to make changes.',
           code: 'PERIOD_FINALIZED',
           errors: { attendanceDate: `Locked through ${periodEnd}` },
           serverTime: new Date().toISOString(),
@@ -488,7 +488,7 @@ export class AttendanceService {
       if (onVacation.has(userId)) {
         throw new UnprocessableEntityException({
           message:
-            'You are on vacation for this meal — attendance is paused',
+            'You\'re on vacation for this meal',
           code: 'VACATION_ACTIVE',
           errors: {
             mealId:
@@ -549,7 +549,7 @@ export class AttendanceService {
         meal.group?.dayWiseMealsEnabled === true);
     if (plannerActive && !effective.scheduledToday) {
       throw new UnprocessableEntityException({
-        message: 'No meal today — this meal is not scheduled for today',
+        message: 'No meal scheduled today',
         code: 'NO_MEAL_TODAY',
         errors: { mealId: 'This meal is not scheduled for today' },
       });
@@ -605,7 +605,7 @@ export class AttendanceService {
         // offline replays surface the canonical conflict.
         throw new HttpException(
           {
-            message: `Attendance window closed. Window: ${effectiveOpen}–${effectiveClose}`,
+            message: `Attendance window closed. Window: ${effectiveOpen}-${effectiveClose}`,
             code: 'ATTENDANCE_WINDOW_CLOSED',
             errors: { window: `Closed at ${effectiveClose}` },
             windowState,
@@ -934,10 +934,10 @@ export class AttendanceService {
     if (dto.userId !== adminId) {
       throw new ForbiddenException({
         message:
-          'Administrators cannot mark or edit member attendance. The member must submit an Attendance Correction Request, which you can approve or reject.',
+          'Only the member can change their attendance. Approve their correction request instead.',
         code: 'ADMIN_OVERRIDE_REMOVED',
         errors: {
-          userId: 'Attendance ownership belongs to the member (ATT-004)',
+          userId: 'Only the member can change this',
         },
       });
     }
@@ -980,9 +980,9 @@ export class AttendanceService {
   ): Promise<never> {
     throw new ForbiddenException({
       message:
-        'Administrators cannot mark or edit member attendance. Members submit Attendance Correction Requests, which you can approve or reject.',
+        'Only members can change their attendance. Approve their correction requests instead.',
       code: 'ADMIN_OVERRIDE_REMOVED',
-      errors: { rows: 'Attendance ownership belongs to the member (ATT-004)' },
+      errors: { rows: 'Only the member can change this' },
     });
   }
 

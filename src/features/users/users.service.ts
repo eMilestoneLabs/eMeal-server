@@ -187,7 +187,7 @@ export class UsersService {
         message: 'Validation failed',
         errors: {
           loginPreference:
-            'Add a mobile number before choosing Mobile as your login preference',
+            'Add a mobile number to sign in with it',
         },
       });
     }
@@ -203,7 +203,7 @@ export class UsersService {
       if (needsApproval) {
         throw new UnprocessableEntityException({
           message:
-            'Your group requires admin approval for vacation — submit a vacation request instead',
+            'Vacation needs admin approval. Send a request.',
           code: 'VACATION_REQUIRES_APPROVAL',
           errors: { isVacationMode: 'Create a dated vacation request for approval' },
         });
@@ -303,7 +303,7 @@ export class UsersService {
       if (needsApproval) {
         throw new UnprocessableEntityException({
           message:
-            'Your group requires admin approval for vacation — submit a vacation request instead',
+            'Vacation needs admin approval. Send a request.',
           code: 'VACATION_REQUIRES_APPROVAL',
           errors: { enabled: 'Create a dated vacation request for approval' },
         });
@@ -404,8 +404,8 @@ export class UsersService {
                   ? 'Vacation mode turned ON by your admin'
                   : 'Vacation mode turned OFF by your admin',
                 body: enabled
-                  ? 'You are marked on vacation and excluded from meals. Not right? You can turn it off in Settings or contact your admin.'
-                  : 'Your vacation was ended by your admin — meal tracking has resumed.',
+                  ? 'You\'re now on vacation. Not right? Turn it off in Settings.'
+                  : 'Your admin ended your vacation. Meals are back on.',
                 // Registered frontend path (Issue 6: roleless routes 404'd in-app).
                 route: '/student/settings',
                 data: { type: 'vacation_admin_forced', enabled: String(enabled) },
@@ -509,7 +509,7 @@ export class UsersService {
       throw new NotFoundException('User not found');
     }
     await this.usersRepo.update(userId, { isActive: false });
-    return { message: 'User removed successfully' };
+    return { message: 'Member removed' };
   }
 
   /**
@@ -597,7 +597,7 @@ export class UsersService {
 
     return {
       message:
-        'Account deleted. All of your data — profile, attendance, billing and history — has been permanently removed from the server.',
+        'Account deleted. Your data has been permanently removed.',
     };
   }
 

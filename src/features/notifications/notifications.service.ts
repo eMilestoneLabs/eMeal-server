@@ -465,7 +465,7 @@ export class NotificationsService {
         title: 'Your attendance was updated',
         body:
           `Your ${params.dateStr} attendance was set to ${params.newStatus} by ${who}` +
-          (params.reason ? ` — ${params.reason}` : '') +
+          (params.reason ? ` (${params.reason})` : '') +
           '. Tap to review or request a correction.',
         // Registered frontend path (Issue 6: roleless routes 404'd in-app).
         route: '/student/attendance',

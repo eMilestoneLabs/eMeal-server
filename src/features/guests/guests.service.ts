@@ -500,14 +500,14 @@ export class GuestsService {
 
       if (mealCount + dto.guests.length > capPerMeal) {
         throw new UnprocessableEntityException({
-          message: `Guest limit reached — up to ${capPerMeal} guests per meal`,
+          message: `Limit reached: ${capPerMeal} guests per meal`,
           code: 'GUEST_LIMIT_REACHED',
           errors: { guests: `Remaining allowance: ${Math.max(0, capPerMeal - mealCount)}` },
         });
       }
       if (capPerDay !== null && dayCount + dto.guests.length > capPerDay) {
         throw new UnprocessableEntityException({
-          message: `Daily guest limit reached — up to ${capPerDay} guests per day`,
+          message: `Limit reached: ${capPerDay} guests per day`,
           code: 'GUEST_LIMIT_REACHED',
           errors: { guests: `Remaining today: ${Math.max(0, capPerDay - dayCount)}` },
         });
@@ -1500,7 +1500,7 @@ export class GuestsService {
     if (nowMin >= cutoffAt) {
       throw new HttpException(
         {
-          message: `Guest booking closed — cutoff is ${cutoffMin} min before the window close (${closeTime})`,
+          message: `Guest booking closes ${cutoffMin} min before ${closeTime}`,
           code: 'GUEST_WINDOW_CLOSED',
           errors: { attendanceDate: `Cutoff passed for ${closeTime}` },
           serverTime: new Date().toISOString(),
@@ -1570,12 +1570,13 @@ export class GuestsService {
       guestSurchargeType?: string | null;
     },
     effectiveMealPrice: number | null,
-    isAdult: boolean,
+    _isAdult: boolean,
   ): number | null {
     if (!group.mealPricingEnabled) return null; // headcount only
     // Live-Test-16 ISSUE-4: the per-guest adult/child mode is retired — every
     // guest is priced identically; a legacy stored 'perGuestPrice' falls
-    // through to sameAsMember below. `isAdult` stays a headcount attribute.
+    // through to sameAsMember below. Adult/child stays a headcount attribute
+    // (param kept so callers are unchanged; `_` marks it intentionally unused).
     const mode = group.guestPricingMode ?? 'sameAsMember';
     if (mode === 'flatSurcharge') {
       const base = effectiveMealPrice ?? 0;
@@ -1631,7 +1632,7 @@ export class GuestsService {
     if (locked) {
       throw new HttpException(
         {
-          message: 'This billing period is finalized — guest changes are locked',
+          message: 'This period is finalized. Guests can\'t be changed.',
           code: 'PERIOD_FINALIZED',
           errors: { attendanceDate: `Locked through ${periodEnd}` },
           serverTime: new Date().toISOString(),
@@ -1791,10 +1792,8 @@ export class GuestsService {
         targetUserId: params.hostUserId,
         title: approved ? 'Guest request approved' : 'Guest request rejected',
         body: approved
-          ? `Your guest booking for ${mealName} on ${dateStr} was approved. `
-              + 'The guest plates are counted and will appear on your bill.'
-          : `Your guest booking for ${mealName} on ${dateStr} was not approved. `
-              + 'Nothing has been charged.',
+          ? `Your guests for ${mealName} on ${dateStr} are approved.`
+          : `Your guests for ${mealName} on ${dateStr} weren't approved. Nothing was charged.`,
         priority: 'high',
       });
     }

@@ -128,7 +128,7 @@ export class MealsService {
     if (Object.keys(errors).length > 0) {
       throw new BadRequestException({
         message:
-          'Attendance-Only Mode supports attendance windows only — meal pricing, menus, images and preferences are not available.',
+          'Not available in Attendance-Only mode.',
         errors,
       });
     }
@@ -165,7 +165,7 @@ export class MealsService {
       throw new BadRequestException({
         message: `Enable at least ${this.minStandaloneTags} preference options`,
         errors: {
-          enabledPreferences: `Standalone preferences need ${this.minStandaloneTags}–${this.maxStandaloneTags} options`,
+          enabledPreferences: `Standalone preferences need ${this.minStandaloneTags}-${this.maxStandaloneTags} options`,
         },
       });
     }
@@ -187,7 +187,7 @@ export class MealsService {
             message: 'Validation failed',
             errors: {
               enabledPreferences:
-                '"None" is a system option — it is always available to members automatically',
+                '"None" is added automatically',
             },
           });
         }
@@ -319,7 +319,7 @@ export class MealsService {
       throw new BadRequestException({
         message: `A group supports at most ${cap} ${capLabel}`,
         errors: {
-          groupId: `Limit reached (${cap}) — disable or delete an existing one first`,
+          groupId: `Limit of ${cap} reached. Disable or delete one first.`,
         },
       });
     }
@@ -1102,7 +1102,7 @@ export class MealsService {
       (existing as any).deletedAt != null
     ) {
       throw new ConflictException({
-        message: `"${existing.name}" was deleted and cannot be enabled again — create a new meal instead.`,
+        message: `"${existing.name}" was deleted. Create a new meal instead.`,
         errors: {
           isEnabled:
             'Deleted meals are permanently removed from the Master Meal Template',
@@ -1125,7 +1125,7 @@ export class MealsService {
         throw new BadRequestException({
           message: `A group supports at most ${cap} ${attendanceOnly ? 'attendance windows' : 'meals'}`,
           errors: {
-            isEnabled: `Limit reached (${cap}) — disable or delete an existing one first`,
+            isEnabled: `Limit of ${cap} reached. Disable or delete one first.`,
           },
         });
       }
@@ -1143,7 +1143,7 @@ export class MealsService {
         )
       ) {
         throw new ConflictException({
-          message: `An active meal named "${effectiveName}" already exists — rename it first, then re-enable this one.`,
+          message: `"${effectiveName}" already exists. Rename it first.`,
           errors: { name: 'A meal with this name already exists in this group' },
         });
       }
@@ -1219,7 +1219,7 @@ export class MealsService {
       if (historyCount > 0) {
         throw new ConflictException({
           message:
-            'This meal already has attendance history, so its name is locked — renaming it would relabel past attendance, billing and reports. Create a new meal instead; this one keeps its records.',
+            'This meal has history, so its name is locked. Create a new meal instead.',
           code: 'MEAL_IDENTITY_LOCKED',
           errors: {
             name: `Locked by ${historyCount} historical attendance record(s)`,
@@ -1401,7 +1401,7 @@ export class MealsService {
     // (captured above); org-wide fallback keeps the legacy exactness.
     await this.invalidateTodayCache(organizationId, target?.groupId);
 
-    return { message: 'Meal archived successfully' };
+    return { message: 'Meal archived' };
   }
 
   // ── REORDER ───────────────────────────────────────────────────────────────
@@ -1450,6 +1450,6 @@ export class MealsService {
     // Perf (2026-07-19): order rides the today-bundle — drop it.
     await this.invalidateTodayCache(organizationId, dto.groupId);
 
-    return { message: 'Meals reordered successfully', count: dto.mealIds.length };
+    return { message: 'Meals reordered', count: dto.mealIds.length };
   }
 }

@@ -1113,7 +1113,7 @@ export class SchedulesRepository {
         if (!replaceExisting) {
           throw new ConflictException({
             message:
-              'A schedule already exists for the target week. Send replace: true to overwrite it.',
+              'A schedule already exists for that week.',
             code: 'SCHEDULE_EXISTS',
             errors: {
               targetWeekStartDate: 'Target week already has a schedule',

@@ -132,7 +132,7 @@ export class AuthService {
     if (orgName.length < 2 || orgName.length > 30) {
       throw new BadRequestException({
         message: 'Validation failed',
-        errors: { organizationName: 'Organization name must be 2–30 characters' },
+        errors: { organizationName: 'Use 2-30 characters' },
       });
     }
 
@@ -384,7 +384,7 @@ export class AuthService {
     if (!isEmail && !cfg.mobileOtpEnabled) {
       throw new BadRequestException({
         message: 'Mobile OTP is coming soon. Please use Email OTP.',
-        errors: { identifier: 'Mobile OTP — Coming Soon' },
+        errors: { identifier: 'Mobile OTP is coming soon' },
       });
     }
 
@@ -471,7 +471,7 @@ export class AuthService {
     // For reset, return the SAME shared message as the no-match branch above
     // (anti-enumeration — responses must be byte-identical). Login/signup get a
     // normal confirmation.
-    const message = purpose === 'reset' ? AuthService._resetGenericMessage : 'OTP sent successfully';
+    const message = purpose === 'reset' ? AuthService._resetGenericMessage : 'Code sent';
 
     return {
       message,
@@ -603,8 +603,8 @@ export class AuthService {
     if (!user) {
       // OTP validated against an identifier with no account — stay generic.
       throw new BadRequestException({
-        message: 'Unable to reset password.',
-        errors: { identifier: 'Unable to reset password' },
+        message: 'Couldn\'t reset your password.',
+        errors: { identifier: 'Couldn\'t reset your password' },
       });
     }
 
@@ -636,7 +636,7 @@ export class AuthService {
       ipAddress: meta.ip,
     });
 
-    return { message: 'Password reset successful. Please log in again.' };
+    return { message: 'Password reset. Please sign in again.' };
   }
 
   // ── REFRESH TOKEN ROTATION ─────────────────────────────────────────────────
@@ -665,7 +665,7 @@ export class AuthService {
     if (familyRevoked) {
       throw new UnauthorizedException({
         message: 'Session expired',
-        errors: { refreshToken: 'Please log in again' },
+        errors: { refreshToken: 'Please sign in again' },
       });
     }
 
@@ -704,7 +704,7 @@ export class AuthService {
       await this.redis.revokeFamily(family);
       throw new UnauthorizedException({
         message: 'Security alert: session invalidated',
-        errors: { refreshToken: 'Suspicious activity detected. Please log in again.' },
+        errors: { refreshToken: 'For your security, please sign in again.' },
       });
     }
 
@@ -738,14 +738,14 @@ export class AuthService {
       await this.redis.revokeFamily(family);
       throw new UnauthorizedException({
         message: 'Security alert: session invalidated',
-        errors: { refreshToken: 'Token reuse detected. Please log in again.' },
+        errors: { refreshToken: 'For your security, please sign in again.' },
       });
     }
 
     if (tokenRecord.expiresAt < new Date()) {
       throw new UnauthorizedException({
         message: 'Session expired',
-        errors: { refreshToken: 'Please log in again' },
+        errors: { refreshToken: 'Please sign in again' },
       });
     }
 
@@ -800,7 +800,7 @@ export class AuthService {
       requestId,
     });
 
-    return { message: 'Logged out successfully' };
+    return { message: 'Signed out' };
   }
 
   // ── PRIVATE HELPERS ───────────────────────────────────────────────────────

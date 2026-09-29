@@ -177,7 +177,7 @@ export class NoticesService {
       }
       throw new BadRequestException({
         message:
-          'Unable to upload image. Please select an image smaller than 100 KB.',
+          'Image must be under 100 KB',
         errors: { imageData: 'Image exceeds the 100 KB limit' },
       });
     }
@@ -217,7 +217,7 @@ export class NoticesService {
       }
       throw new BadRequestException({
         message:
-          'Unable to upload document. Please select a document smaller than 50 KB.',
+          'Document must be under 50 KB',
         errors: { documentData: 'Document exceeds the 50 KB limit' },
       });
     }
@@ -393,7 +393,7 @@ export class NoticesService {
       : null;
     if ((image || doc) && !this.storage) {
       throw new BadRequestException({
-        message: 'Attachment storage is not available right now — publish without attachments or retry later.',
+        message: 'Attachments are unavailable right now. Try again later.',
         errors: { imageData: 'Storage unavailable' },
       });
     }

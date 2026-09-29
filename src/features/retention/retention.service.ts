@@ -735,11 +735,8 @@ export class RetentionService {
     if (!(await this.redis.setDedup(onceKey, 36 * 60 * 60))) return;
 
     const body =
-      `Quarterly Data Retention Reminder — ${g.name}: your oldest billing ` +
-      `period (through ${cutoffStr}) is now eligible for archival. Please ` +
-      `review, finalize, and lock it. If no action is taken by ` +
-      `${fmt(deadline)}, the system will automatically finalize the period, ` +
-      `generate archive files, and remove historical operational data.`;
+      `${g.name}: the period through ${cutoffStr} is ready to archive. ` +
+      `Finalize it by ${fmt(deadline)}, or it will be archived automatically.`;
 
     // In-app bell for every group admin (reliable channel).
     try {
@@ -943,9 +940,8 @@ export class RetentionService {
 
     // 4. Notify every admin (RPT-010 step 3 — exact SRS example wording).
     const notifyBody =
-      `Historical archive for Group ${g.name} has been generated ` +
-      `successfully. Data through ${fmt(cutoffEnd)} has been archived and ` +
-      `is available for download from Reports → Data Archives.`;
+      `${g.name}: data through ${fmt(cutoffEnd)} is archived. ` +
+      `Download it from Reports → Data Archives.`;
     try {
       await this.notices.createRequestAlert({
         organizationId: orgId,
@@ -1080,7 +1076,7 @@ export class RetentionService {
 
     const meta = book.addWorksheet('Summary');
     meta.addRows([
-      ['MealAttend — Retention Archive'],
+      ['MealAttend · Retention Archive'],
       [`Group: ${groupName}`],
       [`Period: ${fmt(from)} to ${fmt(to)}`],
       [`Generated: ${new Date().toISOString()}`],
@@ -1167,7 +1163,7 @@ export class RetentionService {
         doc.on('end', () => resolve(Buffer.concat(chunks))),
       );
 
-      doc.fontSize(18).text('MealAttend — Retention Archive Summary');
+      doc.fontSize(18).text('MealAttend · Retention Archive Summary');
       doc.moveDown(0.5);
       doc.fontSize(11).text(`Group: ${groupName}`);
       doc.text(`Period: ${fmt(from)} to ${fmt(to)}`);
@@ -1184,10 +1180,8 @@ export class RetentionService {
         .fontSize(9)
         .fillColor('#666666')
         .text(
-          'The accompanying Excel workbook contains the complete row-level ' +
-            'data. These files are the permanent record of the archived ' +
-            'period (SRS Module 03 RET-010); the corresponding rows have ' +
-            'been removed from the live database to keep it fast and small.',
+          'The Excel file has the full details. Together, these files are ' +
+            'the permanent record of this period.',
         );
       doc.end();
       return await done;

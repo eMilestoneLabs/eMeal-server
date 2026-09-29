@@ -48,10 +48,10 @@ describe('Live-Test-16 ISSUE-2 — attendance window rules', () => {
   it('rejects a missing window (Q2 — a window is mandatory)', () => {
     expect(() =>
       assertMealWindowsValid([win('m1', 'Breakfast', null, null)]),
-    ).toThrow(/needs an attendance window/i);
+    ).toThrow(/needs an opening and closing time/i);
     expect(() =>
       assertMealWindowsValid([win('m1', 'Breakfast', '07:00', null)]),
-    ).toThrow(/needs an attendance window/i);
+    ).toThrow(/needs an opening and closing time/i);
   });
 
   it('rejects an overnight window (Q7 — must open and close same day)', () => {
@@ -106,7 +106,7 @@ describe('Live-Test-16 ISSUE-2 — attendance window rules', () => {
         win('m2', 'Lunch', '07:00', '09:00'),
         win('m3', 'Dinner', null, null), // invalid one hides in the middle
       ]),
-    ).toThrow(/"Dinner" needs an attendance window/i);
+    ).toThrow(/"Dinner" needs an opening and closing time/i);
   });
 
   it('EXEMPTS the implicit __general__ slot (Attendance-Only internals)', () => {

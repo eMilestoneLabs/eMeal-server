@@ -202,9 +202,9 @@ export class CorrectionsService {
     if (dateStr !== todayStr) {
       throw new BadRequestException({
         message:
-          'Correction period has expired. Attendance corrections are allowed only until 11:59:59 PM IST on the same calendar day.',
+          'Corrections close at 11:59 PM on the same day.',
         errors: {
-          attendanceDate: 'Historical attendance records cannot be corrected',
+          attendanceDate: 'Past days can\'t be corrected',
         },
       });
     }
@@ -249,7 +249,7 @@ export class CorrectionsService {
       ) {
         throw new BadRequestException({
           message:
-            'The attendance window is still open — mark your attendance normally instead',
+            'Attendance is still open. Mark it directly.',
           errors: { requestType: 'Window open; no correction needed' },
         });
       }
@@ -287,7 +287,7 @@ export class CorrectionsService {
     }
     if (claimBlockedByVacation) {
       throw new BadRequestException({
-        message: 'You are on vacation mode — corrections to Present are unavailable',
+        message: 'You\'re on vacation, so you can\'t switch to Present',
         errors: { requestType: 'Disable vacation mode first' },
       });
     }
@@ -351,7 +351,7 @@ export class CorrectionsService {
     const maxOpen = this.cfg('maxOpenPerMember', 3);
     if ((await this.repo.countOpenForUser(organizationId, userId)) >= maxOpen) {
       throw new BadRequestException({
-        message: `You already have ${maxOpen} open requests — wait for a decision first`,
+        message: `You have ${maxOpen} open requests. Wait for a decision.`,
         errors: { requestType: 'Too many open requests' },
       });
     }
@@ -363,7 +363,7 @@ export class CorrectionsService {
     );
     if (createdToday >= maxPerDay) {
       throw new BadRequestException({
-        message: `Daily correction-request limit (${maxPerDay}) reached — try again tomorrow`,
+        message: `Daily limit of ${maxPerDay} requests reached. Try tomorrow.`,
         errors: { requestType: 'Daily limit reached' },
       });
     }
@@ -409,7 +409,7 @@ export class CorrectionsService {
     if (DECREASE_TYPES.has(dto.requestType) && this.cfg('absentAutoApprove', true)) {
       return this.applyDecision(created, {
         decidedBy: userId, // member-initiated, system-applied
-        note: 'Auto-approved — this correction does not increase your bill',
+        note: 'Auto-approved. Your bill doesn\'t change.',
         auto: true,
         requestId,
       });
@@ -424,7 +424,7 @@ export class CorrectionsService {
       if (existing) {
         return this.applyDecision(created, {
           decidedBy: userId,
-          note: 'Auto-applied — preference changes are billing-neutral',
+          note: 'Auto-applied. Your bill doesn\'t change.',
           auto: true,
           existingStatus: existing.status,
           requestId,
@@ -442,7 +442,7 @@ export class CorrectionsService {
     if (selfService && STATUS_CHANGE_TYPES.has(dto.requestType)) {
       return this.applyDecision(created, {
         decidedBy: userId,
-        note: 'Auto-applied — admin self-service correction (same day)',
+        note: 'Auto-applied (admin, same day)',
         auto: true,
         requestId,
       });
@@ -522,7 +522,7 @@ export class CorrectionsService {
     if (existing.sourceChannel !== 'member') {
       throw new BadRequestException({
         message:
-          'This is a member confirmation — only the member can confirm or decline it',
+          'Only the member can confirm or decline this',
         errors: { id: 'Not admin-reviewable' },
       });
     }
@@ -561,7 +561,7 @@ export class CorrectionsService {
     if (existing.sourceChannel !== 'member') {
       throw new BadRequestException({
         message:
-          'This is a member confirmation — only the member can confirm or decline it',
+          'Only the member can confirm or decline this',
         errors: { id: 'Not admin-reviewable' },
       });
     }

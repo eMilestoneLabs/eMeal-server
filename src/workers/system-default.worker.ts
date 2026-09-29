@@ -466,8 +466,8 @@ export class SystemDefaultWorker extends WorkerHost {
       recipients,
       title: 'Weekly Attendance Summary',
       body:
-        `${group.name} — last 7 days: ${present} present, ${absent} absent, ` +
-        `${skipped} skipped (${rate}% attendance). Open the app for details.`,
+        `${group.name} · Last 7 days: ${present} present, ${absent} absent, ` +
+        `${skipped} skipped (${rate}%).`,
       route: '/student/attendance',
       data: { type: 'weekly_digest', groupId: group.id },
     });
@@ -1077,7 +1077,7 @@ export class SystemDefaultWorker extends WorkerHost {
           source: 'system_default',
           status: 'present',
           reason:
-            'Personal Auto-Attendance — marked Present at window open (ATT-010)',
+            'Personal Auto-Attendance: marked Present when the meal opened',
         },
       });
     }
@@ -1487,10 +1487,10 @@ export class SystemDefaultWorker extends WorkerHost {
           // billed, so the reason is derived from it rather than a second flag.
           reason:
             status === 'present'
-              ? 'Group opt-out policy — unmarked at window close'
+              ? 'Group opt-out policy: auto-marked at close'
               : price != null
-                ? 'System Skip — no attendance submitted before window close (billed per Skip Billing policy)'
-                : 'System Skip — no attendance submitted before window close (not billed)',
+                ? 'System Skip: not marked before close (billed)'
+                : 'System Skip: not marked before close (not billed)',
         },
       });
     }
@@ -1549,8 +1549,8 @@ export class SystemDefaultWorker extends WorkerHost {
           recipients,
           title: 'Marked Present by group policy',
           body:
-            `${params.mealName} (${dateStr}): you were marked Present under your ` +
-            'group’s opt-out policy. Didn’t eat? Correct it from the attendance screen.',
+            `${params.mealName} (${dateStr}): you were marked Present. ` +
+            'Didn’t eat? Request a correction.',
           // Registered frontend path (Issue 6: roleless routes 404'd in-app).
           route: '/student/attendance',
           data: { type: 'system_default_marked', mealId, date: dateStr },

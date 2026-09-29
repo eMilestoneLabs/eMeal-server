@@ -56,7 +56,7 @@ export interface MealWindowRef {
 
 function windowRequired(w: MealWindowRef): UnprocessableEntityException {
   return new UnprocessableEntityException({
-    message: `"${w.label}" needs an attendance window — set both an opening and a closing time before saving.`,
+    message: `"${w.label}" needs an opening and closing time.`,
     code: 'MEAL_WINDOW_REQUIRED',
     errors: {
       meal: w.label,
@@ -67,12 +67,12 @@ function windowRequired(w: MealWindowRef): UnprocessableEntityException {
 
 function windowNotSameDay(w: MealWindowRef): UnprocessableEntityException {
   return new UnprocessableEntityException({
-    message: `"${w.label}" must open and close on the same day — the closing time has to be later than the opening time.`,
+    message: `"${w.label}" must close after it opens, on the same day.`,
     code: 'MEAL_WINDOW_INVALID',
     errors: {
       meal: w.label,
       attendanceWindow:
-        'Closing time must be after opening time — overnight windows are not supported',
+        'Closing time must be after opening time',
     },
   });
 }

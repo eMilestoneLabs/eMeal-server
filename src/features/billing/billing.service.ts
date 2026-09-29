@@ -149,7 +149,7 @@ export class BillingService {
         errors: {
           periodStart: `Overlaps period ${overlap.periodStart
             .toISOString()
-            .slice(0, 10)} – ${overlap.periodEnd.toISOString().slice(0, 10)}`,
+            .slice(0, 10)} - ${overlap.periodEnd.toISOString().slice(0, 10)}`,
         },
       });
     }
@@ -419,7 +419,7 @@ export class BillingService {
         if (!acr) {
           throw new ForbiddenException({
             message:
-              'The referenced correction request is not an approved request of this member',
+              'This correction request isn\'t approved for this member',
             code: 'CONSENT_REQUIRED',
             errors: { refRequestId: 'Must be an APPROVED request of the same member' },
           });
@@ -438,7 +438,7 @@ export class BillingService {
     if (lock.locked) {
       throw new UnprocessableEntityException({
         message:
-          'This date lies in a finalized billing period — post the adjustment to an open date',
+          'This date is in a finalized period. Choose an open date.',
         code: 'PERIOD_FINALIZED',
         errors: { entryDate: `Period finalized through ${lock.periodEnd}` },
       });
@@ -556,7 +556,7 @@ export class BillingService {
           actorId: adminId,
           targetUserId: dto.userId,
           title: 'Charge approval requested',
-          body: `+₹${rupees} — ${dto.reason}. Review and approve or decline from your Billing screen.`,
+          body: `+₹${rupees} · ${dto.reason}. Review it in Billing.`,
           linkType: 'billingAdjustments',
         })
         .catch((err) =>
@@ -572,22 +572,22 @@ export class BillingService {
           return entryStatus === 'pending'
             ? {
                 title: 'Approval needed: proposed charge',
-                body: `+${rupees} — ${dto.reason}. Approve or decline in Billing.`,
+                body: `+${rupees} · ${dto.reason}. Review it in Billing.`,
               }
             : {
                 title: 'A charge was added to your bill',
-                body: `+${rupees} — ${dto.reason}`,
+                body: `+${rupees} · ${dto.reason}`,
               };
         case 'refund':
           // REF-001: a refund consumes credit (returns money to the member).
           return {
             title: 'A refund was issued to you',
-            body: `${rupees} returned — ${dto.reason}`,
+            body: `${rupees} returned · ${dto.reason}`,
           };
         default:
           return {
             title: 'A credit was applied to your bill',
-            body: `−${rupees} — ${dto.reason}`,
+            body: `−${rupees} · ${dto.reason}`,
           };
       }
     })();
@@ -686,7 +686,7 @@ export class BillingService {
         if (todayLock.locked) {
           throw new UnprocessableEntityException({
             message:
-              'This date lies in a finalized billing period — ask the admin to reopen it first',
+              'This date is in a finalized period. Ask your admin to reopen it.',
             code: 'PERIOD_FINALIZED',
             errors: { id: `Period finalized through ${todayLock.periodEnd}` },
           });

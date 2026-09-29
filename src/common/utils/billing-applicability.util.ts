@@ -61,7 +61,7 @@ export function assertBillingApplicable(
     code: 'BILLING_NOT_APPLICABLE',
     errors: {
       groupId:
-        'Meal billing applies only to groups with the meal system and Meal Pricing enabled',
+        'Billing needs meals and Meal Pricing turned on',
       ...(groupId ? { value: groupId } : {}),
     },
   });

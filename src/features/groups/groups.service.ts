@@ -133,7 +133,7 @@ export class GroupsService {
             message: 'Validation failed',
             errors: {
               enabledPreferences:
-                '"None" is a system option — it is always available to members automatically',
+                '"None" is added automatically',
             },
           });
         }
@@ -252,7 +252,7 @@ export class GroupsService {
     const currentGroups = await this.groupsRepo.countActiveGroups(organizationId);
     if (currentGroups >= maxGroups) {
       throw new ConflictException({
-        message: `Group limit reached (${maxGroups}). Archive or delete a group to create a new one.`,
+        message: `Limit of ${maxGroups} groups reached. Archive or delete one first.`,
         code: 'GROUP_LIMIT_REACHED',
         errors: { organization: `Maximum of ${maxGroups} groups allowed` },
       });
@@ -632,7 +632,7 @@ export class GroupsService {
           if (effMealsEnabled !== true) {
             throw new BadRequestException({
               message:
-                'Attendance-Only groups have no billing cycle. Enable the meal system first.',
+                'Attendance-Only groups have no billing cycle.',
               code: 'BILLING_CYCLE_NOT_APPLICABLE',
               errors: {
                 billingCycleStartDay:
@@ -657,7 +657,7 @@ export class GroupsService {
           if (effPricingForCycle !== true) {
             throw new BadRequestException({
               message:
-                'Meal Pricing is disabled for this group, so it has no billing cycle. Enable Meal Pricing first.',
+                'Turn on Meal Pricing to set a billing cycle.',
               code: 'BILLING_CYCLE_NOT_APPLICABLE',
               errors: {
                 billingCycleStartDay:
@@ -668,7 +668,7 @@ export class GroupsService {
           if ((existing as any).firstSchedulePublishedAt) {
             throw new BadRequestException({
               message:
-                'The billing cycle was finalized when this group published its first meal schedule and can no longer be changed.',
+                'The billing cycle is locked after the first publish.',
               code: 'BILLING_CYCLE_LOCKED',
               errors: {
                 billingCycleStartDay:
@@ -882,13 +882,13 @@ export class GroupsService {
       ) {
         throw new BadRequestException({
           message:
-            'Meal Pricing was finalized when this group published its first meal schedule and can no longer be changed.',
+            'Meal Pricing is locked after the first publish.',
           code: 'MEAL_PRICING_LOCKED',
           errors: {
             mealPricingEnabled:
               existing.mealPricingEnabled === true
-                ? 'This group is permanently a priced group. Create a new group if you need meals without pricing.'
-                : 'This group is permanently a non-priced group. Create a new group if you need meal pricing.',
+                ? 'This group is always priced. Create a new group for unpriced meals.'
+                : 'This group is always unpriced. Create a new group for pricing.',
           },
         });
       }
@@ -1113,7 +1113,7 @@ export class GroupsService {
       requestId,
     });
 
-    return { message: 'Group archived successfully', id };
+    return { message: 'Group archived', id };
   }
 
   // ── RESTORE (GRP-018) ──────────────────────────────────────────────────────
@@ -1152,7 +1152,7 @@ export class GroupsService {
       )
     ) {
       throw new ConflictException({
-        message: `A ${existing.type} group named "${existing.name}" already exists — rename that group first, then restore this one.`,
+        message: `A ${existing.type} group named "${existing.name}" already exists. Rename it first.`,
         code: 'GROUP_NAME_DUPLICATE',
         errors: { name: 'An active group with this name and type already exists' },
       });
@@ -1255,7 +1255,7 @@ export class GroupsService {
     if (Object.keys(blockers).length > 0) {
       throw new ConflictException({
         message:
-          'This group has unfinished workflows. Resolve them first, or archive the group — archived groups are automatically deleted after the retention period.',
+          'This group has pending items. Resolve them or archive the group.',
         code: 'GROUP_DELETE_BLOCKED',
         errors: blockers,
       });
@@ -1372,7 +1372,7 @@ export class GroupsService {
       // NTF-004: let admins know the group is at capacity.
       this.alertAdminsGroupFull(group.organizationId, userId, group.name);
       throw new ConflictException({
-        message: 'Group Full – Contact Administrator',
+        message: 'Group full. Contact your admin.',
         code: 'GROUP_FULL',
         errors: { joinCode: 'This group has reached its maximum capacity' },
       });
@@ -1598,7 +1598,7 @@ export class GroupsService {
     // MEM-008: capacity re-checked at approval time against active members.
     if (group.maxMembers !== null && group.memberCount >= group.maxMembers) {
       throw new ConflictException({
-        message: 'Group Full – Contact Administrator',
+        message: 'Group full. Contact your admin.',
         code: 'GROUP_FULL',
         errors: { memberId: 'This group has reached its maximum capacity' },
       });

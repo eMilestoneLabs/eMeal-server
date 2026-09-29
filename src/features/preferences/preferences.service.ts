@@ -733,7 +733,7 @@ export class PreferencesService {
         message: `"${NONE_OPTION_LABEL}" is a system option`,
         errors: {
           label:
-            'A "None" choice is added automatically to every group — options cannot take that name',
+            '"None" is reserved. Choose another name.',
         },
       });
     }
@@ -741,7 +741,7 @@ export class PreferencesService {
     // is locked ON — change the group's policy to change the options.
     if (dto.isVeg === false && option.group.vegOnly === true) {
       throw new UnprocessableEntityException({
-        message: 'This group is Veg-Only — every option stays veg',
+        message: 'This group is Veg-Only',
         errors: {
           isVeg: 'Turn off Veg-Only on the group to allow non-veg options',
         },
@@ -1021,7 +1021,7 @@ export class PreferencesService {
           message: `"${NONE_OPTION_LABEL}" is a system option`,
           errors: {
             options:
-              'A "None" choice is added automatically to every group — you do not need to create it',
+              '"None" is added automatically',
           },
         });
       }

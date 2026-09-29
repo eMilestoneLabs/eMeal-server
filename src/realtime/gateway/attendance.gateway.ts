@@ -164,7 +164,7 @@ export class AttendanceGateway
           `count=${entry.count}/${WS_RATE_LIMIT_MAX}`,
       );
       client.emit('error', {
-        message: 'Rate limit exceeded — slow down',
+        message: 'Too many requests. Please wait.',
         code: 'WS_RATE_LIMIT',
       });
       return false;

@@ -858,7 +858,7 @@ export class AttendanceRepository {
       records: records.map((r) => ({
         userId: r.userId,
         mealId: r.mealId,
-        mealName: r.meal?.displayName ?? r.meal?.name ?? '—',
+        mealName: r.meal?.displayName ?? r.meal?.name ?? '-',
         slotKey: (r.meal as any)?.slotKey ?? 'general',
         status: r.status as string,
         price: r.price ?? null,
