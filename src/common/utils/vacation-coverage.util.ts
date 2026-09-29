@@ -32,7 +32,7 @@ export interface VacationRangeLite {
   endSlotKey: string | null;
 }
 
-function hhmmToMinutes(t: string | null | undefined): number | null {
+export function hhmmToMinutes(t: string | null | undefined): number | null {
   if (!t || !/^\d{1,2}:\d{2}$/.test(t)) return null;
   const [h, m] = t.split(':').map(Number);
   return h * 60 + m;
@@ -95,6 +95,53 @@ export function requestCoversMeal(
     if (bound !== null && mealOpenMinutes > bound) return false; // after vacation ends
   }
   return true;
+}
+
+/** A meal as the today-guard needs it (master window — see below). */
+export interface TakenMealLite {
+  id: string;
+  groupId: string;
+  slotKey: string;
+  name: string;
+  attendanceWindowOpen: string | null;
+}
+
+/**
+ * Live-Test-16 ISSUE-2: vacation must never cover a meal the member has
+ * ALREADY taken today (a present/absent/skipped record exists). Returns the
+ * first already-taken meal the requested range would cover, or null.
+ *
+ * PURE — reuses `requestCoversMeal` (the single coverage rule) so the guard
+ * can never disagree with how coverage is evaluated everywhere else. Ranking
+ * uses MASTER open times, which is the same documented fallback the coverage
+ * util applies when a published day cannot be resolved; the client filters
+ * on the exact published windows first, so this is the secondary check.
+ */
+export function findCoveredTakenMeal(
+  req: VacationRangeLite,
+  dateUtc: Date,
+  taken: TakenMealLite[],
+  groupMeals: TakenMealLite[],
+): TakenMealLite | null {
+  for (const m of taken) {
+    const slotOpen = (slotKey: string): number | null =>
+      hhmmToMinutes(
+        groupMeals.find((g) => g.groupId === m.groupId && g.slotKey === slotKey)
+          ?.attendanceWindowOpen,
+      );
+    if (
+      requestCoversMeal(
+        req,
+        dateUtc,
+        hhmmToMinutes(m.attendanceWindowOpen),
+        slotOpen,
+        m.slotKey,
+      )
+    ) {
+      return m;
+    }
+  }
+  return null;
 }
 
 /**

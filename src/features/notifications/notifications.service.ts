@@ -243,6 +243,11 @@ export class NotificationsService {
     noticeId: string;
     title: string;
     priority: string;
+    /**
+     * Live-Test-16 ISSUE-13: the notice author — excluded from the push.
+     * Optional so every existing caller keeps its exact recipient set.
+     */
+    excludeUserId?: string;
   }): Promise<void> {
     try {
       let recipients: Array<{ userId: string; fcmToken: string }>;
@@ -251,6 +256,9 @@ export class NotificationsService {
           where: {
             groupId: params.groupId,
             status: 'active',
+            ...(params.excludeUserId
+              ? { userId: { not: params.excludeUserId } }
+              : {}),
             user: { remindersEnabled: true, fcmToken: { not: null } },
           },
           select: { userId: true, user: { select: { fcmToken: true } } },
@@ -264,6 +272,7 @@ export class NotificationsService {
             organizationId: params.organizationId,
             remindersEnabled: true,
             fcmToken: { not: null },
+            ...(params.excludeUserId ? { id: { not: params.excludeUserId } } : {}),
           },
           select: { id: true, fcmToken: true },
         });

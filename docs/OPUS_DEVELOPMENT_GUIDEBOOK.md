@@ -69,6 +69,7 @@ Deliver features *inside* the existing speed architecture, never around it.
 | `meal_config_meals:{org}:{group}` | Meal Config loads + mutations; group-detail Meals tab; CacheWarmer | Meal Config, group-detail Meals tab, planner bootstrap |
 | `group_members:{org}:{group}` | member directory load + member mutations | directory, CacheWarmer |
 | `admin_attendance:{org}:{group}:{y}-{m}-{d}` | attendance load | attendance tab |
+| `admin_attendance_guests:{org}:{group}:{y}-{m}-{d}` | attendance load (guest list; `priceSnapshot` stripped before write) | attendance tab guest section + Total Meals (LT-16 ISSUE-9) |
 | dashboards / menu / profile / attendance-history keys | their providers | same |
 
 **Rules:** one key per dataset (the `meal_config_groups` duplicate was a bug —

@@ -848,6 +848,19 @@ export class BillingService {
     );
   }
 
+  /**
+   * Live-Test-16 ISSUE-16: member self-read of their own ledger entries —
+   * the admin list with the subject FORCED to the caller (never trusts a
+   * client-supplied userId). Same query, same response shape.
+   */
+  async listMyAdjustments(
+    organizationId: string,
+    userId: string,
+    query: QueryAdjustmentsDto,
+  ) {
+    return this.listAdjustments(organizationId, { ...query, userId });
+  }
+
   async listAdjustments(organizationId: string, query: QueryAdjustmentsDto) {
     const page = query.page ?? 1;
     const limit = Math.min(100, query.limit ?? 20);

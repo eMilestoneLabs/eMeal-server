@@ -10,6 +10,7 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
+import { INPUT_LIMITS } from '../../../config/input-limits.config';
 
 /**
  * Pass 12 (SRS FR-BILLX-030/031/033, LOOP-010, GAP-103) — append-only billing
@@ -40,11 +41,15 @@ export class CreateAdjustmentDto {
   @Max(10_000_000)
   amount: number;
 
-  /** Mandatory human explanation (LOOP-010) — trimmed before validation. */
+  /**
+   * Mandatory human explanation (LOOP-010) — trimmed before validation.
+   * Live-Test-16 ISSUE-1: capped at the user-locked audit-trail length
+   * (default 30). Existing longer rows are untouched — this gates new input.
+   */
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
   @IsNotEmpty()
-  @MaxLength(300)
+  @MaxLength(INPUT_LIMITS.adjustmentReasonMaxLength)
   reason: string;
 
   /** Business date the entry posts to (YYYY-MM-DD). Default: today (org tz). */

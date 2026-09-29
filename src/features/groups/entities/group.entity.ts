@@ -61,6 +61,9 @@ export class GroupEntity {
   // Live-Test-16 ISSUE-1: instant of the group's FIRST successful schedule
   // publication. When set, the Meal-Pricing ON/OFF mode is permanently locked.
   firstSchedulePublishedAt?: Date | null;
+  // Live-Test-16 ISSUE-14: frozen retention boundary (already on every group
+  // row read) — only used to derive `dataAvailableFrom`; never serialized raw.
+  retentionPurgeThrough?: Date | null;
   // Additive: ₹ pricing toggle
   mealPricingEnabled: boolean;
   // SRS Module 03 (survey Q17/Q22): Bill-Skip policy (default OFF).

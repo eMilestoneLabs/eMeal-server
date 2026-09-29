@@ -247,8 +247,14 @@ export class NoticesRepository {
       );
     }
 
+    // Live-Test-16 ISSUE-13: the author's OWN notice is never "unread" for
+    // them (pure, no NoticeRead row written — admins' "N read" is unchanged).
     const data = rows.map((r: any) =>
-      this.toEntity(r, readSet.has(r.id), countByNotice.get(r.id) ?? 0),
+      this.toEntity(
+        r,
+        readSet.has(r.id) || r.createdBy === forUserId,
+        countByNotice.get(r.id) ?? 0,
+      ),
     );
     return { data, total };
   }
@@ -279,6 +285,9 @@ export class NoticesRepository {
       where: {
         ...where,
         reads: { none: { userId: forUserId } },
+        // Live-Test-16 ISSUE-13: never count the viewer's OWN notice as
+        // unread. `createdBy` is NOT NULL (schema), so `not` drops no row.
+        createdBy: { not: forUserId },
       },
     });
   }

@@ -67,7 +67,7 @@ export class MailerService {
     const t = this.getTransport();
     if (!t) return false;
     try {
-      await t.sendMail({
+      const info = await t.sendMail({
         from: this.from,                          // header From (e.g. no-reply@) — shown to users
         sender: this.authUser,                    // authenticated mailbox
         envelope: { from: this.authUser, to },    // Return-Path = authenticated mailbox (alias-safe)
@@ -77,13 +77,28 @@ export class MailerService {
         text,
         html: html ?? text,
       });
+      // Live-Test-16 ISSUE-3: log ACCEPTANCE too (failures were the only trace
+      // before), so any "email never arrived" report can be matched to the
+      // provider's message id. Recipient is masked — no full PII in logs.
+      this.logger.log(
+        `email accepted to=${MailerService.maskEmail(to)} subject-kind="${subject.replace(/\d{4,}/g, '######')}" id=${info?.messageId ?? '-'}`,
+      );
       return true;
     } catch (err) {
+      // Security (guidebook §5 "no secrets in logs"): the subject carries the
+      // OTP code — mask it and the recipient exactly like the success line.
       this.logger.error(
-        `email send failed to=${to} subject="${subject}": ${(err as Error).message}`,
+        `email send failed to=${MailerService.maskEmail(to)} subject-kind="${subject.replace(/\d{4,}/g, '######')}": ${(err as Error).message}`,
       );
       return false;
     }
+  }
+
+  /** "member.one@example.com" → "me***@example.com" (log-safe). */
+  static maskEmail(email: string): string {
+    const at = email.indexOf('@');
+    if (at <= 0) return '***';
+    return `${email.slice(0, Math.min(2, at))}***${email.slice(at)}`;
   }
 
   /**

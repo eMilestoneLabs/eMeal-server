@@ -13,6 +13,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
+import { INPUT_LIMITS } from '../../../config/input-limits.config';
 
 /**
  * GroupType enum values — EXACTLY matching Flutter GroupType enum (M-05 fix).
@@ -50,7 +51,7 @@ export const VALID_FUNCTIONAL_ROLES = [
 
 /**
  * Module 22 (FR-HG-020/021) — per-group hosted-guest configuration.
- * Cross-field rules (perGuestPrice requires prices, etc.) are enforced in
+ * Cross-field rules (flatSurcharge requires a surcharge, etc.) are enforced in
  * GroupsService so partial PATCHes validate against the FINAL effective state.
  * Declared BEFORE MealConfigDto: the `guestConfig?: GuestConfigDto` property
  * emits design:type metadata at decoration time — a later declaration would
@@ -61,10 +62,11 @@ export class GuestConfigDto {
   @IsBoolean()
   guestAttendanceEnabled?: boolean;
 
+  // Live-Test-16 ISSUE-4: user-locked hard ceiling (default 5).
   @IsOptional()
   @IsInt()
   @Min(0)
-  @Max(50)
+  @Max(INPUT_LIMITS.guestMaxPerMeal)
   maxGuestsPerMemberPerMeal?: number;
 
   @IsOptional()
@@ -73,8 +75,11 @@ export class GuestConfigDto {
   @Max(100)
   maxGuestsPerMemberPerDay?: number;
 
+  // Live-Test-16 ISSUE-4: the per-guest adult/child mode is retired — only
+  // "same as member" and "member + surcharge" can be configured. A legacy
+  // stored 'perGuestPrice' is READ as 'sameAsMember' (serializer + pricing).
   @IsOptional()
-  @IsIn(['sameAsMember', 'flatSurcharge', 'perGuestPrice'])
+  @IsIn(['sameAsMember', 'flatSurcharge'])
   guestPricingMode?: string;
 
   @IsOptional()

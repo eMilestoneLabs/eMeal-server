@@ -28,6 +28,7 @@ import {
 } from '../../common/utils/system-none.util';
 import { MembersRepository } from '../groups/repositories/members.repository';
 import { ADMIN_ROLES } from '../../common/decorators/roles.decorator';
+import { INPUT_LIMITS } from '../../config/input-limits.config';
 import {
   toUtcMidnight,
   getCurrentTimeInTimezone,
@@ -304,9 +305,11 @@ export class GuestsService {
     // above) carries THIS group's override, so only the user-level fallback
     // still needs reading — the same single point-read this always made. No
     // query is added to the booking path.
+    // Live-Test-16 ISSUE-7: `name` rides this SAME point-read (zero extra
+    // queries) so the admin request alert can say WHO asked.
     const hostUser = await this.prisma.user.findUnique({
       where: { id: hostUserId },
-      select: { isVacationMode: true },
+      select: { isVacationMode: true, name: true },
     });
     const onVacation = await getVacationCoveredUserIds(this.prisma as any, {
       organizationId,
@@ -458,7 +461,12 @@ export class GuestsService {
     const pendingApproval =
       adminOnBehalf || (!adminSelf && group.guestRequiresApproval === true);
 
-    const capPerMeal = group.maxGuestsPerMemberPerMeal ?? 5;
+    // Live-Test-16 ISSUE-4: a group stored above the new hard ceiling is
+    // capped at it for every NEW booking (existing bookings are untouched).
+    const capPerMeal = Math.min(
+      group.maxGuestsPerMemberPerMeal ?? INPUT_LIMITS.guestMaxPerMeal,
+      INPUT_LIMITS.guestMaxPerMeal,
+    );
     const capPerDay = group.maxGuestsPerMemberPerDay ?? null;
 
     // ── Atomic booking (FR-HG-032/041/044) ───────────────────────────────────
@@ -581,12 +589,21 @@ export class GuestsService {
     // command_3: a member-requested guest booking that needs admin approval
     // surfaces in the admin bell (Notification Center), deep-linked to review.
     if (pendingApproval && !adminOnBehalf && this.notices) {
+      // Live-Test-16 ISSUE-7: the alert collapses repeat requests into one
+      // card (NOTICE_REQUEST_ALERT_COLLAPSE_HOURS), so its body states the
+      // member's TOTAL booked guests for this meal/date — `created` is that
+      // exact set, returned by the booking transaction itself.
       void this.notices.createRequestAlert({
         organizationId,
         groupId: group.id,
         actorId: hostUserId,
         title: 'New guest meal request',
-        body: `A member requested ${dto.guests.length} guest(s) for ${meal.name}. Tap to review.`,
+        body: GuestsService.guestRequestAlertBody(
+          hostUser?.name ?? null,
+          created.length,
+          meal.name,
+          dateStr,
+        ),
         priority: 'high',
         linkType: 'guestRequests',
       });
@@ -1455,6 +1472,22 @@ export class GuestsService {
     };
   }
 
+  /**
+   * Live-Test-16 ISSUE-7: admin alert text for a member guest request —
+   * names the member and the real guest count (correct singular/plural).
+   * Pure; falls back to "A member" when the name is unavailable.
+   */
+  static guestRequestAlertBody(
+    hostName: string | null,
+    totalGuests: number,
+    mealName: string,
+    dateStr: string,
+  ): string {
+    const who = hostName?.trim() ? hostName.trim() : 'A member';
+    const noun = totalGuests === 1 ? 'guest' : 'guests';
+    return `${who} requested ${totalGuests} ${noun} for ${mealName} on ${dateStr}. Tap to review.`;
+  }
+
   private assertBeforeCutoff(
     group: { guestCutoffMinutesBeforeClose: number | null; attendanceGraceMinutes: number | null },
     closeTime: string | null,
@@ -1540,12 +1573,10 @@ export class GuestsService {
     isAdult: boolean,
   ): number | null {
     if (!group.mealPricingEnabled) return null; // headcount only
+    // Live-Test-16 ISSUE-4: the per-guest adult/child mode is retired — every
+    // guest is priced identically; a legacy stored 'perGuestPrice' falls
+    // through to sameAsMember below. `isAdult` stays a headcount attribute.
     const mode = group.guestPricingMode ?? 'sameAsMember';
-    if (mode === 'perGuestPrice') {
-      return isAdult
-        ? (group.guestAdultPrice ?? effectiveMealPrice)
-        : (group.guestChildPrice ?? group.guestAdultPrice ?? effectiveMealPrice);
-    }
     if (mode === 'flatSurcharge') {
       const base = effectiveMealPrice ?? 0;
       // SRS Module 03 GST-011: the surcharge is a Fixed ₹ amount (default) OR

@@ -1,4 +1,6 @@
 import { GroupEntity } from '../entities/group.entity';
+import { INPUT_LIMITS } from '../../../config/input-limits.config';
+import { retainedDataFrom } from '../../../common/utils/retention-floor.util';
 
 /**
  * GroupSerializer — converts domain entity to exact Flutter JSON contract.
@@ -43,9 +45,18 @@ export class GroupSerializer {
   static guestConfig(group: Partial<GroupEntity>): Record<string, unknown> {
     return {
       guestAttendanceEnabled: group.guestAttendanceEnabled ?? false,
-      maxGuestsPerMemberPerMeal: group.maxGuestsPerMemberPerMeal ?? 5,
+      // Live-Test-16 ISSUE-4: never publish a cap above the hard ceiling —
+      // the booking path enforces the same min(stored, ceiling).
+      maxGuestsPerMemberPerMeal: Math.min(
+        group.maxGuestsPerMemberPerMeal ?? INPUT_LIMITS.guestMaxPerMeal,
+        INPUT_LIMITS.guestMaxPerMeal,
+      ),
       maxGuestsPerMemberPerDay: group.maxGuestsPerMemberPerDay ?? null,
-      guestPricingMode: group.guestPricingMode ?? 'sameAsMember',
+      // Retired adult/child mode reads as sameAsMember (identical pricing).
+      guestPricingMode:
+        group.guestPricingMode === 'flatSurcharge'
+          ? 'flatSurcharge'
+          : 'sameAsMember',
       guestAdultPrice: group.guestAdultPrice ?? null,
       guestChildPrice: group.guestChildPrice ?? null,
       guestSurcharge: group.guestSurcharge ?? null,
@@ -103,6 +114,10 @@ export class GroupSerializer {
         : null,
       // GRP-016: archive marker for the lifecycle UI.
       archivedAt: group.archivedAt ? group.archivedAt.toISOString() : null,
+      // Live-Test-16 ISSUE-14: earliest date the group's history can still
+      // contain (retention window start, YYYY-MM-DD; null = not initialized).
+      // Additive, derived from columns already on the row — zero queries.
+      dataAvailableFrom: retainedDataFrom(group),
 
       // Additive (#8): requester's per-group functional role (null = use global).
       functionalRole: group.functionalRole ?? null,

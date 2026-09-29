@@ -474,6 +474,9 @@ export class NoticesService {
       noticeId: notice.id,
       title: notice.title,
       priority: notice.priority,
+      // Live-Test-16 ISSUE-13: the author never receives a push for their
+      // own notice (every other in-scope recipient is unchanged).
+      excludeUserId: adminId,
     });
 
     return NoticeSerializer.toResponse(notice);

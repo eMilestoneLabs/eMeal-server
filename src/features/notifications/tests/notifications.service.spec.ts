@@ -284,6 +284,54 @@ describe('NotificationsService', () => {
     );
   });
 
+  // Live-Test-16 ISSUE-13: the notice author never receives their own push.
+  it('notifyNoticePublished excludes the author from an org-wide push', async () => {
+    mockPrisma.user.findMany.mockResolvedValueOnce([{ id: 'user-2', fcmToken: 'tok-2' }]);
+    await service.notifyNoticePublished({
+      organizationId: 'org-1',
+      groupId: null,
+      noticeId: 'notice-9',
+      title: 'Hello',
+      priority: 'normal',
+      excludeUserId: 'admin-1',
+    });
+    expect(mockPrisma.user.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ organizationId: 'org-1', id: { not: 'admin-1' } }),
+      }),
+    );
+  });
+
+  it('notifyNoticePublished excludes the author from a group push', async () => {
+    mockPrisma.groupMember.findMany.mockResolvedValueOnce([]);
+    await service.notifyNoticePublished({
+      organizationId: 'org-1',
+      groupId: 'group-1',
+      noticeId: 'notice-10',
+      title: 'Hello',
+      priority: 'normal',
+      excludeUserId: 'admin-1',
+    });
+    expect(mockPrisma.groupMember.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ groupId: 'group-1', userId: { not: 'admin-1' } }),
+      }),
+    );
+  });
+
+  it('notifyNoticePublished without excludeUserId keeps the original recipient filter', async () => {
+    mockPrisma.user.findMany.mockResolvedValueOnce([]);
+    await service.notifyNoticePublished({
+      organizationId: 'org-1',
+      groupId: null,
+      noticeId: 'notice-11',
+      title: 'Hello',
+      priority: 'normal',
+    });
+    const where = mockPrisma.user.findMany.mock.calls.at(-1)[0].where;
+    expect(where).not.toHaveProperty('id');
+  });
+
   // ── Group-scoped vacation on the schedule-published push ────────────────
   //
   // Vacation is per group (`member ?? user`). The SQL filter deliberately does

@@ -370,4 +370,14 @@ describe('BillingService adjustments (Pass 12)', () => {
       toDate: '2027-05-30',
     });
   });
+
+  // Live-Test-16 ISSUE-16: member self-read for itemised export adjustments.
+  it('listMyAdjustments ALWAYS scopes to the caller, ignoring a client userId', async () => {
+    await service.listMyAdjustments('org1', 'u-self', {
+      groupId: 'g1',
+      userId: 'u-victim',
+    } as any);
+    const where = prisma.billingLedgerEntry.findMany.mock.calls.at(-1)[0].where;
+    expect(where).toMatchObject({ organizationId: 'org1', groupId: 'g1', userId: 'u-self' });
+  });
 });

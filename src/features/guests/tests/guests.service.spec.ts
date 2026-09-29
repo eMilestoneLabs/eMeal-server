@@ -170,7 +170,10 @@ describe('GuestsService (Module 22)', () => {
     );
   });
 
-  it('prices adult/child via perGuestPrice mode (FR-HG-051)', async () => {
+  // Live-Test-16 ISSUE-4: adult/child pricing is retired. A group still
+  // STORED with 'perGuestPrice' prices every guest at the member price —
+  // adult and child identically (isAdult stays a headcount attribute only).
+  it('retired perGuestPrice mode prices adult AND child at the member price', async () => {
     prisma.meal.findFirst.mockResolvedValue({
       ...baseMeal,
       group: {
@@ -182,8 +185,85 @@ describe('GuestsService (Module 22)', () => {
     });
     await book([{ isAdult: true }, { isAdult: false }]);
     const rows = tx.mealGuest.createMany.mock.calls[0][0].data;
-    expect(rows[0].priceSnapshot).toBe(80);
-    expect(rows[1].priceSnapshot).toBe(40);
+    expect(rows[0].priceSnapshot).toBe(baseMeal.price);
+    expect(rows[1].priceSnapshot).toBe(baseMeal.price);
+    expect(rows[1].isAdult).toBe(false); // headcount attribute preserved
+  });
+
+  it('flatSurcharge still prices member price + surcharge (unchanged)', async () => {
+    prisma.meal.findFirst.mockResolvedValue({
+      ...baseMeal,
+      group: { ...baseGroup, guestPricingMode: 'flatSurcharge', guestSurcharge: 15 },
+    });
+    await book([{ isAdult: true }, { isAdult: false }]);
+    const rows = tx.mealGuest.createMany.mock.calls[0][0].data;
+    expect(rows[0].priceSnapshot).toBe(baseMeal.price + 15);
+    expect(rows[1].priceSnapshot).toBe(baseMeal.price + 15);
+  });
+
+  // Live-Test-16 ISSUE-4: a group stored ABOVE the hard ceiling (5) is capped
+  // at 5 for every new booking.
+  it('caps a stored maxGuestsPerMemberPerMeal of 10 at the hard ceiling of 5', async () => {
+    prisma.meal.findFirst.mockResolvedValue({
+      ...baseMeal,
+      group: { ...baseGroup, maxGuestsPerMemberPerMeal: 10 },
+    });
+    tx.mealGuest.count.mockResolvedValue(4); // 4 already booked
+    await expect(book([{ isAdult: true }, { isAdult: true }])).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'GUEST_LIMIT_REACHED' }),
+    });
+    expect(tx.mealGuest.createMany).not.toHaveBeenCalled();
+  });
+
+  // Live-Test-16 ISSUE-7: the admin alert names the member and states the
+  // member's TOTAL booked guests for the meal/date (collapsed card).
+  describe('guest request alert text (ISSUE-7)', () => {
+    it('names the member and uses correct singular/plural', () => {
+      expect(GuestsService.guestRequestAlertBody('Manas', 3, 'Lunch', '2026-09-27'))
+        .toBe('Manas requested 3 guests for Lunch on 2026-09-27. Tap to review.');
+      expect(GuestsService.guestRequestAlertBody('Manas', 1, 'Lunch', '2026-09-27'))
+        .toBe('Manas requested 1 guest for Lunch on 2026-09-27. Tap to review.');
+    });
+
+    it('falls back to "A member" when the name is missing or blank', () => {
+      expect(GuestsService.guestRequestAlertBody(null, 2, 'Dinner', '2026-09-27'))
+        .toBe('A member requested 2 guests for Dinner on 2026-09-27. Tap to review.');
+      expect(GuestsService.guestRequestAlertBody('  ', 2, 'Dinner', '2026-09-27'))
+        .toBe('A member requested 2 guests for Dinner on 2026-09-27. Tap to review.');
+    });
+
+    it('a second request reports the TOTAL booked for the meal/date, not just this submission', async () => {
+      const createRequestAlert = jest.fn().mockResolvedValue(undefined);
+      (service as any).notices = { createRequestAlert };
+      prisma.meal.findFirst.mockResolvedValue({
+        ...baseMeal,
+        group: { ...baseGroup, guestRequiresApproval: true },
+      });
+      prisma.user.findUnique.mockResolvedValue({ isVacationMode: false, name: 'Manas' });
+      // After this 1-guest submission the member has 3 booked for the meal.
+      const row = (id: string) => ({
+        id,
+        organizationId: 'org_01',
+        groupId: 'grp_01',
+        mealId: 'meal_01',
+        hostUserId: 'usr_host',
+        attendanceDate: new Date(`${todayStr}T00:00:00.000Z`),
+        isAdult: true,
+        status: 'booked',
+        pendingApproval: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      tx.mealGuest.findMany.mockResolvedValue([row('g1'), row('g2'), row('g3')]);
+
+      await book([{ isAdult: true }]);
+
+      expect(createRequestAlert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: `Manas requested 3 guests for Lunch on ${todayStr}. Tap to review.`,
+        }),
+      );
+    });
   });
 
   it('rejects over-cap bookings with GUEST_LIMIT_REACHED (FR-HG-032/041)', async () => {

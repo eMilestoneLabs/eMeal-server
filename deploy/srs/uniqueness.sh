@@ -177,7 +177,8 @@ else
     if [ -n "$_U_ID" ]; then
       _IKEY="srs-uni-$(date +%s%N)"
       _ADJ_BODY="$(jq -nc --arg g "$_G_ID" --arg u "$_U_ID" \
-        '{groupId:$g,userId:$u,type:"credit",amount:1,reason:"SRS validator idempotency probe (1 paise)"}')"
+        '{groupId:$g,userId:$u,type:"credit",amount:1,reason:"SRS idempotency probe (1p)"}')"
+      # Live-Test-16 ISSUE-1: reason kept within the 30-char audit-trail cap.
       # Exactly TWO keyed calls: the first creates the (labelled, 1-paise)
       # entry, the second MUST replay the same entry id — never a duplicate.
       _kpost(){ curl -s -o "$RESULTS_DIR/.body" -w '%{http_code}' -X POST \

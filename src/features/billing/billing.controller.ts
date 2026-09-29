@@ -133,6 +133,22 @@ export class BillingController {
 export class BillingMemberController {
   constructor(private readonly billingService: BillingService) {}
 
+  /**
+   * Live-Test-16 ISSUE-16: the signed-in member's OWN ledger entries for one
+   * group + range — itemised adjustments (with reason) for their export.
+   * Self-scoped: `userId` is ALWAYS the JWT subject (any client value is
+   * overridden), org from the JWT — a member can never read another's rows.
+   */
+  @Get('adjustments/mine')
+  async myAdjustments(
+    @CurrentUser() user: { sub: string; organizationId: string },
+    @Query() query: QueryAdjustmentsDto,
+  ) {
+    return this.billingService.listMyAdjustments(
+      user.organizationId!, user.sub, query,
+    );
+  }
+
   @Get('adjustments/my-pending')
   async myPendingAdjustments(
     @CurrentUser() user: { sub: string; organizationId: string },

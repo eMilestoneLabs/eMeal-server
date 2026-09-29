@@ -2,6 +2,15 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { VacationRequestEntity } from '../entities/vacation-request.entity';
 
+/** Live-Test-16 ISSUE-2: meal fields the today-guard reads (master window). */
+type TakenMealRow = {
+  id: string;
+  groupId: string;
+  slotKey: string;
+  name: string;
+  attendanceWindowOpen: string | null;
+};
+
 /**
  * VacationRequestsRepository — Prisma access for VacationRequest. Strictly
  * org-scoped (organizationId always supplied by the service from the JWT).
@@ -101,6 +110,90 @@ export class VacationRequestsRepository {
       },
     });
     return raw ? this.toEntity(raw) : null;
+  }
+
+  /**
+   * Live-Test-16 ISSUE-19: a group-scoped request is only valid from an
+   * ACTIVE member of an ACTIVE group in the requester's OWN organization
+   * (tenant + group isolation). One indexed point read.
+   */
+  async hasActiveMembership(
+    userId: string,
+    organizationId: string,
+    groupId: string,
+  ): Promise<boolean> {
+    const m = await this.prisma.groupMember.findFirst({
+      where: {
+        groupId,
+        userId,
+        status: 'active',
+        group: { organizationId, isActive: true },
+      },
+      select: { id: true },
+    });
+    return !!m;
+  }
+
+  /**
+   * Live-Test-16 ISSUE-2: meals the member has ALREADY taken today
+   * (present/absent/skipped record) plus the meals needed to rank them for
+   * slot-boundary coverage. Group-scoped: both reads run in ONE parallel wave.
+   * Org-level (legacy, no group): the meal read is keyed by the taken meals'
+   * groups, so it only runs when something was actually taken. Org-filtered.
+   */
+  async findTodayTakenMeals(
+    userId: string,
+    organizationId: string,
+    groupId: string | null,
+    todayUtc: Date,
+  ): Promise<{
+    taken: TakenMealRow[];
+    groupMeals: TakenMealRow[];
+  }> {
+    const mealSelect = {
+      id: true,
+      groupId: true,
+      slotKey: true,
+      name: true,
+      attendanceWindowOpen: true,
+    } as const;
+    const recordsQ = this.prisma.attendanceRecord.findMany({
+      where: {
+        organizationId,
+        userId,
+        attendanceDate: todayUtc,
+        status: { in: ['present', 'absent', 'skipped'] },
+        ...(groupId ? { groupId } : {}),
+      },
+      select: { mealId: true, groupId: true },
+    });
+    let records: Array<{ mealId: string; groupId: string }>;
+    let meals: TakenMealRow[];
+    if (groupId) {
+      [records, meals] = await Promise.all([
+        recordsQ,
+        this.prisma.meal.findMany({
+          where: { organizationId, groupId },
+          select: mealSelect,
+        }) as Promise<TakenMealRow[]>,
+      ]);
+    } else {
+      records = await recordsQ;
+      meals = records.length
+        ? ((await this.prisma.meal.findMany({
+            where: {
+              organizationId,
+              groupId: { in: [...new Set(records.map((r) => r.groupId))] },
+            },
+            select: mealSelect,
+          })) as TakenMealRow[])
+        : [];
+    }
+    const takenIds = new Set(records.map((r) => r.mealId));
+    return {
+      taken: meals.filter((m) => takenIds.has(m.id)),
+      groupMeals: meals,
+    };
   }
 
   /** Org timezone for TZ-correct business-day math (FR-VACX-006). */

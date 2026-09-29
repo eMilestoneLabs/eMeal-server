@@ -24,6 +24,7 @@ import { ReviewVacationRequestDto } from './dto/review-vacation-request.dto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../redis/redis.service';
 import { resumeAutoAttendanceForUser } from '../../common/utils/auto-attendance-resume.util';
+import { findCoveredTakenMeal } from '../../common/utils/vacation-coverage.util';
 
 function parseDate(value: string): Date {
   // Accept YYYY-MM-DD (UTC midnight) or full ISO-8601.
@@ -163,13 +164,62 @@ export class VacationsService {
     }
 
     // FR-VACX-001: reject-on-overlap policy — one request governs a date.
-    const overlap = await this.repo.findOverlapping(
-      userId,
-      organizationId,
-      dto.groupId ?? null,
-      startDate,
-      endDate,
-    );
+    // Live-Test-16 ISSUE-19 / ISSUE-2: the membership gate and the
+    // already-taken-meal guard ride the SAME parallel wave as the overlap
+    // read — no added sequential round trip. Each runs only when needed.
+    const touchesToday = startDate.getTime() === todayUtc.getTime();
+    const [overlap, isMember, todayTaken] = await Promise.all([
+      this.repo.findOverlapping(
+        userId,
+        organizationId,
+        dto.groupId ?? null,
+        startDate,
+        endDate,
+      ),
+      dto.groupId
+        ? this.repo.hasActiveMembership(userId, organizationId, dto.groupId)
+        : Promise.resolve(true),
+      touchesToday
+        ? this.repo.findTodayTakenMeals(
+            userId,
+            organizationId,
+            dto.groupId ?? null,
+            todayUtc,
+          )
+        : Promise.resolve(null),
+    ]);
+    // ISSUE-19: a group-scoped request only from an active member of that
+    // (active, same-org) group — 403 precedes every business-rule 422.
+    if (!isMember) {
+      throw new ForbiddenException({
+        message: 'You are not an active member of this group',
+        code: 'GROUP_MEMBERSHIP_REQUIRED',
+        errors: { groupId: 'Not an active membership in your organization' },
+      });
+    }
+    // ISSUE-2: vacation never covers a meal already taken today — the
+    // member may only start from an UPCOMING meal. History is never touched.
+    if (todayTaken) {
+      const clash = findCoveredTakenMeal(
+        {
+          groupId: dto.groupId ?? null,
+          startDate,
+          endDate,
+          startSlotKey: dto.startSlotKey?.trim().toLowerCase() || null,
+          endSlotKey: dto.endSlotKey?.trim().toLowerCase() || null,
+        },
+        todayUtc,
+        todayTaken.taken,
+        todayTaken.groupMeals,
+      );
+      if (clash) {
+        throw new UnprocessableEntityException({
+          message: `${clash.name} is already marked today — vacation can only start from an upcoming meal`,
+          code: 'VACATION_MEAL_ALREADY_TAKEN',
+          errors: { startSlotKey: `${clash.name} today is already taken` },
+        });
+      }
+    }
     if (overlap) {
       throw new UnprocessableEntityException({
         message: 'An overlapping vacation request already exists',

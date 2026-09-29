@@ -532,17 +532,24 @@ else skip "SCH-012 recurrence removal" "no throwaway group"; fi
 # ═════════════════════════════════════════════════════════════════════════════
 sec "15. GST-011 — GUEST PRICING MODES 1 & 2 (mode 3 percent tested in §3)"
 if [ -n "${G_Q17:-}" ] && [ "$G_Q17" != "null" ]; then
-  # Mode 2 (Fixed Guest Price) requires the per-guest price to be set. Guest
-  # fields live under mealConfig.guestConfig (FR-HG-020).
+  # Live-Test-16 ISSUE-4 (user-locked): the adult/child "per-guest price"
+  # mode is RETIRED — only "same as member" and "member + surcharge" remain.
+  # The server must REJECT it (with or without prices) and never store it.
+  # Guest fields live under mealConfig.guestConfig (FR-HG-020).
   req PATCH "/groups/$G_Q17" "$(jq -nc '{mealConfig:{guestConfig:{guestAttendanceEnabled:true,guestPricingMode:"perGuestPrice"}}}')" "$ADMIN_TOKEN"
   { [ "$R_CODE" = "400" ] || [ "$R_CODE" = "422" ]; } \
-    && ok "GST-011 mode-2 without adult price rejected" "($R_CODE)" \
-    || no "GST-011 mode-2 price requirement" "$R_CODE"
+    && ok "GST-011 retired per-guest mode rejected" "($R_CODE)" \
+    || no "GST-011 retired per-guest mode still accepted" "$R_CODE"
   req PATCH "/groups/$G_Q17" "$(jq -nc '{mealConfig:{guestConfig:{guestAttendanceEnabled:true,guestPricingMode:"perGuestPrice",guestAdultPrice:50}}}')" "$ADMIN_TOKEN"
   req GET "/groups/$G_Q17" "" "$ADMIN_TOKEN"
   GM2="$(gfield guestPricingMode)"
-  [ "$GM2" = "perGuestPrice" ] && ok "GST-011 mode-2 (fixed guest price) round-trips" "mode=$GM2" \
-    || no "GST-011 mode-2 round-trip" "mode=$GM2"
+  [ "$GM2" != "perGuestPrice" ] && ok "GST-011 retired per-guest mode never stored" "mode=$GM2" \
+    || no "GST-011 retired per-guest mode was stored" "mode=$GM2"
+  # Live-Test-16 ISSUE-4: hard ceiling of 5 guests per meal.
+  req PATCH "/groups/$G_Q17" "$(jq -nc '{mealConfig:{guestConfig:{maxGuestsPerMemberPerMeal:6}}}')" "$ADMIN_TOKEN"
+  { [ "$R_CODE" = "400" ] || [ "$R_CODE" = "422" ]; } \
+    && ok "GST ceiling: 6 guests/meal rejected" "($R_CODE)" \
+    || no "GST ceiling: 6 guests/meal accepted" "$R_CODE"
   # Mode 1 (Same as Member Price) — canonical literal is 'sameAsMember'.
   M1=""
   for cand in sameAsMember memberPrice member; do

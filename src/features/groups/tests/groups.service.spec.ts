@@ -510,17 +510,18 @@ describe('GroupsService', () => {
       guestSurcharge: 20,
     } as any);
 
-    it('rejects CLEARING guestAdultPrice while mode stays perGuestPrice (422 GUEST_PRICE_REQUIRED)', async () => {
+    // Live-Test-16 ISSUE-4: the adult/child (perGuestPrice) mode is retired.
+    // A group still STORED with it must keep saving unrelated guest settings
+    // — the old "requires guestAdultPrice" 422 no longer applies.
+    it('a group stored with the retired perGuestPrice mode saves without GUEST_PRICE_REQUIRED', async () => {
       groupsRepo.findById.mockResolvedValue(guestGroup);
+      groupsRepo.update.mockResolvedValue(guestGroup);
 
-      await expect(
-        service.updateGroup('grp_01', 'org_01', 'usr_admin', {
-          mealConfig: { guestConfig: { guestAdultPrice: null } },
-        } as any),
-      ).rejects.toMatchObject({
-        response: expect.objectContaining({ code: 'GUEST_PRICE_REQUIRED' }),
-      });
-      expect(groupsRepo.update).not.toHaveBeenCalled();
+      await service.updateGroup('grp_01', 'org_01', 'usr_admin', {
+        mealConfig: { guestConfig: { guestAdultPrice: null } },
+      } as any);
+
+      expect(groupsRepo.update).toHaveBeenCalled();
     });
 
     it('rejects clearing guestSurcharge while mode is flatSurcharge (422 GUEST_SURCHARGE_REQUIRED)', async () => {

@@ -796,21 +796,13 @@ export class GroupsService {
           updateData.guestPricingMode !== undefined
             ? updateData.guestPricingMode
             : (existing as any).guestPricingMode;
-        const effAdult =
-          updateData.guestAdultPrice !== undefined
-            ? updateData.guestAdultPrice
-            : (existing as any).guestAdultPrice;
         const effSurcharge =
           updateData.guestSurcharge !== undefined
             ? updateData.guestSurcharge
             : (existing as any).guestSurcharge;
-        if (effMode === 'perGuestPrice' && (effAdult === null || effAdult === undefined)) {
-          throw new UnprocessableEntityException({
-            message: 'perGuestPrice mode requires guestAdultPrice',
-            code: 'GUEST_PRICE_REQUIRED',
-            errors: { guestAdultPrice: 'Set the adult guest price' },
-          });
-        }
+        // Live-Test-16 ISSUE-4: the retired perGuestPrice mode no longer has
+        // a required-price rule — a group still STORED with it is priced as
+        // sameAsMember, so its unrelated guest-setting saves must not 422.
         if (effMode === 'flatSurcharge' && (effSurcharge === null || effSurcharge === undefined)) {
           throw new UnprocessableEntityException({
             message: 'flatSurcharge mode requires guestSurcharge',
